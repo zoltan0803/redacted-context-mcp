@@ -131,7 +131,7 @@ The GitHub section is optional. If you enable it for a private repo, export the
 token in the shell that starts the agent or MCP server:
 
 ```sh
-export GITHUB_TOKEN=ghp_...
+export GITHUB_TOKEN="<github-token>"
 redctx --root /work/source-private github issues context --limit 10
 ```
 

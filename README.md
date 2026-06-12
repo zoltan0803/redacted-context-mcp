@@ -258,7 +258,7 @@ repos require the named token environment variable in the shell that starts
 Configured GitHub issues can be read through the same redaction layer:
 
 ```sh
-export GITHUB_TOKEN=ghp_...
+export GITHUB_TOKEN="<github-token>"
 redctx --root ../source-private github repos
 redctx --root ../source-private github issues context --state open --limit 20
 redctx --root ../source-private github issue context 123 --comments
@@ -356,12 +356,6 @@ development and release checks.
 PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'
 python3 -m py_compile src/redacted_context_mcp/core.py src/redacted_context_mcp/server.py
 ```
-
-## Publication Status
-
-This repository is currently prepared as a `0.1.0` release candidate. See
-`PUBLISHING.md` for the release checklist before publishing to PyPI or creating
-a GitHub release.
 
 ## License
 

@@ -46,8 +46,7 @@ project codename.
 
 ## Release Checks
 
-Use `PUBLISHING.md` for the full release checklist. At minimum, a release must
-pass:
+At minimum, a release must pass:
 
 ```sh
 python3 -m unittest discover -s tests -p 'test_*.py'
