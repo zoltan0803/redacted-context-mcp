@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "redacted-context-mcp"
+version = "0.1.0"
+description = "Read-only redacted local knowledgebase context over MCP for coding agents."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+  { name = "Zoltan Nagy" }
+]
+keywords = [
+  "mcp",
+  "claude-code",
+  "redaction",
+  "privacy",
+  "pii",
+  "filesystem",
+  "coding-agents",
+  "ollama"
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Security",
+  "Topic :: Software Development"
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2",
+  "twine>=5"
+]
+
+[project.urls]
+Homepage = "https://github.com/zoltannagy/redacted-context-mcp"
+Repository = "https://github.com/zoltannagy/redacted-context-mcp"
+Issues = "https://github.com/zoltannagy/redacted-context-mcp/issues"
+Changelog = "https://github.com/zoltannagy/redacted-context-mcp/blob/main/CHANGELOG.md"
+Security = "https://github.com/zoltannagy/redacted-context-mcp/blob/main/SECURITY.md"
+
+[project.scripts]
+redctx = "redacted_context_mcp.core:main"
+redctx-mcp = "redacted_context_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/redacted_context_mcp"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/examples",
+  "/.github/workflows/test.yml",
+  "/ARCHITECTURE.md",
+  "/CHANGELOG.md",
+  "/CONTRIBUTING.md",
+  "/LICENSE",
+  "/PUBLISHING.md",
+  "/README.md",
+  "/SECURITY.md",
+  "/SETUP.md",
+  "/pyproject.toml"
+]

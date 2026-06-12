@@ -1,0 +1,13 @@
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.DS_Store
+.agent-context-redactor.toml
+agent-workdir/work/*
+!agent-workdir/work/.gitkeep

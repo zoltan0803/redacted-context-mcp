@@ -1,0 +1,5 @@
+[mcp_servers.redacted_context]
+command = "redctx-mcp"
+args = ["--root", "../source-private"]
+enabled = true
+required = true

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "redacted_context": {
+      "type": "stdio",
+      "command": "python3",
+      "args": [
+        "../redacted-context-mcp/src/redacted_context_mcp/server.py",
+        "--root",
+        "../source-private"
+      ]
+    }
+  }
+}

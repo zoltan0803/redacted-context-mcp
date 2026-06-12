@@ -1,0 +1,6 @@
+[redaction]
+clients = ["Client Legal Name", "Client Acronym"]
+organizations = ["Supplier Name", "Partner Company"]
+people = ["Person One", "Person Two"]
+terms = ["project codename", "internal programme name"]
+allow = ["Azure", "PostgreSQL", "Kubernetes"]

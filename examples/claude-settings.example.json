@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(../source-private/**)",
+      "Grep(../source-private/**)",
+      "Glob(../source-private/**)",
+      "Bash(rg *)",
+      "Bash(grep *)",
+      "Bash(cat *)",
+      "Bash(sed *)",
+      "Bash(awk *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(less *)",
+      "Bash(more *)"
+    ],
+    "allow": [
+      "mcp__redacted_context__redctx_*"
+    ]
+  },
+  "disableBypassPermissionsMode": "disable"
+}

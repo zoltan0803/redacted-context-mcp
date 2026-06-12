@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "redacted_context": {
+      "type": "stdio",
+      "command": "redctx-mcp",
+      "args": [
+        "--root",
+        "../source-private"
+      ]
+    }
+  }
+}
