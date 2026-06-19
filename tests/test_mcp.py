@@ -24,8 +24,19 @@ class RedactedContextMcpTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         write_knowledgebase(self.root)
+        self.proc: subprocess.Popen[str] | None = None
+        self.start_server()
+
+    def start_server(self, *extra_args: str) -> None:
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "redacted_context_mcp.server", "--root", str(self.root)],
+            [
+                sys.executable,
+                "-m",
+                "redacted_context_mcp.server",
+                "--root",
+                str(self.root),
+                *extra_args,
+            ],
             text=True,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -36,6 +47,12 @@ class RedactedContextMcpTest(unittest.TestCase):
         self.next_id = 1
 
     def tearDown(self) -> None:
+        self.stop_server()
+        self.tmp.cleanup()
+
+    def stop_server(self) -> None:
+        if self.proc is None:
+            return
         if self.proc.stdin:
             self.proc.stdin.close()
         try:
@@ -51,9 +68,14 @@ class RedactedContextMcpTest(unittest.TestCase):
             self.proc.stdout.close()
         if self.proc.stderr:
             self.proc.stderr.close()
-        self.tmp.cleanup()
+        self.proc = None
+
+    def restart_server(self, *extra_args: str) -> None:
+        self.stop_server()
+        self.start_server(*extra_args)
 
     def rpc(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        assert self.proc is not None
         assert self.proc.stdin is not None
         assert self.proc.stdout is not None
         request_id = self.next_id
@@ -95,6 +117,7 @@ class RedactedContextMcpTest(unittest.TestCase):
         read_tool = next(tool for tool in tools if tool["name"] == "redctx_read")
         self.assertTrue(read_tool["annotations"]["readOnlyHint"])
         self.assertFalse(read_tool["inputSchema"]["additionalProperties"])
+        self.assertNotIn("redctx_submit_doc", names)
 
     def test_list_read_and_search_are_redacted(self) -> None:
         listing = self.call_tool("redctx_list", {"path": "context"})
@@ -178,6 +201,85 @@ class RedactedContextMcpTest(unittest.TestCase):
         self.assertRegex(text, r"\[CLIENT_[0-9a-f]{8}\]")
         for raw in RAW_PRIVATE_VALUES:
             self.assertNotIn(raw, text)
+
+    def test_submit_doc_is_available_only_when_writes_enabled(self) -> None:
+        result = self.call_tool(
+            "redctx_submit_doc",
+            {"target_path": "drafts/summary.md", "text": "hello"},
+        )
+
+        self.assertTrue(result["isError"])
+        self.assertIn("Writes are disabled", result["content"][0]["text"])
+
+        self.restart_server("--enable-writes", "--write-subdir", "incoming")
+        tools = self.rpc("tools/list")["result"]["tools"]
+        submit_tool = next(tool for tool in tools if tool["name"] == "redctx_submit_doc")
+        self.assertFalse(submit_tool["annotations"]["readOnlyHint"])
+        self.assertTrue(submit_tool["annotations"]["destructiveHint"])
+
+    def test_submit_doc_rehydrates_and_writes_under_configured_subdir(self) -> None:
+        self.restart_server("--enable-writes", "--write-subdir", "incoming")
+        listing = self.call_tool("redctx_list", {"path": "context"})["content"][0]["text"]
+        ref = listing.split()[0]
+        redacted = self.call_tool("redctx_read", {"path": ref})["content"][0]["text"]
+
+        result = self.call_tool(
+            "redctx_submit_doc",
+            {
+                "target_path": "drafts/summary.md",
+                "text": redacted,
+            },
+        )
+
+        self.assertFalse(result["isError"])
+        summary = result["content"][0]["text"]
+        self.assertIn("Wrote rehydrated document", summary)
+        self.assertIn("@p_", summary)
+        self.assertNotIn("Client Alpha", summary)
+
+        written_file = self.root / "incoming" / "drafts" / "summary.md"
+        self.assertTrue(written_file.exists())
+        written = written_file.read_text(encoding="utf-8")
+        self.assertIn("Client Alpha", written)
+        self.assertIn("Taylor Reed", written)
+        self.assertIn("Jordan Vale", written)
+        self.assertNotRegex(written, r"\[(?:CLIENT|PERSON|ORG)_[0-9a-f]{8}\]")
+
+    def test_submit_doc_rejects_unsafe_paths_unresolved_tokens_and_overwrite(self) -> None:
+        self.restart_server("--enable-writes", "--write-subdir", "incoming")
+        unsafe = self.call_tool(
+            "redctx_submit_doc",
+            {"target_path": "../escape.md", "text": "hello"},
+        )
+        self.assertTrue(unsafe["isError"])
+        self.assertIn("relative file path", unsafe["content"][0]["text"])
+        self.assertFalse((self.root / "escape.md").exists())
+
+        unresolved = self.call_tool(
+            "redctx_submit_doc",
+            {"target_path": "drafts/unresolved.md", "text": "Hello [PERSON_deadbeef]."},
+        )
+        self.assertTrue(unresolved["isError"])
+        self.assertIn("Unresolved redaction token", unresolved["content"][0]["text"])
+        self.assertFalse((self.root / "incoming" / "drafts" / "unresolved.md").exists())
+
+        existing = self.root / "incoming" / "drafts" / "existing.md"
+        existing.parent.mkdir(parents=True)
+        existing.write_text("old", encoding="utf-8")
+        conflict = self.call_tool(
+            "redctx_submit_doc",
+            {"target_path": "drafts/existing.md", "text": "new"},
+        )
+        self.assertTrue(conflict["isError"])
+        self.assertIn("Target already exists", conflict["content"][0]["text"])
+        self.assertEqual(existing.read_text(encoding="utf-8"), "old")
+
+        overwrite = self.call_tool(
+            "redctx_submit_doc",
+            {"target_path": "drafts/existing.md", "text": "new", "overwrite": True},
+        )
+        self.assertFalse(overwrite["isError"])
+        self.assertEqual(existing.read_text(encoding="utf-8"), "new")
 
 
 if __name__ == "__main__":

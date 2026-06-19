@@ -1,8 +1,10 @@
 # Architecture
 
-`redacted-context-mcp` exposes a private local knowledgebase through a narrow,
-read-only redaction layer. The project is intentionally small: it avoids runtime
-dependencies, stores no index, and keeps all sensitive configuration local.
+`redacted-context-mcp` exposes a private local knowledgebase through a narrow
+redaction layer. The default MCP surface is read-only; controlled writes are
+available only when the server is started with explicit write flags. The project
+is intentionally small: it avoids runtime dependencies, stores no index, and
+keeps all sensitive configuration local.
 
 ## Data Flow
 
@@ -17,11 +19,15 @@ agent workspace
 The agent should start from a neutral workspace that does not contain the raw
 private context files. The MCP server receives tool calls, resolves paths inside
 the configured root, reads allowed text files, redacts output, and returns only
-the redacted result.
+the redacted result. If controlled writes are enabled, generated redacted text
+can be rehydrated locally and written under a configured private-root
+subdirectory.
 
 ## Core Boundaries
 
-- The server is read-only. It does not edit, delete, or move source files.
+- The server is read-only by default.
+- Controlled MCP writes require `--enable-writes` and are constrained to
+  `--write-subdir`.
 - Path resolution is constrained to the configured root.
 - Known private/cache paths and binary-like files are excluded by default.
 - File navigation uses local-salted HMAC ids such as `@p_1a2b3c4d5e6f`.
@@ -42,6 +48,18 @@ the redacted result.
 - `filesystem.py`: read-only filesystem traversal and text-file detection.
 - `discovery.py`: local Ollama discovery workflow and post-processing.
 - `github.py`: read-only GitHub issue access through neutral aliases.
+
+## Controlled Write Path
+
+`redctx_submit_doc` is hidden unless the server starts with `--enable-writes`.
+When enabled, it accepts generated redacted text, rebuilds the local
+rehydration map from the private source root, rejects unresolved placeholders,
+and writes the restored document only under `--write-subdir`.
+
+The write tool does not accept arbitrary workspace file paths. It accepts text
+content directly and a relative target path. Overwrites require an explicit
+`overwrite` argument. Tool results return only redacted path metadata and opaque
+ids.
 
 ## Redaction Model
 
@@ -78,8 +96,8 @@ GitHub repositories are configured by neutral aliases under
 `[github.repos.<alias>]`. The alias is what the agent sees. Raw owner/repo names
 and author logins are not printed in tool output.
 
-The GitHub integration is also read-only and uses the token environment
-variable named in local config.
+The GitHub integration is read-only and uses the token environment variable
+named in local config.
 
 ## Security Posture
 

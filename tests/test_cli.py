@@ -80,6 +80,72 @@ class RedactedContextCliTest(unittest.TestCase):
         self.assertIn("excluded by policy", result.stderr)
         self.assertNotIn("Raw secret", result.stdout + result.stderr)
 
+    def test_rehydrate_requires_raw_output_acknowledgement(self) -> None:
+        redacted_file = self.root / "redacted-output.md"
+        redacted_file.write_text("[CLIENT_00000000]\n", encoding="utf-8")
+
+        result = self.run_cli("rehydrate", str(redacted_file))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("allow-raw-output", result.stderr)
+
+    def test_rehydrate_file_restores_redacted_text(self) -> None:
+        listing = self.run_cli("ls", "context").stdout
+        ref = listing.split()[0]
+        redacted = self.run_cli("cat", ref)
+        self.assertEqual(redacted.returncode, 0, redacted.stderr)
+        redacted_file = self.root / "redacted-output.md"
+        redacted_file.write_text(redacted.stdout, encoding="utf-8")
+
+        result = self.run_cli("rehydrate", str(redacted_file), "--allow-raw-output")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Client Alpha", result.stdout)
+        self.assertIn("Taylor Reed", result.stdout)
+        self.assertIn("Jordan Vale", result.stdout)
+        self.assertIn("Riverton Partners", result.stdout)
+        self.assertNotRegex(result.stdout, r"\[(?:CLIENT|PERSON|ORG)_[0-9a-f]{8}\]")
+
+    def test_rehydrate_folder_writes_output_tree(self) -> None:
+        listing = self.run_cli("ls", "context").stdout
+        ref = listing.split()[0]
+        redacted = self.run_cli("cat", ref)
+        self.assertEqual(redacted.returncode, 0, redacted.stderr)
+        redacted_dir = self.root / "redacted-folder"
+        redacted_dir.mkdir()
+        (redacted_dir / "note.md").write_text(redacted.stdout, encoding="utf-8")
+        output_dir = self.root / "rehydrated-folder"
+
+        result = self.run_cli(
+            "rehydrate",
+            str(redacted_dir),
+            "--output",
+            str(output_dir),
+            "--allow-raw-output",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Rehydrated 1 text file", result.stdout)
+        output = (output_dir / "note.md").read_text(encoding="utf-8")
+        self.assertIn("Client Alpha", output)
+        self.assertIn("Taylor Reed", output)
+
+    def test_rehydrate_folder_rejects_output_inside_input_folder(self) -> None:
+        redacted_dir = self.root / "redacted-folder"
+        redacted_dir.mkdir()
+        (redacted_dir / "note.md").write_text("[CLIENT_00000000]\n", encoding="utf-8")
+
+        result = self.run_cli(
+            "rehydrate",
+            str(redacted_dir),
+            "--output",
+            str(redacted_dir / "out"),
+            "--allow-raw-output",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must not be inside the input folder", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

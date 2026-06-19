@@ -99,13 +99,19 @@ cp examples/claude-settings.example.json /work/agent-workdir/.claude/settings.lo
 
 Adjust `source-private` paths if you chose a different folder name.
 
+For Claude Code, copy the example `CLAUDE.md`:
+
+```sh
+cp examples/agent-CLAUDE.md /work/agent-workdir/CLAUDE.md
+```
+
 For Codex, copy the example `AGENTS.md`:
 
 ```sh
 cp examples/agent-AGENTS.md /work/agent-workdir/AGENTS.md
 ```
 
-Restart Codex after adding or changing `AGENTS.md`.
+Restart Claude Code or Codex after adding or changing the guidance file.
 
 ## 5. Add Exact Redaction Terms
 

@@ -22,10 +22,14 @@ agent workspace
 
 - MCP stdio server with `redctx_*` tools.
 - Redacted MCP resources using `redctx://p_<id>` URIs.
+- Optional MCP `redctx_submit_doc` tool for controlled writes of generated
+  redacted documents back into a configured private-root subdirectory.
 - CLI fallback with the same redaction behavior.
 - Local-salted opaque stable path ids such as `@p_1a2b3c4d5e6f`.
 - Deterministic HMAC placeholders such as `[PERSON_1a2b3c4d]`.
 - Redacted `tree`, `list`, `read`, `search`, `stat`, and `bundle` operations.
+- CLI-only `rehydrate` command for restoring redacted exports locally from the
+  private source root.
 - Local ignored redaction config for exact client, person, organization, and
   project terms.
 - Optional local-LLM discovery command to draft that config from private files
@@ -155,6 +159,9 @@ claude
 If Claude Code was already running, restart it or reconnect MCP servers with
 `/mcp`.
 
+For persistent Claude Code guidance, copy `examples/agent-CLAUDE.md` into
+`agent-workdir/CLAUDE.md`.
+
 ## Codex MCP Config
 
 Codex supports local stdio MCP servers through `config.toml`. Put this in
@@ -218,6 +225,22 @@ The MCP server also exposes redacted text files as resources:
 - `resources/list` returns `redctx://p_<id>` resource URIs with redacted titles.
 - `resources/read` returns redacted file text for those opaque resource URIs.
 
+### Controlled MCP Writes
+
+By default, the MCP server exposes only read-only tools. To let an agent submit
+new redacted documents back into the private source root, start the server with
+an explicit write subdirectory:
+
+```sh
+redctx-mcp --root ../source-private --enable-writes --write-subdir incoming
+```
+
+This adds `redctx_submit_doc`. The tool accepts a relative `target_path`,
+redacted `text`, and optional `overwrite`. The server rehydrates known
+placeholders locally, rejects unresolved redaction tokens, and writes only under
+the configured write subdirectory. Tool responses use redacted paths and opaque
+ids; they do not return the raw restored path.
+
 ## CLI Fallback
 
 The CLI is useful for smoke tests or clients without MCP:
@@ -229,6 +252,24 @@ redctx --root ../source-private search "governance" context --ignore-case --cont
 redctx --root ../source-private read @p_1a2b3c4d5e6f --start-line 1 --end-line 80
 redctx --root ../source-private bundle context --glob "*.md" --max-files 10
 ```
+
+### Local Rehydration
+
+The `rehydrate` command restores redacted text by scanning the private source
+root with the same salt and config, rebuilding the placeholder map, and applying
+it to a redacted file or folder. This emits raw private text, so it is CLI-only
+and requires an explicit acknowledgement flag.
+
+```sh
+redctx --root ../source-private rehydrate ./redacted-output.md --allow-raw-output > raw-output.md
+redctx --root ../source-private rehydrate ./redacted-folder \
+  --output ./raw-folder \
+  --allow-raw-output
+```
+
+Rehydration is not cryptographic reversal. A redacted file alone is not enough;
+the command needs access to the original private root or equivalent local
+source material to rebuild the mapping.
 
 ## Local Redaction Config
 
@@ -353,6 +394,12 @@ It helps because:
 - the useful operations are exposed as redacted MCP tools;
 - filenames can be navigated through opaque ids;
 - raw names, emails, URLs, phones, and configured terms are redacted.
+
+The `rehydrate` command intentionally reverses redacted exports for the local
+operator. `redctx_submit_doc` can also rehydrate generated redacted text, but
+only when MCP writes are explicitly enabled and only into the configured write
+subdirectory. Do not run rehydration workflows from an agent workspace where the
+model can read raw output.
 
 It is not a hard security boundary if the agent process runs as the same OS
 user that can read the private source folder. For hard enforcement, run the

@@ -12,6 +12,10 @@
   such as `[PERSON_1a2b3c4d]`.
 - Expands generic redaction coverage for secrets, tokens, common personal
   identifiers, IP addresses, UUIDs, and domains.
+- Adds a CLI-only `redctx rehydrate` command for restoring redacted file or
+  folder exports locally from the private source root.
+- Adds opt-in MCP `redctx_submit_doc` controlled writes for rehydrating generated
+  redacted documents into a configured private-root subdirectory.
 - Fixes `redctx discover --format json`.
 - Handles UTF-8 BOMs in TOML config and text file reads.
 - Adds regression coverage for discovery JSON output, MCP resources, stricter

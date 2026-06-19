@@ -23,7 +23,7 @@ try:
     from . import __version__
     from . import core as rc
 except ImportError:  # pragma: no cover - direct script fallback
-    __version__ = "0.1.0"
+    __version__ = "0.2.0"
     package_root = Path(__file__).resolve().parents[1]
     if str(package_root) not in sys.path:
         sys.path.insert(0, str(package_root))
@@ -63,6 +63,8 @@ class RedactedContextMcp:
         config_path: Path | None,
         mode: str,
         include_private: bool,
+        enable_writes: bool = False,
+        write_subdir: str = "incoming",
     ) -> None:
         self.root = root.expanduser().resolve()
         if not self.root.exists() or not self.root.is_dir():
@@ -75,6 +77,8 @@ class RedactedContextMcp:
         self.redactor = rc.Redactor(config, mode=mode)
         self.config_path = config_path
         self.mode = mode
+        self.enable_writes = enable_writes
+        self.write_root = resolve_write_root(self.root, write_subdir)
 
     def initialize(self, params: dict[str, Any]) -> dict[str, Any]:
         requested = str(params.get("protocolVersion") or "")
@@ -96,11 +100,23 @@ class RedactedContextMcp:
                 "tools for confidential local context. Redacted files are also "
                 "available as redctx://p_<id> MCP resources. Results are redacted "
                 "and file tools use opaque @p_<id> path references."
+                + (
+                    " redctx_submit_doc is enabled for controlled writes into "
+                    "the configured private-root write subdirectory."
+                    if self.enable_writes
+                    else ""
+                )
             ),
         }
 
     def list_tools(self) -> dict[str, Any]:
-        return {"tools": [public_tool_definition(tool) for tool in TOOL_DEFINITIONS]}
+        return {
+            "tools": [
+                public_tool_definition(tool)
+                for tool in TOOL_DEFINITIONS
+                if self.enable_writes or tool.get("name") != "redctx_submit_doc"
+            ]
+        }
 
     def list_resources(self, params: dict[str, Any]) -> dict[str, Any]:
         offset = parse_cursor(params.get("cursor"))
@@ -197,6 +213,76 @@ class RedactedContextMcp:
             return self.ctx.resolve_id(ref_id)
         except SystemExit as exc:
             raise ProtocolError(-32002, "Resource not found.") from exc
+
+    def submit_doc(self, *, target_path: str, text: str, overwrite: bool) -> str:
+        if not self.enable_writes:
+            raise ToolExecutionError("Writes are disabled. Start the server with --enable-writes.")
+        replacements = rc.build_rehydration_map(self.ctx, self.redactor)
+        restored_target, target_replacements = rc.rehydrate_text_with_count(target_path, replacements)
+        unresolved_target = rc.unresolved_rehydration_tokens(restored_target)
+        if unresolved_target:
+            raise ToolExecutionError(format_unresolved_tokens("target_path", unresolved_target))
+        output_path = resolve_submit_target(self.write_root, restored_target)
+
+        restored_text, text_replacements = rc.rehydrate_text_with_count(text, replacements)
+        unresolved_text = rc.unresolved_rehydration_tokens(restored_text)
+        if unresolved_text:
+            raise ToolExecutionError(format_unresolved_tokens("text", unresolved_text))
+        if output_path.exists():
+            if output_path.is_dir():
+                raise ToolExecutionError("Target already exists as a directory.")
+            if not overwrite:
+                raise ToolExecutionError("Target already exists. Pass overwrite=true to replace it.")
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(restored_text, encoding="utf-8")
+        rel = rc.rel_posix(output_path, self.root)
+        total_replacements = target_replacements + text_replacements
+        return (
+            "Wrote rehydrated document.\n"
+            f"id: {self.ctx.display_ref(rel)}\n"
+            f"path: {self.redactor.redact_path(rel)}\n"
+            f"bytes: {len(restored_text.encode('utf-8'))}\n"
+            f"replacements: {total_replacements}\n"
+        )
+
+
+def resolve_write_root(root: Path, write_subdir: str) -> Path:
+    value = write_subdir.strip()
+    if not value:
+        raise SystemExit("--write-subdir must not be empty.")
+    path = Path(value)
+    if path.is_absolute() or any(part in {"..", ""} for part in path.parts) or path == Path("."):
+        raise SystemExit("--write-subdir must be a relative subdirectory under root.")
+    write_root = (root / path).resolve(strict=False)
+    try:
+        write_root.relative_to(root)
+    except ValueError as exc:
+        raise SystemExit("--write-subdir must stay under root.") from exc
+    if write_root == root:
+        raise SystemExit("--write-subdir must be a subdirectory under root.")
+    return write_root
+
+
+def resolve_submit_target(write_root: Path, target_path: str) -> Path:
+    value = target_path.strip()
+    if not value:
+        raise ToolExecutionError("target_path must not be empty.")
+    path = Path(value)
+    if path.is_absolute() or any(part in {"..", ""} for part in path.parts) or path == Path("."):
+        raise ToolExecutionError("target_path must be a relative file path inside the write subdirectory.")
+    output_path = (write_root / path).resolve(strict=False)
+    try:
+        output_path.relative_to(write_root)
+    except ValueError as exc:
+        raise ToolExecutionError("target_path must stay inside the write subdirectory.") from exc
+    return output_path
+
+
+def format_unresolved_tokens(field: str, tokens: list[str]) -> str:
+    preview = ", ".join(tokens[:10])
+    suffix = "" if len(tokens) <= 10 else f", and {len(tokens) - 10} more"
+    return f"Unresolved redaction token(s) in {field}: {preview}{suffix}."
 
 
 def safe_error_message(exc: SystemExit, redactor: rc.Redactor) -> str:
@@ -422,6 +508,14 @@ def redctx_bundle(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
     )
 
 
+def redctx_submit_doc(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
+    return server.submit_doc(
+        target_path=string_arg(arguments, "target_path", ""),
+        text=string_arg(arguments, "text", ""),
+        overwrite=bool_arg(arguments, "overwrite", False),
+    )
+
+
 def redctx_doctor(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
     return server.run_cli_command(
         rc.command_doctor,
@@ -483,6 +577,7 @@ TOOL_HANDLERS: dict[str, Callable[[RedactedContextMcp, dict[str, Any]], str]] = 
     "redctx_search": redctx_search,
     "redctx_stat": redctx_stat,
     "redctx_bundle": redctx_bundle,
+    "redctx_submit_doc": redctx_submit_doc,
     "redctx_doctor": redctx_doctor,
     "redctx_github_repos": redctx_github_repos,
     "redctx_github_list_issues": redctx_github_list_issues,
@@ -573,6 +668,37 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "max_chars_per_file": {"type": "integer", "default": 30_000, "minimum": 1},
                 "max_total_chars": {"type": "integer", "default": 300_000, "minimum": 1},
             },
+        },
+    },
+    {
+        "name": "redctx_submit_doc",
+        "description": (
+            "Submit a generated redacted document for controlled local rehydration "
+            "and writing under the configured private-root write subdirectory."
+        ),
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": False,
+        },
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target_path": {
+                    "type": "string",
+                    "description": "Relative file path under the configured write subdirectory.",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "Generated document text containing only redacted placeholders.",
+                },
+                "overwrite": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Replace an existing file at target_path.",
+                },
+            },
+            "required": ["target_path", "text"],
         },
     },
     {
@@ -717,6 +843,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, help=f"TOML config path, defaults to {rc.LOCAL_CONFIG}")
     parser.add_argument("--mode", choices=("balanced", "strict"), default="strict")
     parser.add_argument("--include-private", action="store_true")
+    parser.add_argument(
+        "--enable-writes",
+        action="store_true",
+        help="enable redctx_submit_doc controlled writes into --write-subdir",
+    )
+    parser.add_argument(
+        "--write-subdir",
+        default="incoming",
+        help="relative private-root subdirectory used by redctx_submit_doc",
+    )
     return parser
 
 
@@ -727,6 +863,8 @@ def main(argv: list[str] | None = None) -> int:
         config_path=args.config,
         mode=args.mode,
         include_private=args.include_private,
+        enable_writes=args.enable_writes,
+        write_subdir=args.write_subdir,
     )
     return serve(server)
 

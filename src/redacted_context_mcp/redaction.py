@@ -41,6 +41,7 @@ class Redactor:
     mode: str = "strict"
     counters: dict[str, int] = field(default_factory=dict)
     aliases: dict[tuple[str, str], str] = field(default_factory=dict)
+    raw_aliases: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         allow_terms = set(DEFAULT_ALLOW_TERMS) | set(MONTHS_AND_DAYS) | set(self.config.allow)
@@ -108,7 +109,12 @@ class Redactor:
                 hashlib.sha256,
             ).hexdigest()[:8]
             self.aliases[key] = f"[{category}_{digest}]"
-        return self.aliases[key]
+        placeholder = self.aliases[key]
+        self.raw_aliases.setdefault(placeholder, value)
+        return placeholder
+
+    def rehydration_map(self) -> dict[str, str]:
+        return dict(self.raw_aliases)
 
     def _protect_allowed(self, text: str) -> tuple[str, dict[str, str]]:
         protected: dict[str, str] = {}

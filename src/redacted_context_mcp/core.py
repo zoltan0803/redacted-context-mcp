@@ -37,6 +37,7 @@ from .defaults import (
     DEFAULT_MAX_SEARCH_RESULTS,
     DEFAULT_OLLAMA_ENDPOINT,
     LOCAL_CONFIG,
+    PLACEHOLDER_RE,
     REPO_ROOT,
 )
 from .discovery import (
@@ -265,6 +266,87 @@ def command_bundle(args: argparse.Namespace, ctx: RedactedContext, redactor: Red
     return 0
 
 
+def build_rehydration_map(ctx: RedactedContext, redactor: Redactor) -> dict[str, str]:
+    for path in ctx.walk(include_dirs=True):
+        rel = rel_posix(path, ctx.root)
+        redactor.redact_path(rel)
+        ref = ctx.display_ref(rel)
+        redactor.raw_aliases.setdefault(ref, rel)
+        redactor.raw_aliases.setdefault(f"redctx://{ctx.path_id(rel)}", rel)
+        if path.is_file() and is_probably_text(path):
+            redactor.redact(read_text_file(path))
+    return redactor.rehydration_map()
+
+
+def rehydrate_text(text: str, replacements: dict[str, str]) -> str:
+    return rehydrate_text_with_count(text, replacements)[0]
+
+
+def rehydrate_text_with_count(text: str, replacements: dict[str, str]) -> tuple[str, int]:
+    replacement_count = 0
+    for placeholder, value in sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True):
+        count = text.count(placeholder)
+        if count:
+            replacement_count += count
+            text = text.replace(placeholder, value)
+    return text, replacement_count
+
+
+OPAQUE_PATH_REF_RE = re.compile(r"(?:@|redctx://)p_[0-9a-f]{12}")
+
+
+def unresolved_rehydration_tokens(text: str) -> list[str]:
+    return sorted(set(PLACEHOLDER_RE.findall(text)) | set(OPAQUE_PATH_REF_RE.findall(text)))
+
+
+def write_rehydrated_file(input_path: Path, output_path: Path, replacements: dict[str, str], *, force: bool) -> None:
+    if output_path.exists() and not force:
+        raise SystemExit(f"Output already exists: {output_path}")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        rehydrate_text(read_text_file(input_path), replacements),
+        encoding="utf-8",
+    )
+
+
+def command_rehydrate(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
+    if not args.allow_raw_output:
+        raise SystemExit("rehydrate emits private raw text; pass --allow-raw-output to continue.")
+    input_path = Path(args.path).expanduser().resolve(strict=False)
+    if not input_path.exists():
+        raise SystemExit("Rehydrate input does not exist.")
+
+    replacements = build_rehydration_map(ctx, redactor)
+    output = Path(args.output).expanduser().resolve(strict=False) if args.output else None
+    if input_path.is_file():
+        if output is None:
+            print(rehydrate_text(read_text_file(input_path), replacements), end="")
+        else:
+            write_rehydrated_file(input_path, output, replacements, force=args.force)
+        return 0
+
+    if output is None:
+        raise SystemExit("--output is required when rehydrating a folder.")
+    if output.exists() and not output.is_dir():
+        raise SystemExit("--output must be a directory when rehydrating a folder.")
+    try:
+        output.relative_to(input_path)
+    except ValueError:
+        pass
+    else:
+        raise SystemExit("--output must not be inside the input folder.")
+
+    count = 0
+    for child in sorted(input_path.rglob("*")):
+        if not child.is_file() or not is_probably_text(child):
+            continue
+        rel = child.relative_to(input_path)
+        write_rehydrated_file(child, output / rel, replacements, force=args.force)
+        count += 1
+    print(f"Rehydrated {count} text file(s).")
+    return 0
+
+
 def command_doctor(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
     config_path = args.config or (args.root / LOCAL_CONFIG)
     print("root: .")
@@ -444,6 +526,20 @@ def build_parser() -> argparse.ArgumentParser:
     bundle_parser.add_argument("--max-chars-per-file", type=int, default=30_000)
     bundle_parser.add_argument("--max-total-chars", type=int, default=300_000)
     bundle_parser.set_defaults(func=command_bundle)
+
+    rehydrate_parser = subparsers.add_parser(
+        "rehydrate",
+        help="restore redacted text using the private source root",
+    )
+    rehydrate_parser.add_argument("path", help="redacted text file or folder to rehydrate")
+    rehydrate_parser.add_argument("--output", help="write rehydrated output to a file or folder")
+    rehydrate_parser.add_argument("--force", action="store_true", help="overwrite existing output files")
+    rehydrate_parser.add_argument(
+        "--allow-raw-output",
+        action="store_true",
+        help="acknowledge that this command writes or prints private raw text",
+    )
+    rehydrate_parser.set_defaults(func=command_rehydrate)
 
     doctor_parser = subparsers.add_parser("doctor", help="show redaction setup without printing terms")
     doctor_parser.set_defaults(func=command_doctor)
