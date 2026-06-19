@@ -151,8 +151,8 @@ class RedactedContextMcp:
         handler = TOOL_HANDLERS.get(name)
         if handler is None:
             raise ProtocolError(-32602, f"Unknown tool: {name}")
-        validate_tool_arguments(name, arguments)
         try:
+            validate_tool_arguments(name, arguments)
             text = handler(self, arguments)
         except ToolExecutionError as exc:
             text = str(exc) or "Tool execution failed."
@@ -288,6 +288,38 @@ def validate_tool_arguments(name: str, arguments: dict[str, Any]) -> None:
         missing = [item for item in required if isinstance(item, str) and item not in arguments]
         if missing:
             raise ToolExecutionError(f"Missing required argument(s): {', '.join(missing)}.")
+    for argument_name, value in arguments.items():
+        argument_schema = properties.get(argument_name) if isinstance(properties, dict) else None
+        if isinstance(argument_schema, dict):
+            validate_schema_value(argument_name, value, argument_schema)
+
+
+def validate_schema_value(name: str, value: Any, schema: dict[str, Any]) -> None:
+    expected_type = schema.get("type")
+    if expected_type == "string":
+        if not isinstance(value, str):
+            raise ToolExecutionError(f"{name} must be a string.")
+    elif expected_type == "integer":
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ToolExecutionError(f"{name} must be an integer.")
+        minimum = schema.get("minimum")
+        if isinstance(minimum, int) and value < minimum:
+            raise ToolExecutionError(f"{name} must be at least {minimum}.")
+    elif expected_type == "boolean":
+        if not isinstance(value, bool):
+            raise ToolExecutionError(f"{name} must be a boolean.")
+    elif expected_type == "array":
+        if not isinstance(value, list):
+            raise ToolExecutionError(f"{name} must be an array.")
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for index, item in enumerate(value):
+                validate_schema_value(f"{name}[{index}]", item, item_schema)
+
+    enum = schema.get("enum")
+    if isinstance(enum, list) and value not in enum:
+        allowed = ", ".join(str(item) for item in enum)
+        raise ToolExecutionError(f"{name} must be one of: {allowed}.")
 
 
 def string_arg(arguments: dict[str, Any], name: str, default: str) -> str:
@@ -301,7 +333,7 @@ def int_arg(arguments: dict[str, Any], name: str, default: int | None) -> int | 
     value = arguments.get(name, default)
     if value is None:
         return None
-    if not isinstance(value, int):
+    if not isinstance(value, int) or isinstance(value, bool):
         raise ToolExecutionError(f"{name} must be an integer.")
     return value
 
@@ -426,8 +458,8 @@ def redctx_github_read_issue(server: RedactedContextMcp, arguments: dict[str, An
             repo_alias=string_arg(arguments, "repo_alias", "context"),
             number=number,
             comments=bool_arg(arguments, "comments", False),
-            max_comments=int_arg(arguments, "max_comments", 20) or 20,
-            max_body_chars=int_arg(arguments, "max_body_chars", 30_000) or 30_000,
+            max_comments=int_arg(arguments, "max_comments", 20),
+            max_body_chars=int_arg(arguments, "max_body_chars", 30_000),
         ),
     )
 

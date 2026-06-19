@@ -68,7 +68,7 @@ pipx install redacted-context-mcp
 Until then, install directly from the repository or from a checkout:
 
 ```sh
-python3 -m pip install "git+https://github.com/zoltannagy/redacted-context-mcp.git"
+python3 -m pip install "git+https://github.com/zoltan0803/redacted-context-mcp.git"
 ```
 
 ```sh

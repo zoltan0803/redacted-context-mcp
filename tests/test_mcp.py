@@ -128,6 +128,41 @@ class RedactedContextMcpTest(unittest.TestCase):
         self.assertIn("excluded by policy", text)
         self.assertNotIn("Raw secret", text)
 
+    def test_invalid_tool_arguments_return_tool_errors(self) -> None:
+        cases = [
+            (
+                "redctx_search",
+                {"query": "policy", "paths": ["context"], "context": -1},
+                "context must be at least 0",
+            ),
+            (
+                "redctx_search",
+                {"query": "policy", "paths": ["context"], "max_results": 0},
+                "max_results must be at least 1",
+            ),
+            (
+                "redctx_github_list_issues",
+                {"state": "pending"},
+                "state must be one of: open, closed, all",
+            ),
+            (
+                "redctx_search",
+                {"query": "policy", "paths": [123]},
+                "paths[0] must be a string",
+            ),
+            (
+                "redctx_read",
+                {"path": "context", "max_chars": True},
+                "max_chars must be an integer",
+            ),
+        ]
+
+        for tool_name, arguments, message in cases:
+            with self.subTest(tool_name=tool_name, arguments=arguments):
+                result = self.call_tool(tool_name, arguments)
+                self.assertTrue(result["isError"])
+                self.assertIn(message, result["content"][0]["text"])
+
     def test_resources_list_and_read_are_redacted(self) -> None:
         resources = self.rpc("resources/list")["result"]["resources"]
         self.assertTrue(resources)

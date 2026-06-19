@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "redacted-context-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Read-only redacted local knowledgebase context over MCP for coding agents."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -43,11 +43,11 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/zoltannagy/redacted-context-mcp"
-Repository = "https://github.com/zoltannagy/redacted-context-mcp"
-Issues = "https://github.com/zoltannagy/redacted-context-mcp/issues"
-Changelog = "https://github.com/zoltannagy/redacted-context-mcp/blob/main/CHANGELOG.md"
-Security = "https://github.com/zoltannagy/redacted-context-mcp/blob/main/SECURITY.md"
+Homepage = "https://github.com/zoltan0803/redacted-context-mcp"
+Repository = "https://github.com/zoltan0803/redacted-context-mcp"
+Issues = "https://github.com/zoltan0803/redacted-context-mcp/issues"
+Changelog = "https://github.com/zoltan0803/redacted-context-mcp/blob/main/CHANGELOG.md"
+Security = "https://github.com/zoltan0803/redacted-context-mcp/blob/main/SECURITY.md"
 
 [project.scripts]
 redctx = "redacted_context_mcp.core:main"
