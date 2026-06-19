@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0
+## 0.3.0
 
 - Adds redacted MCP resources with `redctx://p_<id>` URIs alongside the
   existing `redctx_*` tools.
