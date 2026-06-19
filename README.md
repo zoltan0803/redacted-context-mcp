@@ -21,8 +21,10 @@ agent workspace
 ## Features
 
 - MCP stdio server with `redctx_*` tools.
+- Redacted MCP resources using `redctx://p_<id>` URIs.
 - CLI fallback with the same redaction behavior.
-- Opaque stable path ids such as `@p_1a2b3c4d5e6f`.
+- Local-salted opaque stable path ids such as `@p_1a2b3c4d5e6f`.
+- Deterministic HMAC placeholders such as `[PERSON_1a2b3c4d]`.
 - Redacted `tree`, `list`, `read`, `search`, `stat`, and `bundle` operations.
 - Local ignored redaction config for exact client, person, organization, and
   project terms.
@@ -211,6 +213,11 @@ The server exposes:
 Agents should carry `@p_<id>` references between calls rather than using raw
 filenames.
 
+The MCP server also exposes redacted text files as resources:
+
+- `resources/list` returns `redctx://p_<id>` resource URIs with redacted titles.
+- `resources/read` returns redacted file text for those opaque resource URIs.
+
 ## CLI Fallback
 
 The CLI is useful for smoke tests or clients without MCP:
@@ -231,6 +238,7 @@ terms.
 
 ```toml
 [redaction]
+salt = "local-random-string-kept-private"
 clients = ["Client Legal Name", "Client Acronym"]
 organizations = ["Supplier Name", "Partner Company"]
 people = ["Person One", "Person Two"]
@@ -247,6 +255,11 @@ token_env = "GITHUB_TOKEN"
 The tool also derives likely aliases from the private source folder name and
 accepts additional comma- or newline-separated terms through
 `REDACTED_CONTEXT_TERMS`.
+
+The optional `salt` controls opaque path ids and deterministic placeholders. If
+omitted, a local fallback is derived from the private root/config. You can also
+set `REDACTED_CONTEXT_SALT` in the environment that starts `redctx` or
+`redctx-mcp`.
 
 GitHub repo entries are optional. Use neutral aliases such as `context`; agents
 use the alias, while the real `owner/repo` stays in this local config. Private

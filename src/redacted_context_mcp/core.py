@@ -8,6 +8,7 @@ keeps the historical public imports and console-script entry point stable.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -95,7 +96,7 @@ def format_entry(path: Path, ctx: RedactedContext, redactor: Redactor) -> str:
     rel = rel_posix(path, ctx.root)
     kind = "dir " if path.is_dir() else "file"
     size = "-" if path.is_dir() else str(path.stat().st_size)
-    return f"{display_ref(rel)}\t{kind}\t{size}\t{redactor.redact_path(rel)}"
+    return f"{ctx.display_ref(rel)}\t{kind}\t{size}\t{redactor.redact_path(rel)}"
 
 
 def command_ls(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
@@ -132,7 +133,7 @@ def command_tree(args: argparse.Namespace, ctx: RedactedContext, redactor: Redac
         name = "." if path == root else path.name
         indent = "  " * depth
         suffix = "/" if path.is_dir() else ""
-        print(f"{indent}{display_ref(rel)} {redactor.redact_path(name)}{suffix}")
+        print(f"{indent}{ctx.display_ref(rel)} {redactor.redact_path(name)}{suffix}")
     return 0
 
 
@@ -152,7 +153,7 @@ def command_cat(args: argparse.Namespace, ctx: RedactedContext, redactor: Redact
         redacted = redacted[: args.max_chars] + "\n[TRUNCATED]\n"
 
     rel = rel_posix(path, ctx.root)
-    print(f"--- {display_ref(rel)} {redactor.redact_path(rel)} lines {start}-{min(end, len(lines))} ---")
+    print(f"--- {ctx.display_ref(rel)} {redactor.redact_path(rel)} lines {start}-{min(end, len(lines))} ---")
     if args.line_numbers:
         for offset, line in enumerate(redacted.splitlines(), start=start):
             print(f"{offset:>6}\t{line}")
@@ -220,7 +221,7 @@ def command_grep(args: argparse.Namespace, ctx: RedactedContext, redactor: Redac
                 emitted.add(line_index)
                 marker = ":" if line_index == match_index else "-"
                 print(
-                    f"{display_ref(rel)}{marker}{line_index + 1}:"
+                    f"{ctx.display_ref(rel)}{marker}{line_index + 1}:"
                     f"{redactor.redact_path(rel)}:{redacted_lines[line_index]}"
                 )
                 results += 1
@@ -235,7 +236,7 @@ def command_stat(args: argparse.Namespace, ctx: RedactedContext, redactor: Redac
     if ctx.is_excluded(path):
         raise SystemExit("Path is excluded by policy.")
     rel = rel_posix(path, ctx.root)
-    print(f"id: {display_ref(rel)}")
+    print(f"id: {ctx.display_ref(rel)}")
     print(f"path: {redactor.redact_path(rel)}")
     print(f"type: {'directory' if path.is_dir() else 'file'}")
     print(f"size_bytes: {path.stat().st_size}")
@@ -256,9 +257,9 @@ def command_bundle(args: argparse.Namespace, ctx: RedactedContext, redactor: Red
         if len(redacted) > args.max_chars_per_file:
             redacted = redacted[: args.max_chars_per_file] + "\n[TRUNCATED FILE]\n"
         rel = rel_posix(path, ctx.root)
-        print(f"\n--- BEGIN {display_ref(rel)} {redactor.redact_path(rel)} ---")
+        print(f"\n--- BEGIN {ctx.display_ref(rel)} {redactor.redact_path(rel)} ---")
         print(redacted, end="" if redacted.endswith("\n") else "\n")
-        print(f"--- END {display_ref(rel)} ---")
+        print(f"--- END {ctx.display_ref(rel)} ---")
         total_chars += len(redacted)
         count += 1
     return 0

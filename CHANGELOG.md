@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.0
+
+- Adds redacted MCP resources with `redctx://p_<id>` URIs alongside the
+  existing `redctx_*` tools.
+- Updates MCP protocol support to `2025-11-25` and advertises read-only tool
+  annotations with stricter input schemas.
+- Changes path ids to local-salted HMAC ids to make common filename guesses
+  harder.
+- Changes placeholders from order-based counters to deterministic HMAC aliases,
+  such as `[PERSON_1a2b3c4d]`.
+- Expands generic redaction coverage for secrets, tokens, common personal
+  identifiers, IP addresses, UUIDs, and domains.
+- Fixes `redctx discover --format json`.
+- Handles UTF-8 BOMs in TOML config and text file reads.
+- Adds regression coverage for discovery JSON output, MCP resources, stricter
+  tool schemas, salted ids, deterministic placeholders, and redaction leak
+  benchmarks.
+
 ## 0.1.0
 
 - Initial release candidate.

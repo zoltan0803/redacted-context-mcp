@@ -9,6 +9,7 @@ tools/list + tools/call surface used by MCP clients.
 from __future__ import annotations
 
 import argparse
+import copy
 import contextlib
 import io
 import json
@@ -32,8 +33,15 @@ except ImportError:  # pragma: no cover - direct script fallback
 SERVER_NAME = "redacted-context"
 SERVER_TITLE = "Redacted Context"
 SERVER_VERSION = __version__
-LATEST_PROTOCOL_VERSION = "2025-06-18"
-SUPPORTED_PROTOCOL_VERSIONS = {"2025-06-18", "2025-03-26", "2024-11-05"}
+LATEST_PROTOCOL_VERSION = "2025-11-25"
+SUPPORTED_PROTOCOL_VERSIONS = {"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
+RESOURCE_PAGE_SIZE = 200
+RESOURCE_URI_PREFIX = "redctx://"
+READ_ONLY_ANNOTATIONS = {
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "idempotentHint": True,
+}
 
 
 class ProtocolError(Exception):
@@ -73,7 +81,10 @@ class RedactedContextMcp:
         protocol_version = requested if requested in SUPPORTED_PROTOCOL_VERSIONS else LATEST_PROTOCOL_VERSION
         return {
             "protocolVersion": protocol_version,
-            "capabilities": {"tools": {"listChanged": False}},
+            "capabilities": {
+                "tools": {"listChanged": False},
+                "resources": {"listChanged": False},
+            },
             "serverInfo": {
                 "name": SERVER_NAME,
                 "title": SERVER_TITLE,
@@ -82,18 +93,65 @@ class RedactedContextMcp:
             "instructions": (
                 "Use redctx_tree, redctx_list, redctx_read, redctx_search, "
                 "redctx_stat, redctx_bundle, redctx_doctor, and redctx_github_* "
-                "tools for confidential local context. Results are redacted "
+                "tools for confidential local context. Redacted files are also "
+                "available as redctx://p_<id> MCP resources. Results are redacted "
                 "and file tools use opaque @p_<id> path references."
             ),
         }
 
     def list_tools(self) -> dict[str, Any]:
-        return {"tools": TOOL_DEFINITIONS}
+        return {"tools": [public_tool_definition(tool) for tool in TOOL_DEFINITIONS]}
+
+    def list_resources(self, params: dict[str, Any]) -> dict[str, Any]:
+        offset = parse_cursor(params.get("cursor"))
+        paths = [path for path in self.ctx.walk() if path.is_file() and rc.is_probably_text(path)]
+        page = paths[offset : offset + RESOURCE_PAGE_SIZE]
+        resources = [self.resource_for_path(path) for path in page]
+        result: dict[str, Any] = {"resources": resources}
+        if offset + RESOURCE_PAGE_SIZE < len(paths):
+            result["nextCursor"] = str(offset + RESOURCE_PAGE_SIZE)
+        return result
+
+    def read_resource(self, params: dict[str, Any]) -> dict[str, Any]:
+        uri = params.get("uri")
+        if not isinstance(uri, str):
+            raise ProtocolError(-32602, "resources/read requires string uri.")
+        path = self.path_for_resource_uri(uri)
+        if self.ctx.is_excluded(path):
+            raise ProtocolError(-32002, "Resource not found.")
+        try:
+            text = rc.read_text_file(path)
+        except SystemExit as exc:
+            raise ProtocolError(-32002, "Resource not found.") from exc
+        rel = rc.rel_posix(path, self.ctx.root)
+        return {
+            "contents": [
+                {
+                    "uri": resource_uri(self.ctx.path_id(rel)),
+                    "mimeType": mime_type_for_path(path),
+                    "text": self.redactor.redact(text),
+                }
+            ]
+        }
+
+    def list_resource_templates(self) -> dict[str, Any]:
+        return {
+            "resourceTemplates": [
+                {
+                    "uriTemplate": f"{RESOURCE_URI_PREFIX}{{path_id}}",
+                    "name": "redacted_context_file",
+                    "title": "Redacted Context File",
+                    "description": "Read a redacted text file by opaque p_<id> path id.",
+                    "mimeType": "text/plain",
+                }
+            ]
+        }
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         handler = TOOL_HANDLERS.get(name)
         if handler is None:
             raise ProtocolError(-32602, f"Unknown tool: {name}")
+        validate_tool_arguments(name, arguments)
         try:
             text = handler(self, arguments)
         except ToolExecutionError as exc:
@@ -115,6 +173,30 @@ class RedactedContextMcp:
         if status == 1 and not output.strip():
             return "No matches.\n"
         return output or "OK\n"
+
+    def resource_for_path(self, path: Path) -> dict[str, Any]:
+        rel = rc.rel_posix(path, self.ctx.root)
+        redacted_path = self.redactor.redact_path(rel)
+        return {
+            "uri": resource_uri(self.ctx.path_id(rel)),
+            "name": self.ctx.display_ref(rel),
+            "title": redacted_path,
+            "description": "Redacted text file from the configured context root.",
+            "mimeType": mime_type_for_path(path),
+            "size": path.stat().st_size,
+            "annotations": {"audience": ["assistant"], "priority": 0.5},
+        }
+
+    def path_for_resource_uri(self, uri: str) -> Path:
+        if not uri.startswith(RESOURCE_URI_PREFIX):
+            raise ProtocolError(-32002, "Resource not found.")
+        ref_id = uri[len(RESOURCE_URI_PREFIX) :]
+        if not isinstance(ref_id, str) or not ref_id.startswith("p_"):
+            raise ProtocolError(-32002, "Resource not found.")
+        try:
+            return self.ctx.resolve_id(ref_id)
+        except SystemExit as exc:
+            raise ProtocolError(-32002, "Resource not found.") from exc
 
 
 def safe_error_message(exc: SystemExit, redactor: rc.Redactor) -> str:
@@ -145,6 +227,67 @@ def safe_error_message(exc: SystemExit, redactor: rc.Redactor) -> str:
     ):
         return value
     return redactor.redact_path(value)
+
+
+def parse_cursor(value: object) -> int:
+    if value is None:
+        return 0
+    if not isinstance(value, str) or not value.isdigit():
+        raise ProtocolError(-32602, "cursor must be a string offset.")
+    return int(value)
+
+
+def resource_uri(ref_id: str) -> str:
+    return f"{RESOURCE_URI_PREFIX}{ref_id}"
+
+
+def mime_type_for_path(path: Path) -> str:
+    suffix = path.suffix.casefold()
+    if suffix == ".md":
+        return "text/markdown"
+    if suffix in {".json", ".jsonl"}:
+        return "application/json"
+    if suffix in {".yaml", ".yml"}:
+        return "application/yaml"
+    if suffix == ".toml":
+        return "application/toml"
+    if suffix in {".py", ".sh", ".js", ".ts", ".tsx", ".jsx", ".sql", ".css", ".html", ".xml"}:
+        return "text/plain"
+    return "text/plain"
+
+
+def public_tool_definition(tool: dict[str, Any]) -> dict[str, Any]:
+    formatted = copy.deepcopy(tool)
+    formatted.setdefault("title", title_from_tool_name(str(formatted.get("name", ""))))
+    formatted.setdefault("annotations", dict(READ_ONLY_ANNOTATIONS))
+    schema = formatted.setdefault("inputSchema", {"type": "object", "properties": {}})
+    if isinstance(schema, dict):
+        schema.setdefault("type", "object")
+        schema.setdefault("properties", {})
+        schema.setdefault("additionalProperties", False)
+    return formatted
+
+
+def title_from_tool_name(name: str) -> str:
+    name = name.removeprefix("redctx_")
+    return " ".join(part.capitalize() for part in name.split("_") if part)
+
+
+def validate_tool_arguments(name: str, arguments: dict[str, Any]) -> None:
+    tool = TOOL_DEFINITION_BY_NAME.get(name)
+    if tool is None:
+        return
+    schema = tool.get("inputSchema", {})
+    properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+    allowed = set(properties) if isinstance(properties, dict) else set()
+    unexpected = sorted(set(arguments) - allowed)
+    if unexpected:
+        raise ToolExecutionError(f"Unexpected argument(s): {', '.join(unexpected)}.")
+    required = schema.get("required", []) if isinstance(schema, dict) else []
+    if isinstance(required, list):
+        missing = [item for item in required if isinstance(item, str) and item not in arguments]
+        if missing:
+            raise ToolExecutionError(f"Missing required argument(s): {', '.join(missing)}.")
 
 
 def string_arg(arguments: dict[str, Any], name: str, default: str) -> str:
@@ -466,6 +609,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
 ]
 
+TOOL_DEFINITION_BY_NAME: dict[str, dict[str, Any]] = {
+    str(tool["name"]): tool for tool in TOOL_DEFINITIONS
+}
+
 
 def handle_request(server: RedactedContextMcp, message: dict[str, Any]) -> dict[str, Any] | None:
     request_id = message.get("id")
@@ -489,6 +636,12 @@ def handle_request(server: RedactedContextMcp, message: dict[str, Any]) -> dict[
         if not isinstance(name, str) or not isinstance(arguments, dict):
             raise ProtocolError(-32602, "tools/call requires string name and object arguments.")
         return server.call_tool(name, arguments)
+    if method == "resources/list":
+        return server.list_resources(params)
+    if method == "resources/read":
+        return server.read_resource(params)
+    if method == "resources/templates/list":
+        return server.list_resource_templates()
 
     raise ProtocolError(-32601, f"Method not found: {method}")
 

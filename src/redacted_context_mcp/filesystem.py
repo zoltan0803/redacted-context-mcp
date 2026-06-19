@@ -26,10 +26,16 @@ class RedactedContext:
             return self.resolve_id(value)
         return resolve_under_root(self.root, value)
 
+    def path_id(self, rel_path: str) -> str:
+        return path_id(rel_path, self.config.salt)
+
+    def display_ref(self, rel_path: str) -> str:
+        return f"@{self.path_id(rel_path)}"
+
     def resolve_id(self, ref_id: str) -> Path:
         for path in self.walk(include_dirs=True):
             rel = rel_posix(path, self.root)
-            if path_id(rel) == ref_id:
+            if self.path_id(rel) == ref_id:
                 return path
         raise SystemExit(f"Unknown path id: @{ref_id}")
 
@@ -88,7 +94,7 @@ def read_text_file(path: Path) -> str:
         raise SystemExit("Not a file.")
     if not is_probably_text(path):
         raise SystemExit("Refusing to print non-text file. Use stat/list to inspect metadata.")
-    return path.read_text(encoding="utf-8", errors="replace")
+    return path.read_text(encoding="utf-8-sig", errors="replace")
 
 
 def iter_target_files(ctx: RedactedContext, refs: list[str], globs: list[str]) -> Iterable[Path]:

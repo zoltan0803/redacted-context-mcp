@@ -313,6 +313,33 @@ MONTHS_AND_DAYS = {
 
 URL_RE = re.compile(r"\b(?:https?://|www\.)[^\s<>)\]]+", re.IGNORECASE)
 EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+GENERIC_SECRET_RE = re.compile(
+    r"(?ix)"
+    r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|"
+    r"\bgithub_pat_[A-Za-z0-9_]{20,}\b|"
+    r"\bgh[opsu]_[A-Za-z0-9_]{20,}\b|"
+    r"\bsk-[A-Za-z0-9_-]{20,}\b|"
+    r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b|"
+    r"\bBearer\s+[A-Za-z0-9._~+/=-]{12,}\b|"
+    r"\b(?:api[_-]?key|secret|token|password|passwd|pwd|private[_-]?key)"
+    r"\b\s*[:=]\s*[\"']?[A-Za-z0-9._~+/=@:-]{8,}[\"']?"
+)
+PEM_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+    re.DOTALL,
+)
+SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+CREDIT_CARD_RE = re.compile(r"(?<!\d)(?:\d[ -]*?){13,19}(?!\d)")
+IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
+    re.IGNORECASE,
+)
+DOMAIN_RE = re.compile(
+    r"(?<![@/\w.-])(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"(?:com|dev|io|net|org|app|cloud|local|internal|invalid|example)(?![\w.-])",
+    re.IGNORECASE,
+)
 PHONE_RE = re.compile(
     r"(?<!\w)(?:\+\d{1,3}[\s.-]?)?(?:\(?\d{2,4}\)?[\s.-]?){2,4}\d{2,4}(?!\w)"
 )
@@ -335,7 +362,8 @@ TITLECASE_TOKEN_RE = re.compile(r"\b[A-Z][a-z][A-Za-z'.-]{2,}\b")
 ACRONYM_RE = re.compile(r"\b[A-Z][A-Z0-9]{2,}\b")
 PATH_TOKEN_RE = re.compile(r"(?<!\[)\b[A-Za-z][A-Za-z0-9]{2,}\b(?!_\d{2}\])")
 PLACEHOLDER_RE = re.compile(
-    r"\[(?:CLIENT|ORG|PERSON|SENSITIVE|ENTITY|EMAIL|PHONE|URL|HANDLE)_\d{2}\]"
+    r"\[(?:CLIENT|ORG|PERSON|SENSITIVE|ENTITY|EMAIL|PHONE|URL|HANDLE|SECRET|SSN|CARD|IP|ID|DOMAIN)_"
+    r"(?:\d{2}|[0-9a-f]{8})\]"
 )
 RESERVED_PLACEHOLDER_WORDS = {
     "client",

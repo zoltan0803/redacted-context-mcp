@@ -53,9 +53,9 @@ class RedactedContextCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         for raw in RAW_PRIVATE_VALUES:
             self.assertNotIn(raw, result.stdout)
-        self.assertIn("[CLIENT_01]", result.stdout)
-        self.assertIn("[PERSON_01]", result.stdout)
-        self.assertIn("[EMAIL_01]", result.stdout)
+        self.assertRegex(result.stdout, r"\[CLIENT_[0-9a-f]{8}\]")
+        self.assertRegex(result.stdout, r"\[PERSON_[0-9a-f]{8}\]")
+        self.assertRegex(result.stdout, r"\[EMAIL_[0-9a-f]{8}\]")
         self.assertIn("Azure", result.stdout)
         self.assertIn(PUBLIC_TECH, result.stdout)
 

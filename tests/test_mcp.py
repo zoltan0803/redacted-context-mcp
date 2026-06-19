@@ -78,19 +78,23 @@ class RedactedContextMcpTest(unittest.TestCase):
         response = self.rpc(
             "initialize",
             {
-                "protocolVersion": "2025-06-18",
+                "protocolVersion": "2025-11-25",
                 "capabilities": {},
                 "clientInfo": {"name": "test", "version": "0"},
             },
         )
 
-        self.assertEqual(response["result"]["protocolVersion"], "2025-06-18")
+        self.assertEqual(response["result"]["protocolVersion"], "2025-11-25")
         self.assertIn("tools", response["result"]["capabilities"])
+        self.assertIn("resources", response["result"]["capabilities"])
 
         tools = self.rpc("tools/list")["result"]["tools"]
         names = {tool["name"] for tool in tools}
         self.assertIn("redctx_read", names)
         self.assertIn("redctx_search", names)
+        read_tool = next(tool for tool in tools if tool["name"] == "redctx_read")
+        self.assertTrue(read_tool["annotations"]["readOnlyHint"])
+        self.assertFalse(read_tool["inputSchema"]["additionalProperties"])
 
     def test_list_read_and_search_are_redacted(self) -> None:
         listing = self.call_tool("redctx_list", {"path": "context"})
@@ -106,7 +110,7 @@ class RedactedContextMcpTest(unittest.TestCase):
         self.assertFalse(read["isError"])
         for raw in RAW_PRIVATE_VALUES:
             self.assertNotIn(raw, read_text)
-        self.assertIn("[CLIENT_01]", read_text)
+        self.assertRegex(read_text, r"\[CLIENT_[0-9a-f]{8}\]")
         self.assertIn("Azure", read_text)
         self.assertIn(PUBLIC_TECH, read_text)
 
@@ -123,6 +127,22 @@ class RedactedContextMcpTest(unittest.TestCase):
         self.assertTrue(result["isError"])
         self.assertIn("excluded by policy", text)
         self.assertNotIn("Raw secret", text)
+
+    def test_resources_list_and_read_are_redacted(self) -> None:
+        resources = self.rpc("resources/list")["result"]["resources"]
+        self.assertTrue(resources)
+        resource = resources[0]
+
+        self.assertTrue(resource["uri"].startswith("redctx://p_"))
+        self.assertTrue(resource["name"].startswith("@p_"))
+        self.assertNotIn("Client Alpha", json.dumps(resource))
+
+        read = self.rpc("resources/read", {"uri": resource["uri"]})["result"]
+        text = read["contents"][0]["text"]
+
+        self.assertRegex(text, r"\[CLIENT_[0-9a-f]{8}\]")
+        for raw in RAW_PRIVATE_VALUES:
+            self.assertNotIn(raw, text)
 
 
 if __name__ == "__main__":

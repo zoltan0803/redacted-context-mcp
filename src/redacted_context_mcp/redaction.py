@@ -3,26 +3,35 @@
 from __future__ import annotations
 
 import re
+import hashlib
+import hmac
 from dataclasses import dataclass, field
 
 from .defaults import (
     ACRONYM_RE,
+    CREDIT_CARD_RE,
     COMMON_CAPITALIZED_WORDS,
     DEFAULT_ALLOW_TERMS,
+    DOMAIN_RE,
     EMAIL_RE,
+    GENERIC_SECRET_RE,
     HANDLE_RE,
     IDENTITY_LINE_RE,
+    IP_RE,
     MONTHS_AND_DAYS,
     MULTI_PROPER_RE,
     ORG_SUFFIX_RE,
     PATH_ALLOW_TERMS,
     PATH_TOKEN_RE,
+    PEM_PRIVATE_KEY_RE,
     PHONE_RE,
     PLACEHOLDER_RE,
     RESERVED_PLACEHOLDER_WORDS,
     SPEAKER_LABEL_RE,
+    SSN_RE,
     TITLECASE_TOKEN_RE,
     URL_RE,
+    UUID_RE,
 )
 from .models import RedactionConfig
 
@@ -55,9 +64,16 @@ class Redactor:
         if not text:
             return text
 
+        text = PEM_PRIVATE_KEY_RE.sub(lambda match: self.placeholder("SECRET", match.group(0)), text)
+        text = GENERIC_SECRET_RE.sub(lambda match: self.placeholder("SECRET", match.group(0)), text)
         text = URL_RE.sub(lambda match: self.placeholder("URL", match.group(0)), text)
         text = EMAIL_RE.sub(lambda match: self.placeholder("EMAIL", match.group(0)), text)
+        text = UUID_RE.sub(lambda match: self.placeholder("ID", match.group(0)), text)
+        text = IP_RE.sub(lambda match: self.placeholder("IP", match.group(0)), text)
+        text = SSN_RE.sub(lambda match: self.placeholder("SSN", match.group(0)), text)
+        text = CREDIT_CARD_RE.sub(lambda match: self.placeholder("CARD", match.group(0)), text)
         text = PHONE_RE.sub(lambda match: self.placeholder("PHONE", match.group(0)), text)
+        text = DOMAIN_RE.sub(lambda match: self.placeholder("DOMAIN", match.group(0)), text)
         text = HANDLE_RE.sub(lambda match: self.placeholder("HANDLE", match.group(0)), text)
 
         for category, pattern in self.literal_patterns:
@@ -85,9 +101,13 @@ class Redactor:
         normalized = normalize_alias(value)
         key = (category, normalized)
         if key not in self.aliases:
-            next_value = self.counters.get(category, 0) + 1
-            self.counters[category] = next_value
-            self.aliases[key] = f"[{category}_{next_value:02d}]"
+            salt = self.config.salt or "redacted-context-mcp-v1"
+            digest = hmac.new(
+                salt.encode("utf-8"),
+                f"{category}:{normalized}".encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()[:8]
+            self.aliases[key] = f"[{category}_{digest}]"
         return self.aliases[key]
 
     def _protect_allowed(self, text: str) -> tuple[str, dict[str, str]]:
@@ -149,7 +169,23 @@ class Redactor:
         if (
             key in self.allow_lookup
             or key in PATH_ALLOW_TERMS
-            or value in {"CLIENT", "ORG", "PERSON", "SENSITIVE", "ENTITY", "EMAIL", "PHONE", "URL", "HANDLE"}
+            or value in {
+                "CLIENT",
+                "ORG",
+                "PERSON",
+                "SENSITIVE",
+                "ENTITY",
+                "EMAIL",
+                "PHONE",
+                "URL",
+                "HANDLE",
+                "SECRET",
+                "SSN",
+                "CARD",
+                "IP",
+                "ID",
+                "DOMAIN",
+            }
         ):
             return value
         return self.placeholder("ENTITY", value)

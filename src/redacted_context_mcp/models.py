@@ -22,6 +22,7 @@ class RedactionConfig:
     exclude_dirs: tuple[str, ...] = ()
     exclude_globs: tuple[str, ...] = ()
     github_repos: dict[str, GitHubRepoConfig] = field(default_factory=dict)
+    salt: str = ""
 
 
 @dataclass(frozen=True)

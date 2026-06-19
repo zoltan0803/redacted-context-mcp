@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import io
 import json
+import contextlib
 import tempfile
 import urllib.error
 import unittest
+from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -102,6 +104,42 @@ class DiscoveryTest(unittest.TestCase):
         self.assertIn('"Alice Example"', output)
         self.assertIn('"GitHub"', output)
         self.assertIn("# Review before use", output)
+
+    def test_command_discover_json_format(self) -> None:
+        output = io.StringIO()
+        result = core.DiscoveryResult(
+            clients=("Example Customer",),
+            organizations=("Example Partners",),
+            people=("Alice Example",),
+            terms=("Project Orion",),
+        )
+
+        with patch("redacted_context_mcp.core.OllamaDiscoveryClient", return_value=object()):
+            with patch("redacted_context_mcp.core.discover_entities", return_value=result):
+                with contextlib.redirect_stdout(output):
+                    status = core.command_discover(
+                        Namespace(
+                            provider="ollama",
+                            endpoint="http://localhost:11434",
+                            model="gemma4:e4b",
+                            timeout=1.0,
+                            raw_discovery=False,
+                            paths=["context"],
+                            glob=["*.md"],
+                            max_files=10,
+                            max_chars_per_file=1000,
+                            format="json",
+                            output=None,
+                            force=False,
+                        ),
+                        self.ctx,
+                        core.Redactor(core.RedactionConfig()),
+                    )
+
+        self.assertEqual(status, 0)
+        parsed = json.loads(output.getvalue())
+        self.assertEqual(parsed["clients"], ["Example Customer"])
+        self.assertEqual(parsed["people"], ["Alice Example"])
 
     def test_ollama_http_error_reports_model_name(self) -> None:
         client = core.OllamaDiscoveryClient(endpoint="http://localhost:11434", model="gemma:e4b", timeout=1)

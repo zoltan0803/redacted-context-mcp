@@ -27,6 +27,8 @@ def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
         "exclude_globs": [],
     }
     github_repos: dict[str, GitHubRepoConfig] = {}
+    salt = ""
+    config_bytes = b""
 
     for term in derive_root_terms(root):
         values["clients"].append(term)
@@ -34,10 +36,12 @@ def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
     default_config = root / LOCAL_CONFIG
     path = config_path if config_path is not None else default_config
     if path.exists():
+        config_bytes = path.read_bytes()
         data = read_toml(path)
         redaction = data.get("redaction", data)
         for key in values:
             values[key].extend(as_string_list(redaction.get(key, [])))
+        salt = str(redaction.get("salt", "")).strip()
         for term_file in as_string_list(redaction.get("term_files", [])):
             term_path = resolve_under_root(root, term_file, allow_missing=True)
             if term_path.exists():
@@ -47,6 +51,7 @@ def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
     env_terms = os.environ.get("REDACTED_CONTEXT_TERMS")
     if env_terms:
         values["terms"].extend(split_env_terms(env_terms))
+    salt = os.environ.get("REDACTED_CONTEXT_SALT", "").strip() or salt or derive_local_salt(root, config_bytes)
 
     return RedactionConfig(
         clients=dedupe(values["clients"]),
@@ -57,14 +62,14 @@ def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
         exclude_dirs=dedupe(values["exclude_dirs"]),
         exclude_globs=dedupe(values["exclude_globs"]),
         github_repos=github_repos,
+        salt=salt,
     )
 
 
 def read_toml(path: Path) -> dict:
     if tomllib is None:
         raise SystemExit("TOML config requires Python 3.11+ or no config file.")
-    with path.open("rb") as handle:
-        return tomllib.load(handle)
+    return tomllib.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def as_string_list(value: object) -> list[str]:
@@ -116,6 +121,13 @@ def read_term_file(path: Path) -> list[str]:
 
 def split_env_terms(value: str) -> list[str]:
     return [part.strip() for part in re.split(r"[\n,]", value) if part.strip()]
+
+
+def derive_local_salt(root: Path, config_bytes: bytes) -> str:
+    import hashlib
+
+    seed = f"{root.resolve()}\0redacted-context-mcp-v1".encode("utf-8") + config_bytes
+    return hashlib.sha256(seed).hexdigest()
 
 
 def dedupe(values: Iterable[str]) -> tuple[str, ...]:

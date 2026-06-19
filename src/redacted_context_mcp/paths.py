@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 from pathlib import Path
 
 
-def path_id(rel_path: str) -> str:
-    digest = hashlib.sha256(rel_path.encode("utf-8")).hexdigest()[:12]
+def path_id(rel_path: str, salt: str = "") -> str:
+    key = (salt or "redacted-context-mcp-v1").encode("utf-8")
+    digest = hmac.new(key, rel_path.encode("utf-8"), hashlib.sha256).hexdigest()[:12]
     return f"p_{digest}"
 
 
-def display_ref(rel_path: str) -> str:
-    return f"@{path_id(rel_path)}"
+def display_ref(rel_path: str, salt: str = "") -> str:
+    return f"@{path_id(rel_path, salt)}"
 
 
 def rel_posix(path: Path, root: Path) -> str:

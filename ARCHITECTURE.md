@@ -24,7 +24,8 @@ the redacted result.
 - The server is read-only. It does not edit, delete, or move source files.
 - Path resolution is constrained to the configured root.
 - Known private/cache paths and binary-like files are excluded by default.
-- File navigation uses stable opaque ids such as `@p_1a2b3c4d5e6f`.
+- File navigation uses local-salted HMAC ids such as `@p_1a2b3c4d5e6f`.
+- Redacted files are available as MCP resources with `redctx://p_<id>` URIs.
 - Redaction happens before file content, file paths, search results, bundles,
   and GitHub issue text are returned.
 
@@ -47,7 +48,8 @@ the redacted result.
 Redaction combines configured exact terms with conservative generic patterns:
 
 - configured clients, organizations, people, and sensitive terms;
-- email addresses, URLs, phone numbers, and handles;
+- email addresses, URLs, phone numbers, handles, secrets, tokens, common
+  personal identifiers, IP addresses, UUIDs, and domains;
 - organization suffix patterns;
 - multi-token proper names;
 - stricter titlecase/acronym handling in `strict` mode.
@@ -55,6 +57,10 @@ Redaction combines configured exact terms with conservative generic patterns:
 The allow list prevents common public technologies and generic vocabulary from
 being over-redacted. Project-specific allow-list entries belong in the local
 `.agent-context-redactor.toml`, not in source control.
+
+Placeholders are deterministic HMAC aliases derived from the local salt, for
+example `[PERSON_1a2b3c4d]`. The same raw value maps to the same placeholder for
+one private config without exposing the raw value.
 
 ## Configuration
 

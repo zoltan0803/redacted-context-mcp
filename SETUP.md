@@ -113,6 +113,7 @@ Create `/work/source-private/.agent-context-redactor.toml`:
 
 ```toml
 [redaction]
+salt = "local-random-string-kept-private"
 clients = ["Client Legal Name", "Client Acronym"]
 organizations = ["Supplier Name", "Partner Company"]
 people = ["Person One", "Person Two"]
@@ -126,6 +127,10 @@ token_env = "GITHUB_TOKEN"
 ```
 
 Keep this file local and untracked.
+
+The optional `salt` keeps opaque path ids and placeholders stable for your
+private context without making them guessable from common filenames. You can
+also provide it with `REDACTED_CONTEXT_SALT`.
 
 The GitHub section is optional. If you enable it for a private repo, export the
 token in the shell that starts the agent or MCP server:
