@@ -22,6 +22,7 @@ from .defaults import (
     ROLE_WORDS,
 )
 from .filesystem import RedactedContext, iter_target_files, read_text_file
+from .limits import OperationLimitError
 from .models import DiscoveryParseError, DiscoveryResult
 from .paths import rel_posix, resolve_under_root
 
@@ -378,18 +379,32 @@ def discover_entities(
     client: OllamaDiscoveryClient,
     max_files: int,
     max_chars_per_file: int,
+    max_total_raw_bytes: int | None = None,
     postprocess: bool = True,
 ) -> DiscoveryResult:
     results: list[DiscoveryResult] = []
+    total_bytes = 0
     for index, path in enumerate(iter_target_files(ctx, paths, globs)):
         if index >= max_files:
             break
         rel = rel_posix(path, ctx.root)
-        text = read_text_file(path)
-        if len(text) > max_chars_per_file:
-            text = text[:max_chars_per_file]
+        text, bytes_read, truncated = read_discovery_sample(path, max_bytes=max_chars_per_file)
+        total_bytes += bytes_read
+        if max_total_raw_bytes is not None and total_bytes > max_total_raw_bytes:
+            raise OperationLimitError("Discovery total byte limit exceeded.")
+        if truncated:
+            text += "\n[TRUNCATED DISCOVERY SAMPLE]\n"
         results.append(client.extract(rel_path=rel, text=text))
     return merge_discovery_results(results, postprocess=postprocess)
+
+
+def read_discovery_sample(path, *, max_bytes: int) -> tuple[str, int, bool]:
+    with path.open("rb") as handle:
+        data = handle.read(max_bytes + 1)
+    truncated = len(data) > max_bytes
+    if truncated:
+        data = data[:max_bytes]
+    return data.decode("utf-8-sig", errors="replace"), len(data), truncated
 
 
 def format_discovery_toml(result: DiscoveryResult, *, source_note: str) -> str:

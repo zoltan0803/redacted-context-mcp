@@ -397,18 +397,44 @@ MULTI_PROPER_RE = re.compile(
     r"\b(?:[A-Z][A-Za-z'.-]{2,}|[A-Z]\.)"
     r"(?:\s+(?:[A-Z][A-Za-z'.-]{2,}|[A-Z]\.)){1,4}\b"
 )
-SPEAKER_LABEL_RE = re.compile(r"(?m)^([A-Z][A-Za-z'.-]{2,})(?=\s*:)")
+SPEAKER_LABEL_RE = re.compile(r"(?m)^([A-Z][A-Za-z'.-]{2,})(?=[ \t]*:)")
 IDENTITY_LINE_RE = re.compile(
     r"(?im)\b(attendees?|participants?|stakeholders?|owners?|contacts?|authors?|"
-    r"reviewers?|approvers?|speakers?|presenters?)\b\s*:\s*([^\n]+)"
+    r"reviewers?|approvers?|speakers?|presenters?)\b([ \t]*):([ \t]*)([^\r\n]*)"
 )
 TITLECASE_TOKEN_RE = re.compile(r"\b[A-Z][a-z][A-Za-z'.-]{2,}\b")
 ACRONYM_RE = re.compile(r"\b[A-Z][A-Z0-9]{2,}\b")
 PATH_TOKEN_RE = re.compile(r"(?<!\[)\b[A-Za-z][A-Za-z0-9]{2,}\b(?!_\d{2}\])")
+PLACEHOLDER_CATEGORIES = frozenset(
+    {
+        "CLIENT",
+        "ORG",
+        "PERSON",
+        "SENSITIVE",
+        "ENTITY",
+        "EMAIL",
+        "PHONE",
+        "URL",
+        "HANDLE",
+        "SECRET",
+        "SSN",
+        "CARD",
+        "IP",
+        "ID",
+        "DOMAIN",
+        "IBAN",
+        "MAC",
+        "DOB",
+        "PASSPORT",
+        "DRIVER_ID",
+        "CONNECTION",
+        "UNICODE_CONTROL",
+        "PROMPT_INJECTION",
+    }
+)
+PLACEHOLDER_CATEGORY_PATTERN = "|".join(sorted(PLACEHOLDER_CATEGORIES, key=len, reverse=True))
 PLACEHOLDER_RE = re.compile(
-    r"\[(?:CLIENT|ORG|PERSON|SENSITIVE|ENTITY|EMAIL|PHONE|URL|HANDLE|SECRET|SSN|CARD|IP|ID|DOMAIN|"
-    r"IBAN|MAC|DOB|PASSPORT|DRIVER_ID|CONNECTION|UNICODE_CONTROL|PROMPT_INJECTION)_"
-    r"(?:\d{2}|[0-9a-f]{8}|[0-9a-f]{32})\]"
+    rf"\[(?:{PLACEHOLDER_CATEGORY_PATTERN})_(?:\d{{2}}|[0-9a-f]{{8}}|[0-9a-f]{{32}})\]"
 )
 RESERVED_PLACEHOLDER_WORDS = {
     "client",

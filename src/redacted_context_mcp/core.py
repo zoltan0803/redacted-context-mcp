@@ -14,6 +14,7 @@ import re
 import sys
 import tempfile
 import time
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
@@ -45,6 +46,7 @@ from .defaults import (
     DEFAULT_MAX_TRAVERSAL_ENTRIES,
     DEFAULT_OLLAMA_ENDPOINT,
     LOCAL_CONFIG,
+    PLACEHOLDER_CATEGORIES,
     PLACEHOLDER_RE,
     REPO_ROOT,
 )
@@ -80,6 +82,7 @@ from .filesystem import (
     is_probably_text_bytes,
     is_reparse_point,
     iter_target_files,
+    read_file_bytes_verified,
     read_text_file,
 )
 from .limits import OperationBudget, OperationLimitError
@@ -109,9 +112,8 @@ from .paths import display_ref, path_id, rel_posix, resolve_under_root
 from .redaction import Redactor, compile_literal_pattern, normalize_alias
 
 
-PLACEHOLDER_QUERY_RE = re.compile(
-    r"(?:\[|_|(?:CLIENT|ORG|PERSON|SENSITIVE|ENTITY|EMAIL|PHONE|URL|HANDLE|SECRET|SSN|CARD|IP|ID|DOMAIN)|[0-9a-fA-F]{8,})"
-)
+HEX_QUERY_RE = re.compile(r"[0-9a-fA-F]+")
+PLACEHOLDER_STRUCTURAL_CHARS = frozenset("[]_")
 
 
 def operation_budget_from_args(args: argparse.Namespace) -> OperationBudget:
@@ -127,11 +129,17 @@ def operation_budget_from_args(args: argparse.Namespace) -> OperationBudget:
 
 
 def can_use_raw_search_prefilter(query: str, *, regex: bool, ignore_case: bool) -> bool:
-    del ignore_case
     stripped = query.strip()
-    if regex or len(stripped) < 2:
+    if regex or not stripped:
         return False
-    return PLACEHOLDER_QUERY_RE.search(stripped) is None
+    if any(char in PLACEHOLDER_STRUCTURAL_CHARS for char in stripped):
+        return False
+    if HEX_QUERY_RE.fullmatch(stripped):
+        return False
+    if ignore_case:
+        folded = stripped.casefold()
+        return not any(folded in category.casefold() for category in PLACEHOLDER_CATEGORIES)
+    return not any(stripped in category for category in PLACEHOLDER_CATEGORIES)
 
 
 def format_entry(path: Path, ctx: RedactedContext, redactor: Redactor) -> str:
@@ -212,16 +220,27 @@ def command_head(args: argparse.Namespace, ctx: RedactedContext, redactor: Redac
 
 
 def command_tail(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
+    budget = operation_budget_from_args(args)
     path = ctx.resolve_ref(args.path, expected="text")
     if ctx.is_excluded(path):
         raise SystemExit("Path is excluded by policy.")
-    text = read_text_file(ctx.validate_path(path, expected="text"))
-    line_count = len(text.splitlines())
-    args.start_line = max(1, line_count - args.lines + 1)
-    args.end_line = line_count
-    args.max_chars = args.max_chars or DEFAULT_MAX_CHARS
-    args.line_numbers = args.line_numbers
-    return command_cat(args, ctx, redactor)
+    path = ctx.validate_path(path, expected="text")
+    text = read_text_file(path, budget=budget)
+    all_lines = text.splitlines(keepends=True)
+    start = max(1, len(all_lines) - args.lines + 1)
+    selected = "".join(all_lines[start - 1 :])
+    redacted = redactor.redact(selected)
+    max_chars = args.max_chars or DEFAULT_MAX_CHARS
+    if len(redacted) > max_chars:
+        redacted = redacted[:max_chars] + "\n[TRUNCATED]\n"
+    rel = rel_posix(path, ctx.root)
+    print(f"--- {ctx.display_ref(rel)} {redactor.redact_path(rel)} lines {start}-{len(all_lines)} ---")
+    if args.line_numbers:
+        for offset, line in enumerate(redacted.splitlines(), start=start):
+            print(f"{offset:>6}\t{line}")
+    else:
+        print(redacted, end="" if redacted.endswith("\n") else "\n")
+    return 0
 
 
 def command_grep(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
@@ -242,8 +261,7 @@ def command_grep(args: argparse.Namespace, ctx: RedactedContext, redactor: Redac
     for path in iter_target_files(ctx, args.paths, args.glob, budget=budget, text_only=not use_prefilter):
         if use_prefilter:
             path = ctx.validate_path(path, expected="file")
-            budget.consume_file(path)
-            raw_bytes = path.read_bytes()
+            raw_bytes = read_file_bytes_verified(path, budget=budget)
             if args.query.isascii():
                 needle = args.query.encode("utf-8")
                 if args.ignore_case:
@@ -299,17 +317,37 @@ def command_grep(args: argparse.Namespace, ctx: RedactedContext, redactor: Redac
 
 
 def command_stat(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
+    budget = operation_budget_from_args(args)
     path = ctx.resolve_ref(args.path)
     if ctx.is_excluded(path):
         raise SystemExit("Path is excluded by policy.")
+    path = ctx.validate_path(path)
     rel = rel_posix(path, ctx.root)
     print(f"id: {ctx.display_ref(rel)}")
     print(f"path: {redactor.redact_path(rel)}")
     print(f"type: {'directory' if path.is_dir() else 'file'}")
     print(f"size_bytes: {path.stat().st_size}")
     if path.is_file() and is_probably_text(path):
-        print(f"lines: {len(read_text_file(ctx.validate_path(path, expected='text')).splitlines())}")
+        budget.consume_file(path)
+        print(f"lines: {count_text_lines(path)}")
     return 0
+
+
+def count_text_lines(path: Path) -> int:
+    lines = 0
+    saw_any = False
+    ends_with_newline = False
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 64)
+            if not chunk:
+                break
+            saw_any = True
+            lines += chunk.count(b"\n")
+            ends_with_newline = chunk.endswith(b"\n")
+    if saw_any and not ends_with_newline:
+        lines += 1
+    return lines
 
 
 def command_bundle(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
@@ -354,17 +392,23 @@ def rehydrate_text(text: str, replacements: dict[str, str]) -> str:
     return rehydrate_text_with_count(text, replacements)[0]
 
 
-def rehydrate_text_with_count(text: str, replacements: dict[str, str]) -> tuple[str, int]:
-    replacement_count = 0
-    for placeholder, value in sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True):
-        count = text.count(placeholder)
-        if count:
-            replacement_count += count
-            text = text.replace(placeholder, value)
-    return text, replacement_count
-
-
 OPAQUE_PATH_REF_RE = re.compile(r"(?:@|redctx://)p_[0-9a-f]{12}")
+REHYDRATION_TOKEN_RE = re.compile(rf"(?:{PLACEHOLDER_RE.pattern}|{OPAQUE_PATH_REF_RE.pattern})")
+
+
+def rehydrate_text_with_count(text: str, replacements: Mapping[str, str]) -> tuple[str, int]:
+    replacement_count = 0
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal replacement_count
+        token = match.group(0)
+        replacement = replacements.get(token)
+        if replacement is None:
+            return token
+        replacement_count += 1
+        return replacement
+
+    return REHYDRATION_TOKEN_RE.sub(replace, text), replacement_count
 
 
 def unresolved_rehydration_tokens(text: str) -> list[str]:
@@ -374,24 +418,32 @@ def unresolved_rehydration_tokens(text: str) -> list[str]:
 def atomic_write_text(path: Path, text: str, *, overwrite: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not overwrite:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_BINARY"):
-            flags |= os.O_BINARY
-        try:
-            fd = os.open(path, flags, 0o600)
-        except FileExistsError as exc:
-            raise SystemExit("Output already exists.") from exc
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            text=True,
+        )
+        tmp_path = Path(tmp_name)
         try:
             with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
                 handle.write(text)
                 handle.flush()
                 os.fsync(handle.fileno())
-        except Exception:
             try:
-                path.unlink()
+                os.link(tmp_path, path)
+            except FileExistsError as exc:
+                raise SystemExit("Output already exists.") from exc
+            except OSError as exc:
+                raise SystemExit("Could not publish output atomically.") from exc
+            fsync_directory(path.parent)
+        except Exception:
+            raise
+        finally:
+            try:
+                tmp_path.unlink()
             except OSError:
                 pass
-            raise
         return
 
     fd, tmp_name = tempfile.mkstemp(
@@ -407,12 +459,28 @@ def atomic_write_text(path: Path, text: str, *, overwrite: bool = True) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp_path, path)
+        fsync_directory(path.parent)
     except Exception:
         try:
             tmp_path.unlink()
         except OSError:
             pass
         raise
+
+
+def fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def write_rehydrated_file(input_path: Path, output_path: Path, replacements: dict[str, str], *, force: bool) -> None:
@@ -482,7 +550,13 @@ def command_doctor(args: argparse.Namespace, ctx: RedactedContext, redactor: Red
 
 
 def command_audit(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
-    checks = audit_checks(ctx, redactor, budget=operation_budget_from_args(args))
+    checks = audit_checks(
+        ctx,
+        redactor,
+        budget=operation_budget_from_args(args),
+        writes_enabled=getattr(args, "writes_enabled", False),
+        write_subdir_confined=getattr(args, "write_subdir_confined", True),
+    )
     if args.format == "json":
         print(json.dumps({"checks": checks}, indent=2, ensure_ascii=False))
     else:
@@ -503,6 +577,8 @@ def audit_checks(
     redactor: Redactor,
     *,
     budget: OperationBudget | None = None,
+    writes_enabled: bool = False,
+    write_subdir_confined: bool = True,
 ) -> list[dict[str, object]]:
     link_paths, broken_symlinks = ctx.scan_link_entries(budget=budget)
     symlink_refs = [
@@ -596,6 +672,18 @@ def audit_checks(
             "status": "PASS",
             "detail": "controlled writes require explicit MCP --enable-writes",
         },
+        {
+            "category": "exposure",
+            "name": "controlled writes currently enabled" if writes_enabled else "controlled writes currently disabled",
+            "status": "WARN" if writes_enabled else "PASS",
+            "detail": "enabled by current MCP server" if writes_enabled else "disabled",
+        },
+        {
+            "category": "exposure",
+            "name": "write subdirectory confinement",
+            "status": "PASS" if write_subdir_confined else "FAIL",
+            "detail": "raw write path not reported",
+        },
     ]
 
 
@@ -627,8 +715,10 @@ def command_benchmark(args: argparse.Namespace, ctx: RedactedContext, redactor: 
     chunk_redactor = Redactor(redactor.config, mode=redactor.mode)
     redact_seconds = 0.0
     search_seconds = 0.0
+    redaction_read_bytes = 0
     for path in text_files:
         text = read_text_file(ctx.validate_path(path, expected="text"))
+        redaction_read_bytes += path.stat().st_size
         start = time.perf_counter()
         redacted = chunk_redactor.redact(text)
         redact_seconds += time.perf_counter() - start
@@ -645,6 +735,7 @@ def command_benchmark(args: argparse.Namespace, ctx: RedactedContext, redactor: 
         "text_files": len(text_files),
         "visible_bytes": visible_bytes,
         "text_characters": text_characters,
+        "redaction_read_bytes": redaction_read_bytes,
         "matches": matches,
         "timings_seconds": {
             "walk_and_text_detection": round(walk_seconds, 6),
@@ -663,6 +754,7 @@ def command_benchmark(args: argparse.Namespace, ctx: RedactedContext, redactor: 
     print(f"text_files: {result['text_files']}")
     print(f"visible_bytes: {result['visible_bytes']}")
     print(f"text_characters: {result['text_characters']}")
+    print(f"redaction_read_bytes: {result['redaction_read_bytes']}")
     print(f"matches: {result['matches']}")
     for name, seconds in result["timings_seconds"].items():
         print(f"{name}: {seconds:.6f}s")
@@ -685,6 +777,7 @@ def command_discover(args: argparse.Namespace, ctx: RedactedContext, redactor: R
         client=client,
         max_files=args.max_files,
         max_chars_per_file=args.max_chars_per_file,
+        max_total_raw_bytes=getattr(args, "max_total_raw_bytes", DEFAULT_MAX_TOTAL_RAW_BYTES),
         postprocess=not args.raw_discovery,
     )
     if args.format == "json":
@@ -835,6 +928,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     stat_parser = subparsers.add_parser("stat", help="show redacted path metadata")
     stat_parser.add_argument("path")
+    add_budget_arguments(stat_parser, include_files=False)
     stat_parser.set_defaults(func=command_stat)
 
     bundle_parser = subparsers.add_parser("bundle", help="concatenate redacted text files")
@@ -891,6 +985,7 @@ def build_parser() -> argparse.ArgumentParser:
     discover_parser.add_argument("--glob", action="append", default=[])
     discover_parser.add_argument("--max-files", type=int, default=DEFAULT_DISCOVERY_MAX_FILES)
     discover_parser.add_argument("--max-chars-per-file", type=int, default=DEFAULT_DISCOVERY_MAX_CHARS)
+    discover_parser.add_argument("--max-total-raw-bytes", type=int, default=DEFAULT_MAX_TOTAL_RAW_BYTES)
     discover_parser.add_argument("--format", choices=("toml", "json"), default="toml")
     discover_parser.add_argument(
         "--raw-discovery",

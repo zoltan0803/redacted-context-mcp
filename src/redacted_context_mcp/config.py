@@ -188,6 +188,7 @@ def load_or_create_vault_salt(root: Path) -> tuple[str, str]:
             except OSError:
                 pass
             os.replace(tmp_path, state_file)
+            fsync_directory(state_file.parent)
             return read_vault_salt(state_file), "local-state"
     except SystemExit:
         raise
@@ -219,6 +220,21 @@ def ensure_state_outside_root(root: Path, state_file: Path) -> None:
         resolved = raw.resolve(strict=False)
         if resolved == root_resolved or is_relative_to(resolved, root_resolved):
             raise SystemExit("The redacted-context state directory must be outside the served context root.")
+
+
+def fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def is_relative_to(path: Path, root: Path) -> bool:

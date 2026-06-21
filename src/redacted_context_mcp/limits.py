@@ -61,7 +61,7 @@ class OperationBudget:
         if self.max_files is not None and self.files_seen > self.max_files:
             raise OperationLimitError("File limit exceeded.")
         try:
-            size = path.stat().st_size
+            size = path.lstat().st_size
         except OSError as exc:
             raise OperationLimitError("Could not inspect file size.") from exc
         self.consume_raw_bytes(size)

@@ -1,6 +1,6 @@
 # Redacted Context MCP
 
-Read-only, redacted local knowledgebase context for coding agents.
+Read-only by default, redacted local knowledgebase context for coding agents.
 
 `redacted-context-mcp` lets Claude Code, Codex, or another MCP client inspect a
 private local knowledgebase through redacted tools instead of raw filesystem
@@ -29,7 +29,8 @@ agent workspace
 - Deterministic 128-bit HMAC placeholders such as
   `[PERSON_1a2b3c4d5e6f7890a1b2c3d4e5f60718]`.
 - Bounded operation budgets for traversals, reads, bundles, searches, audits,
-  benchmarks, and MCP resource reads.
+  benchmarks, discovery samples, MCP resource listing/reads, and controlled
+  write rehydration scans.
 - Redacted `tree`, `list`, `read`, `search`, `stat`, `bundle`, `audit`, and
   `benchmark` operations.
 - CLI-only `rehydrate` command for restoring redacted exports locally from the

@@ -9,6 +9,7 @@ tools/list + tools/call surface used by MCP clients.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import copy
 import contextlib
 import io
@@ -120,6 +121,10 @@ class RedactedContextMcp:
         enable_writes: bool = False,
         write_subdir: str = "incoming",
         max_resource_bytes: int = rc.DEFAULT_MAX_RESOURCE_BYTES,
+        max_traversal_entries: int = rc.DEFAULT_MAX_TRAVERSAL_ENTRIES,
+        max_submit_files: int = rc.DEFAULT_MAX_FILES,
+        max_raw_bytes_per_file: int = rc.DEFAULT_MAX_RAW_BYTES_PER_FILE,
+        max_total_raw_bytes: int = rc.DEFAULT_MAX_TOTAL_RAW_BYTES,
         cache_bytes: int = 2_000_000,
     ) -> None:
         self.root = root.expanduser().resolve()
@@ -131,12 +136,28 @@ class RedactedContextMcp:
         )
         self.ctx = rc.RedactedContext(self.root, config, include_private=include_private)
         self.redactor = rc.Redactor(config, mode=mode)
+        self.config_fingerprint = redaction_config_fingerprint(config)
         self.config_path = config_path
         self.mode = mode
         self.enable_writes = enable_writes
         self.write_root = resolve_write_root(self.root, write_subdir)
         self.max_resource_bytes = max_resource_bytes
+        self.max_traversal_entries = max_traversal_entries
+        self.max_submit_files = max_submit_files
+        self.max_raw_bytes_per_file = max_raw_bytes_per_file
+        self.max_total_raw_bytes = max_total_raw_bytes
         self.cache = RedactedContentCache(cache_bytes)
+
+    def traversal_budget(self) -> rc.OperationBudget:
+        return rc.OperationBudget(max_entries=self.max_traversal_entries)
+
+    def submit_budget(self) -> rc.OperationBudget:
+        return rc.OperationBudget(
+            max_files=self.max_submit_files,
+            max_raw_bytes_per_file=self.max_raw_bytes_per_file,
+            max_total_raw_bytes=self.max_total_raw_bytes,
+            max_entries=self.max_traversal_entries,
+        )
 
     def initialize(self, params: dict[str, Any]) -> dict[str, Any]:
         requested = str(params.get("protocolVersion") or "")
@@ -182,17 +203,20 @@ class RedactedContextMcp:
         page: list[Path] = []
         next_cursor: str | None = None
         seen = 0
-        for path in self.ctx.walk():
-            if not path.is_file() or not rc.is_probably_text(path):
-                continue
-            if seen < offset:
+        try:
+            for path in self.ctx.walk(budget=self.traversal_budget()):
+                if not path.is_file() or not rc.is_probably_text(path):
+                    continue
+                if seen < offset:
+                    seen += 1
+                    continue
+                if len(page) >= RESOURCE_PAGE_SIZE:
+                    next_cursor = str(offset + RESOURCE_PAGE_SIZE)
+                    break
+                page.append(path)
                 seen += 1
-                continue
-            if len(page) >= RESOURCE_PAGE_SIZE:
-                next_cursor = str(offset + RESOURCE_PAGE_SIZE)
-                break
-            page.append(path)
-            seen += 1
+        except rc.OperationLimitError as exc:
+            raise ProtocolError(-32002, "Resource listing limit exceeded.") from exc
         resources = [self.resource_for_path(path) for path in page]
         result: dict[str, Any] = {"resources": resources}
         if next_cursor is not None:
@@ -292,7 +316,7 @@ class RedactedContextMcp:
         if not isinstance(ref_id, str) or not ref_id.startswith("p_"):
             raise ProtocolError(-32002, "Resource not found.")
         try:
-            return self.ctx.resolve_id(ref_id)
+            return self.ctx.resolve_id(ref_id, budget=self.traversal_budget())
         except SystemExit as exc:
             raise ProtocolError(-32002, "Resource not found.") from exc
 
@@ -313,6 +337,7 @@ class RedactedContextMcp:
             int(info.st_size),
             self.mode,
             self.redactor.config.detector_profile,
+            self.config_fingerprint,
             preserve_line_count,
         )
         cached = self.cache.get(key)
@@ -326,7 +351,10 @@ class RedactedContextMcp:
     def submit_doc(self, *, target_path: str, text: str, overwrite: bool) -> str:
         if not self.enable_writes:
             raise ToolExecutionError("Writes are disabled. Start the server with --enable-writes.")
-        replacements = rc.build_rehydration_map(self.ctx, self.redactor)
+        try:
+            replacements = rc.build_rehydration_map(self.ctx, self.redactor, budget=self.submit_budget())
+        except rc.OperationLimitError as exc:
+            raise ToolExecutionError(str(exc) or "Rehydration map limit exceeded.") from exc
         restored_target, target_replacements = rc.rehydrate_text_with_count(target_path, replacements)
         unresolved_target = rc.unresolved_rehydration_tokens(restored_target)
         if unresolved_target:
@@ -410,6 +438,21 @@ def format_unresolved_tokens(field: str, tokens: list[str]) -> str:
     return f"Unresolved redaction token(s) in {field}: {preview}{suffix}."
 
 
+def redaction_config_fingerprint(config: rc.RedactionConfig) -> str:
+    payload = {
+        "clients": config.clients,
+        "organizations": config.organizations,
+        "people": config.people,
+        "terms": config.terms,
+        "allow": config.allow,
+        "exclude_dirs": config.exclude_dirs,
+        "exclude_globs": config.exclude_globs,
+        "detector_profile": config.detector_profile,
+    }
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def safe_error_message(exc: SystemExit, redactor: rc.Redactor) -> str:
     value = str(exc)
     if not value:
@@ -427,6 +470,14 @@ def safe_error_message(exc: SystemExit, redactor: rc.Redactor) -> str:
         "GitHub state must be open, closed, or all.",
         "Invalid regex.",
         "Refusing unsafe path.",
+        "Traversal entry limit exceeded.",
+        "File limit exceeded.",
+        "Raw file byte limit exceeded.",
+        "Total raw byte limit exceeded.",
+        "Operation deadline exceeded.",
+        "Discovery total byte limit exceeded.",
+        "Output already exists.",
+        "Could not publish output atomically.",
     }
     if (
         value in safe_messages
@@ -653,14 +704,24 @@ def redctx_doctor(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
 def redctx_audit(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
     return server.run_cli_command(
         rc.command_audit,
-        Namespace(format=string_arg(arguments, "format", "text")),
+        Namespace(
+            format=string_arg(arguments, "format", "text"),
+            writes_enabled=server.enable_writes,
+            write_subdir_confined=True,
+            max_raw_bytes_per_file=rc.DEFAULT_MAX_RAW_BYTES_PER_FILE,
+            max_total_raw_bytes=rc.DEFAULT_MAX_TOTAL_RAW_BYTES,
+            max_entries=server.max_traversal_entries,
+            max_seconds=None,
+        ),
     )
 
 
 def redctx_refresh_index(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
-    server.ctx.refresh_index()
+    try:
+        server.ctx.refresh_index(budget=server.traversal_budget())
+    except rc.OperationLimitError as exc:
+        raise ToolExecutionError(str(exc) or "Path index limit exceeded.") from exc
     server.cache.clear()
-    server.ctx.path_index()
     return "Refreshed path index.\n"
 
 
@@ -1049,6 +1110,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum raw bytes allowed for MCP resources/read",
     )
     parser.add_argument(
+        "--max-traversal-entries",
+        type=int,
+        default=rc.DEFAULT_MAX_TRAVERSAL_ENTRIES,
+        help="maximum entries inspected for MCP resource/index traversal",
+    )
+    parser.add_argument(
+        "--max-submit-files",
+        type=int,
+        default=rc.DEFAULT_MAX_FILES,
+        help="maximum files scanned while building redctx_submit_doc rehydration maps",
+    )
+    parser.add_argument(
+        "--max-raw-bytes-per-file",
+        type=int,
+        default=rc.DEFAULT_MAX_RAW_BYTES_PER_FILE,
+        help="maximum raw bytes per file for MCP submit-doc rehydration scans",
+    )
+    parser.add_argument(
+        "--max-total-raw-bytes",
+        type=int,
+        default=rc.DEFAULT_MAX_TOTAL_RAW_BYTES,
+        help="maximum total raw bytes for MCP submit-doc rehydration scans",
+    )
+    parser.add_argument(
         "--cache-bytes",
         type=int,
         default=2_000_000,
@@ -1068,6 +1153,10 @@ def main(argv: list[str] | None = None) -> int:
         enable_writes=args.enable_writes,
         write_subdir=args.write_subdir,
         max_resource_bytes=args.max_resource_bytes,
+        max_traversal_entries=args.max_traversal_entries,
+        max_submit_files=args.max_submit_files,
+        max_raw_bytes_per_file=args.max_raw_bytes_per_file,
+        max_total_raw_bytes=args.max_total_raw_bytes,
         cache_bytes=args.cache_bytes,
     )
     return serve(server)

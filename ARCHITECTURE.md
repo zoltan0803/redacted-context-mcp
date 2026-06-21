@@ -33,6 +33,9 @@ subdirectory.
 - File navigation uses local-salted HMAC ids such as `@p_1a2b3c4d5e6f`.
 - Filesystem traversal starts from validated paths, skips symlink and reparse
   entries, and revalidates paths before content reads and opaque-id resolution.
+- Content reads compare file metadata before and after reading to detect common
+  substitutions, but the project remains a guardrail rather than a hard
+  concurrent-mutation sandbox.
 - Redacted files are available as MCP resources with `redctx://p_<id>` URIs.
 - MCP resource content is cached only after redaction and is bounded by byte
   limits.
@@ -65,6 +68,11 @@ content directly and a relative target path. Overwrites require an explicit
 `overwrite` argument. Tool results return only redacted path metadata and opaque
 ids.
 
+No-overwrite writes are published from a same-directory temporary file without
+replacing an existing target where hard-link publication is available. Explicit
+overwrites use same-directory `os.replace`. Directory durability fsync is
+best-effort and POSIX-only.
+
 ## Redaction Model
 
 Redaction combines configured exact terms with conservative generic patterns:
@@ -93,10 +101,9 @@ It may contain exact client names, stakeholder names, project codenames, private
 repo names, and token environment variable names.
 
 If a config or environment salt is not supplied, the loader creates or reuses a
-random 256-bit vault salt in user-local state. Salt creation uses an exclusive
-lock and atomic replacement; empty, malformed, or root-contained state files
-fail closed instead of rotating aliases silently. `redctx doctor` reports the
-salt source.
+random 256-bit vault salt in user-local state. Missing state creates a new
+random salt. Existing empty, malformed, or root-contained state fails closed
+instead of rotating aliases silently. `redctx doctor` reports the salt source.
 
 `redctx discover` can draft that file with a local Ollama model. It is a setup
 command for a human operator, not an MCP tool, because its output intentionally

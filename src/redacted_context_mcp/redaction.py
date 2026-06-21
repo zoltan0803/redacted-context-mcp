@@ -33,6 +33,7 @@ from .defaults import (
     PATH_TOKEN_RE,
     PEM_PRIVATE_KEY_RE,
     PHONE_RE,
+    PLACEHOLDER_CATEGORIES,
     PLACEHOLDER_RE,
     PROMPT_INJECTION_RE,
     RESERVED_PLACEHOLDER_WORDS,
@@ -47,6 +48,10 @@ from .models import RedactionConfig
 
 
 LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
+PUA_RADIX = 1024
+PUA_BLOCK_SIZE = PUA_RADIX + 2
+PUA_MIN = 0xE000
+PUA_MAX = 0xF8FF
 
 
 class RedactionCollisionError(RuntimeError):
@@ -59,19 +64,22 @@ def preserved_line_breaks(value: str) -> str:
 
 class RedactionSession:
     def __init__(self, source: str) -> None:
-        for codepoint in range(0xE000, 0xF8FE, 2):
-            prefix = chr(codepoint)
-            suffix = chr(codepoint + 1)
-            if prefix not in source and suffix not in source:
-                self.prefix = prefix
-                self.suffix = suffix
+        source_chars = set(source)
+        for codepoint in range(PUA_MIN, PUA_MAX - PUA_BLOCK_SIZE + 2, PUA_BLOCK_SIZE):
+            block = [chr(value) for value in range(codepoint, codepoint + PUA_BLOCK_SIZE)]
+            if not source_chars.intersection(block):
+                self.prefix = block[0]
+                self.suffix = block[1]
+                self.digit_base = codepoint + 2
+                digit_start = re.escape(chr(self.digit_base))
+                digit_end = re.escape(chr(self.digit_base + PUA_RADIX - 1))
+                self.restore_re = re.compile(
+                    re.escape(self.prefix) + f"([{digit_start}-{digit_end}]+)" + re.escape(self.suffix)
+                )
                 break
         else:
             raise ValueError("Could not allocate internal redaction markers.")
         self.replacements: list[str] = []
-        self.restore_re = re.compile(
-            re.escape(self.prefix) + r"(\d+)" + re.escape(self.suffix)
-        )
 
     def stash_allowed(self, value: str) -> str:
         return self._stash(value)
@@ -81,12 +89,32 @@ class RedactionSession:
         return self._stash(placeholder) + suffix
 
     def restore_all(self, text: str) -> str:
-        return self.restore_re.sub(lambda match: self.replacements[int(match.group(1))], text)
+        return self.restore_re.sub(lambda match: self.replacements[self.decode_marker_index(match.group(1))], text)
 
     def _stash(self, value: str) -> str:
-        marker = f"{self.prefix}{len(self.replacements)}{self.suffix}"
+        marker = f"{self.prefix}{self.encode_marker_index(len(self.replacements))}{self.suffix}"
         self.replacements.append(value)
         return marker
+
+    def encode_marker_index(self, index: int) -> str:
+        if index < 0:
+            raise ValueError("Marker index must be non-negative.")
+        digits: list[str] = []
+        while True:
+            digits.append(chr(self.digit_base + (index % PUA_RADIX)))
+            index //= PUA_RADIX
+            if index == 0:
+                break
+        return "".join(reversed(digits))
+
+    def decode_marker_index(self, value: str) -> int:
+        index = 0
+        for char in value:
+            digit = ord(char) - self.digit_base
+            if digit < 0 or digit >= PUA_RADIX:
+                raise ValueError("Invalid marker digit.")
+            index = index * PUA_RADIX + digit
+        return index
 
 
 @dataclass
@@ -249,7 +277,7 @@ class Redactor:
                 preserve_line_count=preserve_line_count,
             )
 
-        return f"{match.group(1)}: {TITLECASE_TOKEN_RE.sub(replace_name, match.group(2))}"
+        return f"{match.group(1)}{match.group(2)}:{match.group(3)}{TITLECASE_TOKEN_RE.sub(replace_name, match.group(4))}"
 
     def _replace_multi_proper(
         self,
@@ -302,24 +330,7 @@ class Redactor:
         if (
             key in self.allow_lookup
             or key in PATH_ALLOW_TERMS
-            or value
-            in {
-                "CLIENT",
-                "ORG",
-                "PERSON",
-                "SENSITIVE",
-                "ENTITY",
-                "EMAIL",
-                "PHONE",
-                "URL",
-                "HANDLE",
-                "SECRET",
-                "SSN",
-                "CARD",
-                "IP",
-                "ID",
-                "DOMAIN",
-            }
+            or value in PLACEHOLDER_CATEGORIES
         ):
             return value
         return self.placeholder("ENTITY", value)

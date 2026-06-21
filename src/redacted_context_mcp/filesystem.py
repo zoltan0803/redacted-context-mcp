@@ -9,10 +9,12 @@ import stat
 from pathlib import Path
 from typing import Iterable
 
-from .defaults import DEFAULT_EXCLUDE_DIRS, DEFAULT_EXCLUDE_GLOBS, TEXT_EXTENSIONS
-from .limits import OperationBudget
+from .defaults import DEFAULT_EXCLUDE_DIRS, DEFAULT_EXCLUDE_GLOBS, DEFAULT_MAX_TRAVERSAL_ENTRIES, TEXT_EXTENSIONS
+from .limits import OperationBudget, OperationLimitError
 from .models import RedactionConfig
 from .paths import path_id, rel_posix
+
+TEXT_DETECTION_PREFIX_BYTES = 4096
 
 
 class RedactedContext:
@@ -99,8 +101,14 @@ class RedactedContext:
     def display_ref(self, rel_path: str) -> str:
         return f"@{self.path_id(rel_path)}"
 
-    def resolve_id(self, ref_id: str, *, expected: str | None = None) -> Path:
-        index = self.path_index()
+    def resolve_id(
+        self,
+        ref_id: str,
+        *,
+        expected: str | None = None,
+        budget: OperationBudget | None = None,
+    ) -> Path:
+        index = self.path_index(budget=budget)
         rel = index.get(ref_id)
         if rel is None:
             raise SystemExit(f"Unknown path id: @{ref_id}")
@@ -111,33 +119,39 @@ class RedactedContext:
             return path
         except SystemExit as exc:
             self.invalidate_path_index()
-            self.refresh_path_index()
-            if ref_id not in (self._path_index or {}):
+            refreshed = self.refresh_path_index(budget=budget)
+            if ref_id not in refreshed:
                 raise SystemExit(f"Unknown path id: @{ref_id}") from exc
             raise
 
     def invalidate_path_index(self) -> None:
         self._path_index = None
 
-    def refresh_index(self) -> None:
+    def refresh_index(self, *, budget: OperationBudget | None = None) -> dict[str, str]:
         self.invalidate_path_index()
-        self.path_index()
+        return self.path_index(budget=budget)
 
-    def refresh_path_index(self) -> None:
-        self.refresh_index()
+    def refresh_path_index(self, *, budget: OperationBudget | None = None) -> dict[str, str]:
+        return self.refresh_index(budget=budget)
 
-    def path_index(self) -> dict[str, str]:
-        if self._path_index is not None:
+    def path_index(self, *, budget: OperationBudget | None = None) -> dict[str, str]:
+        if self._path_index is not None and budget is None:
             return self._path_index
         index: dict[str, str] = {}
-        for path in self.walk(include_dirs=True):
-            rel = rel_posix(path, self.root)
-            ref_id = self.path_id(rel)
-            existing = index.get(ref_id)
-            if existing is not None and existing != rel:
-                raise SystemExit("Opaque path id collision detected.")
-            index[ref_id] = rel
-        self._path_index = index
+        index_budget = budget or OperationBudget(max_entries=DEFAULT_MAX_TRAVERSAL_ENTRIES)
+        try:
+            for path in self.walk(include_dirs=True, budget=index_budget):
+                rel = rel_posix(path, self.root)
+                ref_id = self.path_id(rel)
+                existing = index.get(ref_id)
+                if existing is not None and existing != rel:
+                    raise SystemExit("Opaque path id collision detected.")
+                index[ref_id] = rel
+        except OperationLimitError:
+            self._path_index = None
+            raise
+        if budget is None:
+            self._path_index = index
         return index
 
     def is_excluded(self, path: Path) -> bool:
@@ -200,7 +214,7 @@ class RedactedContext:
             yield path
         if max_depth is not None and depth >= max_depth:
             return
-        for child in self._safe_child_entries(path):
+        for child in self._safe_child_entries(path, budget=budget):
             if self.is_excluded(child):
                 continue
             try:
@@ -217,24 +231,22 @@ class RedactedContext:
                     budget=budget,
                 )
             else:
-                budget.consume_entry()
                 yield child
 
     def child_entries(self, path: Path, *, budget: OperationBudget | None = None) -> list[Path]:
         path = self.validate_path(path)
         if path.is_file():
             return [path]
-        entries = [child for child in self._safe_child_entries(path) if not self.is_excluded(child)]
-        if budget is not None:
-            for _entry in entries:
-                budget.consume_entry()
+        entries = [child for child in self._safe_child_entries(path, budget=budget) if not self.is_excluded(child)]
         return entries
 
-    def _safe_child_entries(self, path: Path) -> list[Path]:
+    def _safe_child_entries(self, path: Path, *, budget: OperationBudget | None = None) -> list[Path]:
         children: list[tuple[tuple[int, str], Path]] = []
         try:
             with os.scandir(path) as entries:
                 for entry in entries:
+                    if budget is not None:
+                        budget.consume_entry()
                     child = Path(entry.path)
                     try:
                         if entry.is_symlink() or is_reparse_point(child):
@@ -265,6 +277,7 @@ class RedactedContext:
             try:
                 with os.scandir(path) as entries:
                     for entry in entries:
+                        scan_budget.consume_entry()
                         child = Path(entry.path)
                         if self.is_excluded(child):
                             continue
@@ -287,8 +300,11 @@ class RedactedContext:
 def is_probably_text(path: Path) -> bool:
     if path.suffix.casefold() in TEXT_EXTENSIONS or path.name in {".gitignore"}:
         return True
+    if path.is_symlink() or is_reparse_point(path) or not path.is_file():
+        return False
     try:
-        chunk = path.read_bytes()[:4096]
+        with path.open("rb") as handle:
+            chunk = handle.read(TEXT_DETECTION_PREFIX_BYTES)
     except OSError:
         return False
     return is_probably_text_bytes(chunk)
@@ -299,6 +315,11 @@ def is_probably_text_bytes(chunk: bytes) -> bool:
         return False
     if not chunk:
         return True
+    try:
+        chunk.decode("utf-8-sig")
+        return True
+    except UnicodeDecodeError:
+        pass
     textish = sum(byte in b"\n\r\t" or 32 <= byte <= 126 for byte in chunk)
     return textish / len(chunk) > 0.85
 
@@ -331,15 +352,41 @@ def file_identity(path: Path) -> tuple[int, int] | None:
 
 
 def read_text_file(path: Path, *, budget: OperationBudget | None = None) -> str:
+    data = read_file_bytes_verified(path, budget=budget)
+    if not is_probably_text_bytes(data[:TEXT_DETECTION_PREFIX_BYTES]):
+        raise SystemExit("Refusing to print non-text file. Use stat/list to inspect metadata.")
+    return data.decode("utf-8-sig", errors="replace")
+
+
+def read_file_bytes_verified(path: Path, *, budget: OperationBudget | None = None) -> bytes:
     if path.is_symlink() or is_reparse_point(path):
         raise SystemExit("Refusing unsafe path.")
-    if not path.is_file():
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise SystemExit("Path does not exist.") from exc
+    if not stat.S_ISREG(before.st_mode):
         raise SystemExit("Not a file.")
     if budget is not None:
         budget.consume_file(path)
-    if not is_probably_text(path):
-        raise SystemExit("Refusing to print non-text file. Use stat/list to inspect metadata.")
-    return path.read_text(encoding="utf-8-sig", errors="replace")
+    try:
+        data = path.read_bytes()
+        after = path.lstat()
+    except OSError as exc:
+        raise SystemExit("Could not read file.") from exc
+    if file_metadata_key(before) != file_metadata_key(after):
+        raise SystemExit("File changed during read.")
+    return data
+
+
+def file_metadata_key(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        int(getattr(info, "st_dev", 0)),
+        int(getattr(info, "st_ino", 0)),
+        int(info.st_mode),
+        int(info.st_size),
+        int(info.st_mtime_ns),
+    )
 
 
 def iter_target_files(

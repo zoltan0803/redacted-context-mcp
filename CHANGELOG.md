@@ -2,10 +2,12 @@
 
 ## 0.4.0
 
-- Hardens filesystem containment for stale opaque ids, symlink and reparse-point
-  races, write destinations, and MCP resource reads.
-- Changes default vault-salt creation to fail closed on missing, malformed, or
-  unsafe local state instead of silently rotating aliases.
+- Revalidates stale opaque ids, rejects detected symlink/reparse substitutions,
+  and verifies file metadata around content reads where the standard library
+  allows.
+- Changes default vault-salt handling so missing state creates and persists a
+  new random salt, while malformed or unsafe existing state fails closed instead
+  of silently rotating aliases.
 - Adds per-call redaction receipts, bounded operation budgets, and a bounded
   redacted-only MCP resource cache.
 - Preserves line counts when multi-line secrets are redacted before search
@@ -13,7 +15,7 @@
 - Speeds ordinary no-match literal searches by using a raw-byte prefilter while
   keeping placeholder-sensitive and regex searches on the full redaction path.
 - Adds security regression tests, UTF-8 stdio handling, SHA-pinned CI actions,
-  and package validation coverage for the 0.4.0 release.
+  and CI package validation for the 0.4.0 release.
 
 ## 0.3.0
 
