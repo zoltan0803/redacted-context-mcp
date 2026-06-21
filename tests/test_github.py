@@ -11,6 +11,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from redacted_context_mcp import core, server
+from redacted_context_mcp.github import opaque_github_user
+from redacted_context_mcp.models import RedactionConfig
 from tests.fixtures import CLIENT_NAME, ORGANIZATION_NAME, PERSON_ONE, PERSON_TWO, PROJECT_TERM, write_redaction_config
 
 
@@ -31,14 +33,19 @@ class FakeHttpResponse:
 class GitHubIssueTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
+        self.state_tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        self.env_patch = patch.dict(os.environ, {"REDACTED_CONTEXT_STATE_DIR": self.state_tmp.name})
+        self.env_patch.start()
         write_redaction_config(self.root, github=True)
         self.config = core.load_config(self.root, None)
         self.ctx = core.RedactedContext(self.root, self.config)
         self.redactor = core.Redactor(self.config)
 
     def tearDown(self) -> None:
+        self.env_patch.stop()
         self.tmp.cleanup()
+        self.state_tmp.cleanup()
 
     def run_command(self, command: object, args: Namespace) -> str:
         output = io.StringIO()
@@ -108,6 +115,8 @@ class GitHubIssueTest(unittest.TestCase):
 
         self.assertIn("issue: #9", output)
         self.assertIn("author: user_", output)
+        self.assertIn("body_untrusted_external:", output)
+        self.assertIn("comment_untrusted_external:", output)
         self.assertIn("assignees: 1", output)
         for raw in [
             CLIENT_NAME,
@@ -121,6 +130,19 @@ class GitHubIssueTest(unittest.TestCase):
             "private-context",
         ]:
             self.assertNotIn(raw, output)
+
+    def test_github_user_alias_is_salt_and_repo_scoped(self) -> None:
+        user = {"login": "same-user"}
+
+        first = opaque_github_user(user, RedactionConfig(salt="salt-one"), "context")
+        same = opaque_github_user(user, RedactionConfig(salt="salt-one"), "context")
+        different_salt = opaque_github_user(user, RedactionConfig(salt="salt-two"), "context")
+        different_repo = opaque_github_user(user, RedactionConfig(salt="salt-one"), "other")
+
+        self.assertEqual(first, same)
+        self.assertNotEqual(first, different_salt)
+        self.assertNotEqual(first, different_repo)
+        self.assertRegex(first, r"^user_[0-9a-f]{16}$")
 
     def test_mcp_exposes_github_issue_tools(self) -> None:
         mcp = server.RedactedContextMcp(

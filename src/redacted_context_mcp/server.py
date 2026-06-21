@@ -15,6 +15,7 @@ import io
 import json
 import sys
 from argparse import Namespace
+from collections import OrderedDict
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,7 @@ try:
     from . import __version__
     from . import core as rc
 except ImportError:  # pragma: no cover - direct script fallback
-    __version__ = "0.3.0"
+    __version__ = "0.4.0"
     package_root = Path(__file__).resolve().parents[1]
     if str(package_root) not in sys.path:
         sys.path.insert(0, str(package_root))
@@ -41,6 +42,22 @@ READ_ONLY_ANNOTATIONS = {
     "readOnlyHint": True,
     "destructiveHint": False,
     "idempotentHint": True,
+    "openWorldHint": False,
+}
+TEXT_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "text": {"type": "string"},
+        "receipt": {
+            "type": "object",
+            "properties": {
+                "detector_profile": {"type": "string"},
+                "counts_by_category": {"type": "object"},
+            },
+        },
+    },
+    "required": ["text", "receipt"],
+    "additionalProperties": False,
 }
 
 
@@ -55,6 +72,43 @@ class ToolExecutionError(Exception):
     pass
 
 
+class RedactedContentCache:
+    def __init__(self, max_bytes: int) -> None:
+        self.max_bytes = max(0, max_bytes)
+        self.current_bytes = 0
+        self.entries: OrderedDict[tuple[object, ...], str] = OrderedDict()
+
+    def get(self, key: tuple[object, ...]) -> str | None:
+        value = self.entries.get(key)
+        if value is None:
+            return None
+        self.entries.move_to_end(key)
+        return value
+
+    def put(self, key: tuple[object, ...], value: str) -> None:
+        if self.max_bytes <= 0:
+            return
+        size = len(value.encode("utf-8"))
+        if size > self.max_bytes:
+            return
+        old = self.entries.pop(key, None)
+        if old is not None:
+            self.current_bytes -= len(old.encode("utf-8"))
+        self.entries[key] = value
+        self.current_bytes += size
+        self.entries.move_to_end(key)
+        while self.current_bytes > self.max_bytes and self.entries:
+            _old_key, old_value = self.entries.popitem(last=False)
+            self.current_bytes -= len(old_value.encode("utf-8"))
+
+    def clear(self) -> None:
+        self.entries.clear()
+        self.current_bytes = 0
+
+    def stats(self) -> dict[str, int]:
+        return {"entries": len(self.entries), "bytes": self.current_bytes, "max_bytes": self.max_bytes}
+
+
 class RedactedContextMcp:
     def __init__(
         self,
@@ -65,6 +119,8 @@ class RedactedContextMcp:
         include_private: bool,
         enable_writes: bool = False,
         write_subdir: str = "incoming",
+        max_resource_bytes: int = rc.DEFAULT_MAX_RESOURCE_BYTES,
+        cache_bytes: int = 2_000_000,
     ) -> None:
         self.root = root.expanduser().resolve()
         if not self.root.exists() or not self.root.is_dir():
@@ -79,6 +135,8 @@ class RedactedContextMcp:
         self.mode = mode
         self.enable_writes = enable_writes
         self.write_root = resolve_write_root(self.root, write_subdir)
+        self.max_resource_bytes = max_resource_bytes
+        self.cache = RedactedContentCache(cache_bytes)
 
     def initialize(self, params: dict[str, Any]) -> dict[str, Any]:
         requested = str(params.get("protocolVersion") or "")
@@ -96,7 +154,8 @@ class RedactedContextMcp:
             },
             "instructions": (
                 "Use redctx_tree, redctx_list, redctx_read, redctx_search, "
-                "redctx_stat, redctx_bundle, redctx_doctor, and redctx_github_* "
+                "redctx_stat, redctx_bundle, redctx_doctor, redctx_audit, "
+                "redctx_refresh_index, and redctx_github_* "
                 "tools for confidential local context. Redacted files are also "
                 "available as redctx://p_<id> MCP resources. Results are redacted "
                 "and file tools use opaque @p_<id> path references."
@@ -120,12 +179,24 @@ class RedactedContextMcp:
 
     def list_resources(self, params: dict[str, Any]) -> dict[str, Any]:
         offset = parse_cursor(params.get("cursor"))
-        paths = [path for path in self.ctx.walk() if path.is_file() and rc.is_probably_text(path)]
-        page = paths[offset : offset + RESOURCE_PAGE_SIZE]
+        page: list[Path] = []
+        next_cursor: str | None = None
+        seen = 0
+        for path in self.ctx.walk():
+            if not path.is_file() or not rc.is_probably_text(path):
+                continue
+            if seen < offset:
+                seen += 1
+                continue
+            if len(page) >= RESOURCE_PAGE_SIZE:
+                next_cursor = str(offset + RESOURCE_PAGE_SIZE)
+                break
+            page.append(path)
+            seen += 1
         resources = [self.resource_for_path(path) for path in page]
         result: dict[str, Any] = {"resources": resources}
-        if offset + RESOURCE_PAGE_SIZE < len(paths):
-            result["nextCursor"] = str(offset + RESOURCE_PAGE_SIZE)
+        if next_cursor is not None:
+            result["nextCursor"] = next_cursor
         return result
 
     def read_resource(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -136,16 +207,16 @@ class RedactedContextMcp:
         if self.ctx.is_excluded(path):
             raise ProtocolError(-32002, "Resource not found.")
         try:
-            text = rc.read_text_file(path)
-        except SystemExit as exc:
-            raise ProtocolError(-32002, "Resource not found.") from exc
+            text = self.redacted_file_text(path)
+        except (SystemExit, ToolExecutionError) as exc:
+            raise ProtocolError(-32002, str(exc) or "Resource not found.") from exc
         rel = rc.rel_posix(path, self.ctx.root)
         return {
             "contents": [
                 {
                     "uri": resource_uri(self.ctx.path_id(rel)),
                     "mimeType": mime_type_for_path(path),
-                    "text": self.redactor.redact(text),
+                    "text": text,
                 }
             ]
         }
@@ -168,12 +239,21 @@ class RedactedContextMcp:
         if handler is None:
             raise ProtocolError(-32602, f"Unknown tool: {name}")
         try:
+            before = self.redactor.stats_snapshot()
             validate_tool_arguments(name, arguments)
             text = handler(self, arguments)
         except ToolExecutionError as exc:
             text = str(exc) or "Tool execution failed."
-            return {"content": [{"type": "text", "text": text}], "isError": True}
-        return {"content": [{"type": "text", "text": text}], "isError": False}
+            return {
+                "content": [{"type": "text", "text": text}],
+                "structuredContent": {"text": text, "receipt": self.redactor.receipt(before if "before" in locals() else None)},
+                "isError": True,
+            }
+        return {
+            "content": [{"type": "text", "text": text}],
+            "structuredContent": {"text": text, "receipt": self.redactor.receipt(before)},
+            "isError": False,
+        }
 
     def run_cli_command(self, command: Callable[[Namespace, rc.RedactedContext, rc.Redactor], int], args: Namespace) -> str:
         stdout = io.StringIO()
@@ -186,6 +266,8 @@ class RedactedContextMcp:
             raise ToolExecutionError("Tool execution failed.") from exc
 
         output = stdout.getvalue()
+        if status == 1 and output.strip():
+            raise ToolExecutionError(output)
         if status == 1 and not output.strip():
             return "No matches.\n"
         return output or "OK\n"
@@ -214,6 +296,33 @@ class RedactedContextMcp:
         except SystemExit as exc:
             raise ProtocolError(-32002, "Resource not found.") from exc
 
+    def redacted_file_text(self, path: Path, *, preserve_line_count: bool = False) -> str:
+        path = self.ctx.validate_path(path, expected="text")
+        try:
+            info = path.stat()
+        except OSError as exc:
+            raise ToolExecutionError("Resource not found.") from exc
+        if info.st_size > self.max_resource_bytes:
+            raise ToolExecutionError("Resource exceeds the server resource byte limit. Use redctx_read with a narrower range.")
+        rel = rc.rel_posix(path, self.ctx.root)
+        key = (
+            rel,
+            int(getattr(info, "st_dev", 0)),
+            int(getattr(info, "st_ino", 0)),
+            int(info.st_mtime_ns),
+            int(info.st_size),
+            self.mode,
+            self.redactor.config.detector_profile,
+            preserve_line_count,
+        )
+        cached = self.cache.get(key)
+        if cached is not None:
+            return cached
+        text = rc.read_text_file(path)
+        redacted = self.redactor.redact(text, preserve_line_count=preserve_line_count)
+        self.cache.put(key, redacted)
+        return redacted
+
     def submit_doc(self, *, target_path: str, text: str, overwrite: bool) -> str:
         if not self.enable_writes:
             raise ToolExecutionError("Writes are disabled. Start the server with --enable-writes.")
@@ -234,8 +343,12 @@ class RedactedContextMcp:
             if not overwrite:
                 raise ToolExecutionError("Target already exists. Pass overwrite=true to replace it.")
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(restored_text, encoding="utf-8")
+        try:
+            rc.atomic_write_text(output_path, restored_text, overwrite=overwrite)
+        except SystemExit as exc:
+            raise ToolExecutionError(str(exc) or "Write failed.") from exc
+        self.ctx.refresh_index()
+        self.cache.clear()
         rel = rc.rel_posix(output_path, self.root)
         total_replacements = target_replacements + text_replacements
         return (
@@ -254,7 +367,13 @@ def resolve_write_root(root: Path, write_subdir: str) -> Path:
     path = Path(value)
     if path.is_absolute() or any(part in {"..", ""} for part in path.parts) or path == Path("."):
         raise SystemExit("--write-subdir must be a relative subdirectory under root.")
-    write_root = (root / path).resolve(strict=False)
+    raw_write_root = root / path
+    for current in [raw_write_root, *raw_write_root.parents]:
+        if current == root.parent:
+            break
+        if current.is_symlink() or rc.is_reparse_point(current):
+            raise SystemExit("--write-subdir must not contain symlinks or reparse points.")
+    write_root = raw_write_root.resolve(strict=False)
     try:
         write_root.relative_to(root)
     except ValueError as exc:
@@ -271,7 +390,13 @@ def resolve_submit_target(write_root: Path, target_path: str) -> Path:
     path = Path(value)
     if path.is_absolute() or any(part in {"..", ""} for part in path.parts) or path == Path("."):
         raise ToolExecutionError("target_path must be a relative file path inside the write subdirectory.")
-    output_path = (write_root / path).resolve(strict=False)
+    raw_output_path = write_root / path
+    for current in [raw_output_path, *raw_output_path.parents]:
+        if current == write_root.parent:
+            break
+        if current.is_symlink() or rc.is_reparse_point(current):
+            raise ToolExecutionError("target_path must not contain symlinks.")
+    output_path = raw_output_path.resolve(strict=False)
     try:
         output_path.relative_to(write_root)
     except ValueError as exc:
@@ -300,19 +425,20 @@ def safe_error_message(exc: SystemExit, redactor: rc.Redactor) -> str:
         "GitHub issue was not found.",
         "Could not reach GitHub API.",
         "GitHub state must be open, closed, or all.",
+        "Invalid regex.",
+        "Refusing unsafe path.",
     }
     if (
         value in safe_messages
         or value.startswith("Unknown path id: @")
         or value.startswith("GitHub request failed for repo alias")
-        or value.startswith("Could not reach GitHub API:")
         or value.startswith("Could not verify GitHub's TLS certificate.")
         or value.startswith("--limit must be at least")
         or value.startswith("--max-comments must be at least")
         or value.startswith("--max-body-chars must be at least")
     ):
         return value
-    return redactor.redact_path(value)
+    return "Tool execution failed."
 
 
 def parse_cursor(value: object) -> int:
@@ -351,6 +477,7 @@ def public_tool_definition(tool: dict[str, Any]) -> dict[str, Any]:
         schema.setdefault("type", "object")
         schema.setdefault("properties", {})
         schema.setdefault("additionalProperties", False)
+    formatted.setdefault("outputSchema", copy.deepcopy(TEXT_OUTPUT_SCHEMA))
     return formatted
 
 
@@ -523,6 +650,20 @@ def redctx_doctor(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
     )
 
 
+def redctx_audit(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
+    return server.run_cli_command(
+        rc.command_audit,
+        Namespace(format=string_arg(arguments, "format", "text")),
+    )
+
+
+def redctx_refresh_index(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
+    server.ctx.refresh_index()
+    server.cache.clear()
+    server.ctx.path_index()
+    return "Refreshed path index.\n"
+
+
 def redctx_github_repos(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
     return server.run_cli_command(
         rc.command_github_repos,
@@ -579,6 +720,8 @@ TOOL_HANDLERS: dict[str, Callable[[RedactedContextMcp, dict[str, Any]], str]] = 
     "redctx_bundle": redctx_bundle,
     "redctx_submit_doc": redctx_submit_doc,
     "redctx_doctor": redctx_doctor,
+    "redctx_audit": redctx_audit,
+    "redctx_refresh_index": redctx_refresh_index,
     "redctx_github_repos": redctx_github_repos,
     "redctx_github_list_issues": redctx_github_list_issues,
     "redctx_github_read_issue": redctx_github_read_issue,
@@ -680,6 +823,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "readOnlyHint": False,
             "destructiveHint": True,
             "idempotentHint": False,
+            "openWorldHint": False,
         },
         "inputSchema": {
             "type": "object",
@@ -707,13 +851,40 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
+        "name": "redctx_audit",
+        "description": "Run safe local redaction and containment checks without printing sensitive terms.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "format": {"type": "string", "enum": ["text", "json"], "default": "text"},
+            },
+        },
+    },
+    {
+        "name": "redctx_refresh_index",
+        "description": "Refresh the in-memory opaque path index for the configured local root.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "redctx_github_repos",
         "description": "List configured GitHub repo aliases. Aliases should be neutral names such as context.",
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        },
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "redctx_github_list_issues",
         "description": "List redacted GitHub issues from a configured repo alias.",
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        },
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -731,6 +902,12 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "redctx_github_read_issue",
         "description": "Read one redacted GitHub issue by configured repo alias and issue number.",
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        },
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -750,6 +927,12 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "redctx_github_search_issues",
         "description": "Search GitHub issues in a configured repo alias and return redacted summaries.",
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        },
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -810,13 +993,19 @@ def write_response(request_id: Any, *, result: dict[str, Any] | None = None, err
         response["error"] = error
     else:
         response["result"] = result if result is not None else {}
-    sys.stdout.write(json.dumps(response, separators=(",", ":"), ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    payload = (json.dumps(response, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+    if hasattr(sys.stdout, "buffer"):
+        sys.stdout.buffer.write(payload)
+        sys.stdout.buffer.flush()
+    else:  # pragma: no cover - nonstandard stream
+        sys.stdout.write(payload.decode("utf-8"))
+        sys.stdout.flush()
 
 
 def serve(server: RedactedContextMcp) -> int:
-    for line in sys.stdin:
-        raw = line.strip()
+    input_stream = getattr(sys.stdin, "buffer", sys.stdin)
+    for line in input_stream:
+        raw = line.decode("utf-8", errors="replace").strip() if isinstance(line, bytes) else line.strip()
         if not raw:
             continue
         request_id: Any = None
@@ -853,10 +1042,23 @@ def build_parser() -> argparse.ArgumentParser:
         default="incoming",
         help="relative private-root subdirectory used by redctx_submit_doc",
     )
+    parser.add_argument(
+        "--max-resource-bytes",
+        type=int,
+        default=rc.DEFAULT_MAX_RESOURCE_BYTES,
+        help="maximum raw bytes allowed for MCP resources/read",
+    )
+    parser.add_argument(
+        "--cache-bytes",
+        type=int,
+        default=2_000_000,
+        help="maximum in-memory bytes for redacted MCP content cache",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    rc.configure_stdio_utf8()
     args = build_parser().parse_args(argv)
     server = RedactedContextMcp(
         root=args.root,
@@ -865,6 +1067,8 @@ def main(argv: list[str] | None = None) -> int:
         include_private=args.include_private,
         enable_writes=args.enable_writes,
         write_subdir=args.write_subdir,
+        max_resource_bytes=args.max_resource_bytes,
+        cache_bytes=args.cache_bytes,
     )
     return serve(server)
 

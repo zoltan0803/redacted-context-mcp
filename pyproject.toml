@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "redacted-context-mcp"
-version = "0.3.0"
-description = "Read-only redacted local knowledgebase context over MCP for coding agents."
+version = "0.4.0"
+description = "Read-only-by-default redacted local knowledgebase context over MCP for coding agents."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -68,6 +68,7 @@ include = [
   "/LICENSE",
   "/README.md",
   "/SECURITY.md",
+  "/SECURITY_INVARIANTS.md",
   "/SETUP.md",
   "/pyproject.toml"
 ]

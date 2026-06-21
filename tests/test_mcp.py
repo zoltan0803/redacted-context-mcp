@@ -22,7 +22,9 @@ ENV = {
 class RedactedContextMcpTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
+        self.state_tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        self.state_dir = Path(self.state_tmp.name)
         write_knowledgebase(self.root)
         self.proc: subprocess.Popen[str] | None = None
         self.start_server()
@@ -42,13 +44,14 @@ class RedactedContextMcpTest(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=PROJECT_ROOT,
-            env=ENV,
+            env={**ENV, "REDACTED_CONTEXT_STATE_DIR": str(self.state_dir)},
         )
         self.next_id = 1
 
     def tearDown(self) -> None:
         self.stop_server()
         self.tmp.cleanup()
+        self.state_tmp.cleanup()
 
     def stop_server(self) -> None:
         if self.proc is None:
@@ -116,7 +119,11 @@ class RedactedContextMcpTest(unittest.TestCase):
         self.assertIn("redctx_search", names)
         read_tool = next(tool for tool in tools if tool["name"] == "redctx_read")
         self.assertTrue(read_tool["annotations"]["readOnlyHint"])
+        self.assertFalse(read_tool["annotations"]["openWorldHint"])
         self.assertFalse(read_tool["inputSchema"]["additionalProperties"])
+        self.assertIn("outputSchema", read_tool)
+        github_tool = next(tool for tool in tools if tool["name"] == "redctx_github_list_issues")
+        self.assertTrue(github_tool["annotations"]["openWorldHint"])
         self.assertNotIn("redctx_submit_doc", names)
 
     def test_list_read_and_search_are_redacted(self) -> None:
@@ -131,9 +138,10 @@ class RedactedContextMcpTest(unittest.TestCase):
         read = self.call_tool("redctx_read", {"path": ref})
         read_text = read["content"][0]["text"]
         self.assertFalse(read["isError"])
+        self.assertEqual(read["structuredContent"]["text"], read_text)
         for raw in RAW_PRIVATE_VALUES:
             self.assertNotIn(raw, read_text)
-        self.assertRegex(read_text, r"\[CLIENT_[0-9a-f]{8}\]")
+        self.assertRegex(read_text, r"\[CLIENT_[0-9a-f]{32}\]")
         self.assertIn("Azure", read_text)
         self.assertIn(PUBLIC_TECH, read_text)
 
@@ -198,7 +206,7 @@ class RedactedContextMcpTest(unittest.TestCase):
         read = self.rpc("resources/read", {"uri": resource["uri"]})["result"]
         text = read["contents"][0]["text"]
 
-        self.assertRegex(text, r"\[CLIENT_[0-9a-f]{8}\]")
+        self.assertRegex(text, r"\[CLIENT_[0-9a-f]{32}\]")
         for raw in RAW_PRIVATE_VALUES:
             self.assertNotIn(raw, text)
 
@@ -243,7 +251,7 @@ class RedactedContextMcpTest(unittest.TestCase):
         self.assertIn("Client Alpha", written)
         self.assertIn("Taylor Reed", written)
         self.assertIn("Jordan Vale", written)
-        self.assertNotRegex(written, r"\[(?:CLIENT|PERSON|ORG)_[0-9a-f]{8}\]")
+        self.assertNotRegex(written, r"\[(?:CLIENT|PERSON|ORG)_[0-9a-f]{32}\]")
 
     def test_submit_doc_rejects_unsafe_paths_unresolved_tokens_and_overwrite(self) -> None:
         self.restart_server("--enable-writes", "--write-subdir", "incoming")

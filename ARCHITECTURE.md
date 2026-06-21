@@ -3,8 +3,8 @@
 `redacted-context-mcp` exposes a private local knowledgebase through a narrow
 redaction layer. The default MCP surface is read-only; controlled writes are
 available only when the server is started with explicit write flags. The project
-is intentionally small: it avoids runtime dependencies, stores no index, and
-keeps all sensitive configuration local.
+is intentionally small: it avoids runtime dependencies, stores no persistent
+index, and keeps all sensitive configuration local.
 
 ## Data Flow
 
@@ -31,7 +31,11 @@ subdirectory.
 - Path resolution is constrained to the configured root.
 - Known private/cache paths and binary-like files are excluded by default.
 - File navigation uses local-salted HMAC ids such as `@p_1a2b3c4d5e6f`.
+- Filesystem traversal starts from validated paths, skips symlink and reparse
+  entries, and revalidates paths before content reads and opaque-id resolution.
 - Redacted files are available as MCP resources with `redctx://p_<id>` URIs.
+- MCP resource content is cached only after redaction and is bounded by byte
+  limits.
 - Redaction happens before file content, file paths, search results, bundles,
   and GitHub issue text are returned.
 
@@ -76,15 +80,23 @@ The allow list prevents common public technologies and generic vocabulary from
 being over-redacted. Project-specific allow-list entries belong in the local
 `.agent-context-redactor.toml`, not in source control.
 
-Placeholders are deterministic HMAC aliases derived from the local salt, for
-example `[PERSON_1a2b3c4d]`. The same raw value maps to the same placeholder for
-one private config without exposing the raw value.
+Placeholders are deterministic 128-bit HMAC aliases derived from the local
+salt, for example `[PERSON_1a2b3c4d5e6f7890a1b2c3d4e5f60718]`. The same raw
+value maps to the same placeholder for one private config without exposing the
+raw value. Placeholder collisions are detected and fail closed instead of
+building an ambiguous rehydration map.
 
 ## Configuration
 
 The local `.agent-context-redactor.toml` file is intentionally ignored by git.
 It may contain exact client names, stakeholder names, project codenames, private
 repo names, and token environment variable names.
+
+If a config or environment salt is not supplied, the loader creates or reuses a
+random 256-bit vault salt in user-local state. Salt creation uses an exclusive
+lock and atomic replacement; empty, malformed, or root-contained state files
+fail closed instead of rotating aliases silently. `redctx doctor` reports the
+salt source.
 
 `redctx discover` can draft that file with a local Ollama model. It is a setup
 command for a human operator, not an MCP tool, because its output intentionally
@@ -94,7 +106,9 @@ contains raw sensitive terms.
 
 GitHub repositories are configured by neutral aliases under
 `[github.repos.<alias>]`. The alias is what the agent sees. Raw owner/repo names
-and author logins are not printed in tool output.
+and author logins are not printed in tool output. Author aliases are HMACs over
+the local vault salt, repo alias, and login so they are not linkable across
+vaults or repo aliases.
 
 The GitHub integration is read-only and uses the token environment variable
 named in local config.

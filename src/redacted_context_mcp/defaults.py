@@ -7,10 +7,18 @@ from pathlib import Path
 
 REPO_ROOT = Path.cwd()
 LOCAL_CONFIG = ".agent-context-redactor.toml"
+STATE_DIR_ENV = "REDACTED_CONTEXT_STATE_DIR"
+SALT_ENV = "REDACTED_CONTEXT_SALT"
+TERMS_ENV = "REDACTED_CONTEXT_TERMS"
+DETECTOR_PROFILE_ENV = "REDACTED_CONTEXT_DETECTOR_PROFILE"
 
 DEFAULT_MAX_CHARS = 120_000
 DEFAULT_MAX_FILES = 80
 DEFAULT_MAX_SEARCH_RESULTS = 200
+DEFAULT_MAX_RAW_BYTES_PER_FILE = 5_000_000
+DEFAULT_MAX_TOTAL_RAW_BYTES = 50_000_000
+DEFAULT_MAX_TRAVERSAL_ENTRIES = 10_000
+DEFAULT_MAX_RESOURCE_BYTES = 1_000_000
 DEFAULT_DISCOVERY_MODEL = "gemma4:e4b"
 DEFAULT_OLLAMA_ENDPOINT = "http://localhost:11434"
 DEFAULT_DISCOVERY_MAX_FILES = 80
@@ -31,6 +39,7 @@ DEFAULT_EXCLUDE_DIRS = {
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",
+    ".redacted-context-mcp",
     ".venv",
     "venv",
     "__pycache__",
@@ -331,6 +340,41 @@ PEM_PRIVATE_KEY_RE = re.compile(
 SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 CREDIT_CARD_RE = re.compile(r"(?<!\d)(?:\d[ -]*?){13,19}(?!\d)")
 IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+IPV6_RE = re.compile(
+    r"(?ix)(?<![0-9A-F:])(?:"
+    r"(?:[0-9A-F]{1,4}:){7}[0-9A-F]{1,4}|"
+    r"(?:[0-9A-F]{1,4}:){1,7}:|"
+    r"(?:[0-9A-F]{1,4}:){1,6}:[0-9A-F]{1,4}|"
+    r"(?:[0-9A-F]{1,4}:){1,5}(?::[0-9A-F]{1,4}){1,2}|"
+    r"(?:[0-9A-F]{1,4}:){1,4}(?::[0-9A-F]{1,4}){1,3}|"
+    r"(?:[0-9A-F]{1,4}:){1,3}(?::[0-9A-F]{1,4}){1,4}|"
+    r"(?:[0-9A-F]{1,4}:){1,2}(?::[0-9A-F]{1,4}){1,5}|"
+    r"[0-9A-F]{1,4}:(?:(?::[0-9A-F]{1,4}){1,6})|"
+    r":(?:(?::[0-9A-F]{1,4}){1,7}|:)"
+    r")(?![0-9A-F:])"
+)
+MAC_RE = re.compile(r"\b[0-9A-F]{2}(?:[:-][0-9A-F]{2}){5}\b", re.IGNORECASE)
+IBAN_RE = re.compile(r"\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30}\b")
+DOB_RE = re.compile(
+    r"(?ix)\b(?:date\s+of\s+birth|dob|birthdate)\s*[:=]\s*"
+    r"(?:\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b"
+)
+PASSPORT_RE = re.compile(r"(?ix)\bpassport(?:\s+(?:no|number))?\s*[:=]\s*[A-Z0-9]{6,12}\b")
+DRIVER_ID_RE = re.compile(
+    r"(?ix)\b(?:driver'?s?\s+licen[cs]e|driving\s+licen[cs]e|driver[_-]?id)"
+    r"\s*[:=]\s*[A-Z0-9-]{6,20}\b"
+)
+CONNECTION_STRING_RE = re.compile(
+    r"(?ix)\b(?:"
+    r"(?:server|host|data\s+source|uid|user\s+id|password|pwd|accountkey|sharedaccesskey)"
+    r"\s*=\s*[^;\s]+;){2,}[^ \n\r]*"
+)
+UNICODE_CONTROL_RE = re.compile(r"[\u200B-\u200F\u202A-\u202E\u2060-\u206F]")
+PROMPT_INJECTION_RE = re.compile(
+    r"(?ix)\b(?:ignore\s+(?:all\s+)?previous\s+instructions|"
+    r"disregard\s+(?:all\s+)?(?:prior|previous)\s+instructions|"
+    r"system\s+prompt|developer\s+message|tool\s+call)\b"
+)
 UUID_RE = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
     re.IGNORECASE,
@@ -362,8 +406,9 @@ TITLECASE_TOKEN_RE = re.compile(r"\b[A-Z][a-z][A-Za-z'.-]{2,}\b")
 ACRONYM_RE = re.compile(r"\b[A-Z][A-Z0-9]{2,}\b")
 PATH_TOKEN_RE = re.compile(r"(?<!\[)\b[A-Za-z][A-Za-z0-9]{2,}\b(?!_\d{2}\])")
 PLACEHOLDER_RE = re.compile(
-    r"\[(?:CLIENT|ORG|PERSON|SENSITIVE|ENTITY|EMAIL|PHONE|URL|HANDLE|SECRET|SSN|CARD|IP|ID|DOMAIN)_"
-    r"(?:\d{2}|[0-9a-f]{8})\]"
+    r"\[(?:CLIENT|ORG|PERSON|SENSITIVE|ENTITY|EMAIL|PHONE|URL|HANDLE|SECRET|SSN|CARD|IP|ID|DOMAIN|"
+    r"IBAN|MAC|DOB|PASSPORT|DRIVER_ID|CONNECTION|UNICODE_CONTROL|PROMPT_INJECTION)_"
+    r"(?:\d{2}|[0-9a-f]{8}|[0-9a-f]{32})\]"
 )
 RESERVED_PLACEHOLDER_WORDS = {
     "client",

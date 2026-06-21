@@ -23,6 +23,14 @@ class RedactionConfig:
     exclude_globs: tuple[str, ...] = ()
     github_repos: dict[str, GitHubRepoConfig] = field(default_factory=dict)
     salt: str = ""
+    salt_source: str = "local-state"
+    root_terms: tuple[str, ...] = ()
+    environment_terms: tuple[str, ...] = ()
+    explicit_clients: tuple[str, ...] = ()
+    explicit_organizations: tuple[str, ...] = ()
+    explicit_people: tuple[str, ...] = ()
+    explicit_terms: tuple[str, ...] = ()
+    detector_profile: str = "default"
 
 
 @dataclass(frozen=True)

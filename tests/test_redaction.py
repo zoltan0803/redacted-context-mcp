@@ -40,12 +40,12 @@ Domain: {raw_values[10]}
 
         for raw in raw_values:
             self.assertNotIn(raw, redacted)
-        self.assertRegex(redacted, r"\[SECRET_[0-9a-f]{8}\]")
-        self.assertRegex(redacted, r"\[SSN_[0-9a-f]{8}\]")
-        self.assertRegex(redacted, r"\[CARD_[0-9a-f]{8}\]")
-        self.assertRegex(redacted, r"\[IP_[0-9a-f]{8}\]")
-        self.assertRegex(redacted, r"\[ID_[0-9a-f]{8}\]")
-        self.assertRegex(redacted, r"\[DOMAIN_[0-9a-f]{8}\]")
+        self.assertRegex(redacted, r"\[SECRET_[0-9a-f]{32}\]")
+        self.assertRegex(redacted, r"\[SSN_[0-9a-f]{32}\]")
+        self.assertRegex(redacted, r"\[CARD_[0-9a-f]{32}\]")
+        self.assertRegex(redacted, r"\[IP_[0-9a-f]{32}\]")
+        self.assertRegex(redacted, r"\[ID_[0-9a-f]{32}\]")
+        self.assertRegex(redacted, r"\[DOMAIN_[0-9a-f]{32}\]")
 
     def test_placeholders_are_stable_for_same_salt(self) -> None:
         config = RedactionConfig(people=("Alice Example",), salt="same-salt")

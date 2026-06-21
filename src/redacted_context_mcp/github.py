@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import ssl
@@ -63,12 +64,10 @@ def github_api_request(repo_alias: str, repo_config: GitHubRepoConfig, path: str
         with urllib.request.urlopen(request, timeout=30, context=github_ssl_context()) as response:
             body = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        detail = extract_github_error(body)
-        reason = f" {exc.reason}" if exc.reason else ""
+        exc.read()
         raise SystemExit(
-            f"GitHub request failed for repo alias '{repo_alias}' ({exc.code}{reason}). "
-            f"{detail}Check that the repo alias is configured and {repo_config.token_env} has access."
+            f"GitHub request failed for repo alias '{repo_alias}' ({exc.code}). "
+            f"Check that the repo alias is configured and {repo_config.token_env} has access."
         ) from exc
     except urllib.error.URLError as exc:
         raise SystemExit(format_github_url_error(exc)) from exc
@@ -86,8 +85,9 @@ def extract_github_error(body: str) -> str:
         data = json.loads(body)
     except json.JSONDecodeError:
         return ""
-    message = str(data.get("message", "")).strip() if isinstance(data, dict) else ""
-    return f"{message}. " if message else ""
+    if isinstance(data, dict) and data.get("message"):
+        return "GitHub returned an error. "
+    return ""
 
 
 def github_ssl_context() -> ssl.SSLContext:
@@ -116,7 +116,7 @@ def format_github_url_error(exc: urllib.error.URLError) -> str:
             "On macOS, run `/Applications/Python 3.14/Install Certificates.command`, or start "
             "`redctx` with `SSL_CERT_FILE=/etc/ssl/cert.pem`."
         )
-    return f"Could not reach GitHub API: {reason_text}."
+    return "Could not reach GitHub API."
 
 
 def github_list_issues(
@@ -225,7 +225,7 @@ def format_github_issue_summary(repo_alias: str, issue: dict[str, object], redac
     title = redactor.redact(str(issue.get("title", "")))
     labels = format_github_labels(issue, redactor)
     comments = str(issue.get("comments", 0))
-    return f"{repo_alias}#{number}\t{state}\tupdated={updated}\tcomments={comments}\tlabels={labels}\t{title}"
+    return f"{repo_alias}#{number}\tstate={state}\tupdated={updated}\tcomments={comments}\tlabels={labels}\tuntrusted_title={title}"
 
 
 def format_github_issue_detail(
@@ -249,7 +249,7 @@ def format_github_issue_detail(
         f"labels: {format_github_labels(issue, redactor)}",
         f"assignees: {count_github_assignees(issue)}",
         "",
-        "body:",
+        "body_untrusted_external:",
         body,
     ]
     for index, comment in enumerate(comments, start=1):
@@ -259,7 +259,8 @@ def format_github_issue_detail(
                 "",
                 f"comment {index}:",
                 f"created_at: {redactor.redact(str(comment.get('created_at', '')))}",
-                f"author: {opaque_github_user(comment.get('user'))}",
+                f"author: {opaque_github_user(comment.get('user'), redactor.config, repo_alias)}",
+                "comment_untrusted_external:",
                 comment_body,
             ]
         )
@@ -285,16 +286,21 @@ def count_github_assignees(issue: dict[str, object]) -> int:
     return len(assignees) if isinstance(assignees, list) else 0
 
 
-def opaque_github_user(user: object) -> str:
+def opaque_github_user(user: object, config: RedactionConfig, repo_alias: str) -> str:
     if not isinstance(user, dict):
         return "user_unknown"
     login = str(user.get("login", "")).strip()
     if not login:
         return "user_unknown"
-    digest = hashlib.sha256(f"github-user:{login}".encode("utf-8")).hexdigest()[:10]
+    digest = hmac.new(
+        config.salt.encode("utf-8"),
+        f"github-user:{repo_alias}:{login}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()[:16]
     return f"user_{digest}"
 
 
 def truncate_text(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
+    return text[:max_chars] + "\n[TRUNCATED]\n"

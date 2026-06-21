@@ -9,5 +9,6 @@ build/
 *.egg-info/
 .DS_Store
 .agent-context-redactor.toml
+.redacted-context-mcp/
 agent-workdir/work/*
 !agent-workdir/work/.gitkeep

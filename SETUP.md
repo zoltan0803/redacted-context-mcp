@@ -119,7 +119,8 @@ Create `/work/source-private/.agent-context-redactor.toml`:
 
 ```toml
 [redaction]
-salt = "local-random-string-kept-private"
+# Optional. If omitted, redctx creates a random local vault salt.
+# salt = "local-random-string-kept-private"
 clients = ["Client Legal Name", "Client Acronym"]
 organizations = ["Supplier Name", "Partner Company"]
 people = ["Person One", "Person Two"]
@@ -135,8 +136,10 @@ token_env = "GITHUB_TOKEN"
 Keep this file local and untracked.
 
 The optional `salt` keeps opaque path ids and placeholders stable for your
-private context without making them guessable from common filenames. You can
-also provide it with `REDACTED_CONTEXT_SALT`.
+private context without making them guessable from common filenames. If you omit
+it, `redctx` creates or reuses a random 256-bit vault salt in user-local state.
+Empty, malformed, or root-contained salt state fails closed instead of silently
+rotating aliases. You can also provide a salt with `REDACTED_CONTEXT_SALT`.
 
 The GitHub section is optional. If you enable it for a private repo, export the
 token in the shell that starts the agent or MCP server:
@@ -175,6 +178,7 @@ From `agent-workdir/`:
 
 ```sh
 redctx --root ../source-private doctor
+redctx --root ../source-private audit
 redctx --root ../source-private tree . --max-depth 2
 claude mcp list
 ```
@@ -182,7 +186,7 @@ claude mcp list
 Expected MCP line:
 
 ```text
-redacted_context: redctx-mcp --root ../source-private - ✓ Connected
+redacted_context: redctx-mcp --root ../source-private - Connected
 ```
 
 For Codex, start a session and use `/mcp` in the TUI to inspect configured MCP

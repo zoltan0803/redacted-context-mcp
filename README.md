@@ -26,8 +26,12 @@ agent workspace
   redacted documents back into a configured private-root subdirectory.
 - CLI fallback with the same redaction behavior.
 - Local-salted opaque stable path ids such as `@p_1a2b3c4d5e6f`.
-- Deterministic HMAC placeholders such as `[PERSON_1a2b3c4d]`.
-- Redacted `tree`, `list`, `read`, `search`, `stat`, and `bundle` operations.
+- Deterministic 128-bit HMAC placeholders such as
+  `[PERSON_1a2b3c4d5e6f7890a1b2c3d4e5f60718]`.
+- Bounded operation budgets for traversals, reads, bundles, searches, audits,
+  benchmarks, and MCP resource reads.
+- Redacted `tree`, `list`, `read`, `search`, `stat`, `bundle`, `audit`, and
+  `benchmark` operations.
 - CLI-only `rehydrate` command for restoring redacted exports locally from the
   private source root.
 - Local ignored redaction config for exact client, person, organization, and
@@ -216,6 +220,8 @@ The server exposes:
 - `redctx_stat` — inspect redacted metadata
 - `redctx_bundle` — concatenate redacted context files
 - `redctx_doctor` — show config counts without sensitive terms
+- `redctx_audit` — run local containment and redaction checks
+- `redctx_refresh_index` — refresh the in-memory opaque path index
 
 Agents should carry `@p_<id>` references between calls rather than using raw
 filenames.
@@ -251,6 +257,8 @@ redctx --root ../source-private tree context --max-depth 2
 redctx --root ../source-private search "governance" context --ignore-case --context 2
 redctx --root ../source-private read @p_1a2b3c4d5e6f --start-line 1 --end-line 80
 redctx --root ../source-private bundle context --glob "*.md" --max-files 10
+redctx --root ../source-private audit --format json
+redctx --root ../source-private benchmark --format json
 ```
 
 ### Local Rehydration
@@ -297,10 +305,12 @@ The tool also derives likely aliases from the private source folder name and
 accepts additional comma- or newline-separated terms through
 `REDACTED_CONTEXT_TERMS`.
 
-The optional `salt` controls opaque path ids and deterministic placeholders. If
-omitted, a local fallback is derived from the private root/config. You can also
-set `REDACTED_CONTEXT_SALT` in the environment that starts `redctx` or
-`redctx-mcp`.
+The optional `salt` controls opaque path ids and deterministic placeholders.
+If omitted, `redctx` creates or reuses a random 256-bit vault salt in user-local
+state. Empty, malformed, or root-contained salt state fails closed instead of
+silently rotating aliases. You can also set `REDACTED_CONTEXT_SALT` in the
+environment that starts `redctx` or `redctx-mcp`. `redctx doctor` reports
+whether the active salt came from local state, config, or environment.
 
 GitHub repo entries are optional. Use neutral aliases such as `context`; agents
 use the alias, while the real `owner/repo` stays in this local config. Private
@@ -326,8 +336,9 @@ The MCP server exposes the same flow with:
 - `redctx_github_read_issue`
 - `redctx_github_search_issues`
 
-Outputs redact titles, bodies, labels, and comments. Raw author logins and raw
-GitHub URLs are not printed; authors are shown as stable opaque ids.
+Outputs redact titles, bodies, labels, and comments, and mark GitHub text as
+untrusted external content. Raw author logins and raw GitHub URLs are not
+printed; authors are shown as stable per-vault, per-repo opaque ids.
 
 ## Discover Terms With A Local LLM
 

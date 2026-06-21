@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0
+
+- Hardens filesystem containment for stale opaque ids, symlink and reparse-point
+  races, write destinations, and MCP resource reads.
+- Changes default vault-salt creation to fail closed on missing, malformed, or
+  unsafe local state instead of silently rotating aliases.
+- Adds per-call redaction receipts, bounded operation budgets, and a bounded
+  redacted-only MCP resource cache.
+- Preserves line counts when multi-line secrets are redacted before search
+  output is split into lines.
+- Speeds ordinary no-match literal searches by using a raw-byte prefilter while
+  keeping placeholder-sensitive and regex searches on the full redaction path.
+- Adds security regression tests, UTF-8 stdio handling, SHA-pinned CI actions,
+  and package validation coverage for the 0.4.0 release.
+
 ## 0.3.0
 
 - Adds redacted MCP resources with `redctx://p_<id>` URIs alongside the
