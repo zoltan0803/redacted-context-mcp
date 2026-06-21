@@ -211,14 +211,19 @@ def vault_salt_path(root: Path) -> Path:
 
 
 def ensure_state_outside_root(root: Path, state_file: Path) -> None:
+    root_raw = root.expanduser()
     root_resolved = root.resolve()
-    candidates = [state_file, state_file.parent]
+    root_candidates = (root_raw, root_resolved)
+    candidates = [state_file, *state_file.parents]
     for candidate in candidates:
         raw = candidate.expanduser()
-        if is_relative_to(raw, root_resolved):
+        if any(raw == root_candidate or is_relative_to(raw, root_candidate) for root_candidate in root_candidates):
             raise SystemExit("The redacted-context state directory must be outside the served context root.")
         resolved = raw.resolve(strict=False)
-        if resolved == root_resolved or is_relative_to(resolved, root_resolved):
+        if any(
+            resolved == root_candidate or is_relative_to(resolved, root_candidate)
+            for root_candidate in root_candidates
+        ):
             raise SystemExit("The redacted-context state directory must be outside the served context root.")
 
 

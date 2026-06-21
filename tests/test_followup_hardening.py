@@ -351,7 +351,7 @@ class FollowupHardeningTest(unittest.TestCase):
                 (root / f"{index}.txt").write_text("x", encoding="utf-8")
             ctx = RedactedContext(root, RedactionConfig(salt="salt"))
             with self.assertRaises(OperationLimitError):
-                ctx.child_entries(root, budget=OperationBudget(max_entries=2))
+                ctx.child_entries(ctx.root, budget=OperationBudget(max_entries=2))
 
     def test_link_scan_counts_every_inspected_entry(self) -> None:
         with tempfile.TemporaryDirectory() as td:
