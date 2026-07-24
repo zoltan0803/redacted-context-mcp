@@ -52,11 +52,14 @@ from .defaults import (
 )
 from .discovery import (
     OllamaDiscoveryClient,
+    build_discovery_update,
     build_discovery_prompt,
     build_strict_discovery_prompt,
     clean_discovered_terms,
+    discover_documents,
     discover_entities,
     extract_ollama_error,
+    filter_discovery_to_source,
     format_discovery_toml,
     format_toml_array,
     is_country_or_region_only,
@@ -67,13 +70,16 @@ from .discovery import (
     is_probable_person,
     is_public_or_allowed_term,
     is_role_or_title,
+    merge_discovery_toml,
     merge_discovery_results,
     normalize_discovery_value,
     normalize_person_name,
+    parse_discovery_documents_jsonl,
     parse_discovery_response,
     parse_json_object,
     postprocess_discovery_result,
     should_drop_discovered_value,
+    write_discovery_update,
     write_discovery_output,
 )
 from .filesystem import (
@@ -107,7 +113,14 @@ from .github import (
     validate_nonnegative_limit,
     validate_positive_limit,
 )
-from .models import DiscoveryParseError, DiscoveryResult, GitHubRepoConfig, RedactionConfig
+from .models import (
+    DiscoveryDocument,
+    DiscoveryParseError,
+    DiscoveryResult,
+    DiscoveryUpdate,
+    GitHubRepoConfig,
+    RedactionConfig,
+)
 from .paths import display_ref, path_id, rel_posix, resolve_under_root
 from .redaction import Redactor, compile_literal_pattern, normalize_alias
 
@@ -779,6 +792,7 @@ def command_discover(args: argparse.Namespace, ctx: RedactedContext, redactor: R
         max_chars_per_file=args.max_chars_per_file,
         max_total_raw_bytes=getattr(args, "max_total_raw_bytes", DEFAULT_MAX_TOTAL_RAW_BYTES),
         postprocess=not args.raw_discovery,
+        fail_on_truncation=getattr(args, "fail_on_truncation", False),
     )
     if args.format == "json":
         output = json.dumps(result.as_dict(), indent=2, ensure_ascii=False) + "\n"
@@ -788,6 +802,96 @@ def command_discover(args: argparse.Namespace, ctx: RedactedContext, redactor: R
             source_note=f"provider=ollama model={args.model} root=.",
         )
     write_discovery_output(ctx, output, args.output, force=args.force)
+    return 0
+
+
+def command_discover_update(
+    args: argparse.Namespace,
+    ctx: RedactedContext,
+    redactor: Redactor | None,
+) -> int:
+    del redactor
+    try:
+        if args.merge_only and args.input_jsonl:
+            raise ValueError("--merge-only cannot be combined with --input-jsonl.")
+        if args.merge_only:
+            documents: tuple[DiscoveryDocument, ...] = ()
+        else:
+            if not args.input_jsonl:
+                raise ValueError("--input-jsonl is required unless --merge-only is used.")
+            if args.input_jsonl == "-":
+                raw_input = sys.stdin.read()
+            else:
+                raw_input = Path(args.input_jsonl).expanduser().read_text(encoding="utf-8")
+            documents = parse_discovery_documents_jsonl(raw_input)
+        if not documents and not args.merge_only:
+            raise ValueError("Discovery input contains no documents.")
+        if len(documents) > args.max_files:
+            raise ValueError(f"Discovery input exceeds --max-files={args.max_files}.")
+        oversized = next(
+            (
+                document
+                for document in documents
+                if len(document.text) > args.max_chars_per_document
+            ),
+            None,
+        )
+        if oversized is not None:
+            raise ValueError(
+                f"{oversized.path} exceeds "
+                f"--max-chars-per-document={args.max_chars_per_document}; "
+                "refusing to classify a partial model input."
+            )
+        total_characters = sum(len(document.text) for document in documents)
+        if total_characters > args.max_total_chars:
+            raise ValueError(
+                f"Discovery input exceeds --max-total-chars={args.max_total_chars}."
+            )
+
+        if documents:
+            client = OllamaDiscoveryClient(
+                endpoint=args.endpoint,
+                model=args.model,
+                timeout=args.timeout,
+                postprocess=True,
+            )
+            result = discover_documents(documents, client=client, postprocess=True)
+        else:
+            result = DiscoveryResult()
+        config_path = resolve_under_root(
+            ctx.root,
+            args.output_config or LOCAL_CONFIG,
+            allow_missing=True,
+        )
+        existing_text = (
+            config_path.read_text(encoding="utf-8-sig") if config_path.exists() else ""
+        )
+        seed_text = None
+        if args.seed_config:
+            seed_path = resolve_under_root(ctx.root, args.seed_config)
+            seed_text = seed_path.read_text(encoding="utf-8-sig")
+        update = build_discovery_update(
+            existing_text,
+            result,
+            seed_text=seed_text,
+            include_discovered_allow=args.include_discovered_allow,
+        )
+    except (OSError, ValueError, OperationLimitError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.dry_run:
+        print(update.config_text, end="" if update.config_text.endswith("\n") else "\n")
+        return 0
+    if args.check:
+        print(f"config_current: {str(not update.changed).lower()}")
+        return 1 if update.changed else 0
+
+    write_discovery_update(config_path, update)
+    counts = {key: len(values) for key, values in result.as_dict().items() if key != "allow"}
+    print(f"documents: {len(documents)}")
+    print(f"model: {args.model if documents else 'skipped'}")
+    print(f"discovered_counts: {json.dumps(counts, sort_keys=True, separators=(',', ':'))}")
+    print(f"config_changed: {str(update.changed).lower()}")
     return 0
 
 
@@ -986,6 +1090,11 @@ def build_parser() -> argparse.ArgumentParser:
     discover_parser.add_argument("--max-files", type=int, default=DEFAULT_DISCOVERY_MAX_FILES)
     discover_parser.add_argument("--max-chars-per-file", type=int, default=DEFAULT_DISCOVERY_MAX_CHARS)
     discover_parser.add_argument("--max-total-raw-bytes", type=int, default=DEFAULT_MAX_TOTAL_RAW_BYTES)
+    discover_parser.add_argument(
+        "--fail-on-truncation",
+        action="store_true",
+        help="fail instead of classifying a truncated file sample",
+    )
     discover_parser.add_argument("--format", choices=("toml", "json"), default="toml")
     discover_parser.add_argument(
         "--raw-discovery",
@@ -998,6 +1107,57 @@ def build_parser() -> argparse.ArgumentParser:
     )
     discover_parser.add_argument("--force", action="store_true", help="overwrite --output if it exists")
     discover_parser.set_defaults(func=command_discover)
+
+    discover_update_parser = subparsers.add_parser(
+        "discover-update",
+        help="classify caller-supplied documents and safely merge the redaction config",
+    )
+    discover_update_parser.add_argument(
+        "--input-jsonl",
+        help="JSONL file containing path/text objects, or - for stdin",
+    )
+    discover_update_parser.add_argument("--endpoint", default=DEFAULT_OLLAMA_ENDPOINT)
+    discover_update_parser.add_argument("--model", default=DEFAULT_DISCOVERY_MODEL)
+    discover_update_parser.add_argument("--timeout", type=float, default=120.0)
+    discover_update_parser.add_argument("--max-files", type=int, default=DEFAULT_DISCOVERY_MAX_FILES)
+    discover_update_parser.add_argument(
+        "--max-chars-per-document",
+        type=int,
+        default=DEFAULT_DISCOVERY_MAX_CHARS,
+        help="fail when any document exceeds this size; documents are never truncated",
+    )
+    discover_update_parser.add_argument("--max-total-chars", type=int, default=DEFAULT_MAX_TOTAL_RAW_BYTES)
+    discover_update_parser.add_argument(
+        "--output-config",
+        default=LOCAL_CONFIG,
+        help=f"config path under the root; defaults to {LOCAL_CONFIG}",
+    )
+    discover_update_parser.add_argument(
+        "--seed-config",
+        help="optional reviewed config under the root; its policy settings are authoritative",
+    )
+    discover_update_parser.add_argument(
+        "--include-discovered-allow",
+        action="store_true",
+        help="allow model-discovered public terms to expand the allow-list",
+    )
+    discover_update_parser.add_argument(
+        "--merge-only",
+        action="store_true",
+        help="merge the seed and existing config without reading documents or calling a model",
+    )
+    discover_update_mode = discover_update_parser.add_mutually_exclusive_group()
+    discover_update_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the merged config without writing it",
+    )
+    discover_update_mode.add_argument(
+        "--check",
+        action="store_true",
+        help="exit 1 when the merged config would change",
+    )
+    discover_update_parser.set_defaults(func=command_discover_update)
 
     github_parser = subparsers.add_parser(
         "github",
@@ -1078,6 +1238,14 @@ def main(argv: list[str] | None = None) -> int:
     root = args.root.expanduser().resolve()
     if not root.exists() or not root.is_dir():
         raise SystemExit("Root must be an existing directory.")
+    if args.func is command_discover_update:
+        # Hook-facing discovery updates do not read redacted context and must
+        # not require or initialize vault-salt state.
+        return command_discover_update(
+            args,
+            RedactedContext(root, RedactionConfig()),
+            None,
+        )
     config = load_config(root, args.config.expanduser().resolve() if args.config else None)
     if args.detector_profile:
         config = replace(config, detector_profile=args.detector_profile)

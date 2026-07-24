@@ -37,6 +37,7 @@ from .defaults import (
     PLACEHOLDER_RE,
     PROMPT_INJECTION_RE,
     RESERVED_PLACEHOLDER_WORDS,
+    SERVICE_ACCOUNT_RE,
     SPEAKER_LABEL_RE,
     SSN_RE,
     TITLECASE_TOKEN_RE,
@@ -171,6 +172,7 @@ class Redactor:
         text = HANDLE_RE.sub(lambda match: stash("HANDLE", match.group(0)), text)
 
         if self.config.detector_profile == "extended":
+            text = SERVICE_ACCOUNT_RE.sub(lambda match: stash("SERVICE_ACCOUNT", match.group(0)), text)
             text = CONNECTION_STRING_RE.sub(lambda match: stash("CONNECTION", match.group(0)), text)
             text = IBAN_RE.sub(lambda match: stash("IBAN", match.group(0)), text)
             text = IPV6_RE.sub(lambda match: stash("IP", match.group(0)), text)

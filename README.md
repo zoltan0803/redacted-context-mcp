@@ -388,6 +388,65 @@ redctx --root ../source-private discover context --endpoint http://localhost:114
 The command uses Ollama's local `/api/generate` endpoint with streaming disabled
 and JSON output requested. No hosted LLM is called by this feature.
 
+### Automate Incremental Config Updates
+
+Repository hooks can classify exact staged Git blobs without duplicating the
+MCP's discovery and merge policy. Supply one JSON object per line:
+
+```json
+{"path":"private/meeting.md","text":"raw staged document text","sha256":"optional-source-digest"}
+```
+
+Then call the hook-facing CLI:
+
+```sh
+redctx --root ../source-private discover-update \
+  --input-jsonl /tmp/staged-documents.jsonl \
+  --seed-config config/redaction-seed.toml \
+  --output-config .agent-context-redactor.toml \
+  --model gemma4:e4b
+```
+
+`discover-update` sends each complete document to the configured local Ollama
+endpoint in a separate request. It rejects model values that are not exact
+substrings of that document, monotonically adds sensitive terms, keeps reviewed
+seed policy settings authoritative, preserves unrelated TOML tables and
+comments, and writes atomically. By default, model output cannot expand the
+allow-list.
+
+Documents are never silently truncated. A document over
+`--max-chars-per-document`, or an input set over `--max-total-chars`, fails
+before the model is called. Set those limits to fit the selected model's actual
+context window. `--merge-only` applies a reviewed seed change without reading
+documents or calling Ollama.
+
+The equivalent Python composition API is:
+
+```python
+from redacted_context_mcp import (
+    DiscoveryDocument,
+    build_discovery_update,
+    discover_documents,
+    write_discovery_update,
+)
+from redacted_context_mcp.discovery import OllamaDiscoveryClient
+
+documents = [DiscoveryDocument(path="private/meeting.md", text=raw_text)]
+client = OllamaDiscoveryClient(
+    endpoint="http://127.0.0.1:11434",
+    model="gemma4:e4b",
+    timeout=120,
+)
+discovery = discover_documents(documents, client=client)
+update = build_discovery_update(existing_toml, discovery, seed_text=seed_toml)
+write_discovery_update(config_path, update)
+```
+
+Both interfaces intentionally handle raw private text and raw discovered names.
+Keep them local and outside an agent's accessible workspace. This feature
+reduces what a separate coding model receives; it is not encryption, DLP, or a
+proof that the local model found every sensitive entity.
+
 ## Claude Code Permissions
 
 MCP routing is the main workflow. Claude Code permissions can add guardrails by

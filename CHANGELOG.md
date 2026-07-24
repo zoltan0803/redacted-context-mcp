@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0
+
+- Adds a reusable document-discovery and monotonic TOML-update API plus the
+  `redctx discover-update` JSONL CLI for local Git-hook integrations.
+- Rejects discovery values absent from their source document and supports
+  fail-closed document-size limits and seed-only config merges.
+- Adds extended-profile detection for common `sp-`, `svc-`, and `sa-` service
+  account identifiers.
+
 ## 0.4.0
 
 - Revalidates stale opaque ids, rejects detected symlink/reparse substitutions,

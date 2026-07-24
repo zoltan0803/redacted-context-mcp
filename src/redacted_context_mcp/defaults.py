@@ -364,6 +364,9 @@ DRIVER_ID_RE = re.compile(
     r"(?ix)\b(?:driver'?s?\s+licen[cs]e|driving\s+licen[cs]e|driver[_-]?id)"
     r"\s*[:=]\s*[A-Z0-9-]{6,20}\b"
 )
+SERVICE_ACCOUNT_RE = re.compile(
+    r"(?i)\b(?:sp|svc|sa)-[A-Za-z0-9][A-Za-z0-9._-]{2,}\b"
+)
 CONNECTION_STRING_RE = re.compile(
     r"(?ix)\b(?:"
     r"(?:server|host|data\s+source|uid|user\s+id|password|pwd|accountkey|sharedaccesskey)"
@@ -428,6 +431,7 @@ PLACEHOLDER_CATEGORIES = frozenset(
         "PASSPORT",
         "DRIVER_ID",
         "CONNECTION",
+        "SERVICE_ACCOUNT",
         "UNICODE_CONTROL",
         "PROMPT_INJECTION",
     }

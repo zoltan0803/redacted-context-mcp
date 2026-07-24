@@ -51,5 +51,23 @@ class DiscoveryResult:
         }
 
 
+@dataclass(frozen=True)
+class DiscoveryDocument:
+    """Raw local document supplied to the discovery API."""
+
+    path: str
+    text: str
+    sha256: str = ""
+
+
+@dataclass(frozen=True)
+class DiscoveryUpdate:
+    """Result of discovering documents and merging a redaction config."""
+
+    discovery: DiscoveryResult
+    config_text: str
+    changed: bool
+
+
 class DiscoveryParseError(ValueError):
     """Raised when a local model response cannot be parsed as discovery JSON."""

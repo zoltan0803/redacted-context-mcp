@@ -62,6 +62,15 @@ Domain: {raw_values[10]}
         self.assertNotEqual(path_id(rel, "salt-one"), path_id(rel, "salt-two"))
         self.assertRegex(path_id(rel, "salt-one"), r"^p_[0-9a-f]{12}$")
 
+    def test_extended_profile_redacts_service_account_identifiers(self) -> None:
+        raw = "sp-lighthouse-ingest-prod"
+        redacted = Redactor(
+            RedactionConfig(salt="test-salt", detector_profile="extended")
+        ).redact(f"Use `{raw}` for ingestion.")
+
+        self.assertNotIn(raw, redacted)
+        self.assertRegex(redacted, r"\[SERVICE_ACCOUNT_[0-9a-f]{32}\]")
+
 
 if __name__ == "__main__":
     unittest.main()
