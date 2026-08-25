@@ -20,7 +20,8 @@ agent workspace
 
 ## Features
 
-- MCP stdio server with `redctx_*` tools.
+- Dual-era MCP stdio server supporting stateless `2026-07-28` clients and
+  legacy initialization-based clients through `2025-11-25`.
 - Redacted MCP resources using `redctx://p_<id>` URIs.
 - Optional MCP `redctx_submit_doc` tool for controlled writes of generated
   redacted documents back into a configured private-root subdirectory.
@@ -209,6 +210,9 @@ redctx-mcp --root /absolute/path/to/source-private
 
 Use the client-specific configuration format to pass that command and args.
 The server advertises instructions and exposes only redacted `redctx_*` tools.
+Modern clients can use the stateless MCP `2026-07-28` flow with per-request
+metadata and `server/discover`; legacy clients continue to negotiate through
+`initialize`.
 
 ## MCP Tools
 

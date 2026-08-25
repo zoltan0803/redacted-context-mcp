@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.0
+
+- Adds dual-era MCP support for stateless protocol version `2026-07-28` while
+  preserving the legacy initialization flow through `2025-11-25`.
+- Adds `server/discover`, per-request modern metadata validation, structured
+  unsupported-version errors, modern result metadata, and cache hints.
+- Keeps opaque path ids, the redacted content cache, and the persistent vault
+  salt independent of MCP protocol sessions.
+
 ## 0.5.0
 
 - Adds a reusable document-discovery and monotonic TOML-update API plus the
