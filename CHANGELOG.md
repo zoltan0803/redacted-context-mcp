@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.7.0
+
+Security hardening release.
+
+- Never serves the redaction config, configured term files, `.env*`, `*.key`,
+  `*.pem`, or `*.crt` through redacted tools, even with `--include-private`.
+- Redacts bare long hex strings (the persisted vault-salt shape) and
+  `salt`-keyed assignments as secrets in the default detector profile, closing
+  a vault-salt disclosure path.
+- Adds Google API key (`AIza...`) detection to the default secret patterns.
+- Screens user-supplied search regexes for catastrophic-backtracking shapes
+  and rejects them; MCP searches now enforce a server-side operation deadline
+  checked per file and per matching line.
+- Caps MCP stdio request line size so clients cannot exhaust server memory.
+- Controlled-write rehydration maps no longer scan the write subdirectory,
+  preventing agent-written content from poisoning later rehydration.
+- Verifies `redctx_submit_doc` output re-redacts consistently on read-back and
+  rejects writes that would leak restored values past redaction boundaries.
+- Refuses non-loopback plain-http Ollama discovery endpoints unless
+  `--allow-remote-endpoint` is passed.
+- Truncation no longer splits redaction placeholders mid-token.
+
 ## 0.6.0
 
 - Adds dual-era MCP support for stateless protocol version `2026-07-28` while

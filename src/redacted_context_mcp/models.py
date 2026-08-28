@@ -31,6 +31,7 @@ class RedactionConfig:
     explicit_people: tuple[str, ...] = ()
     explicit_terms: tuple[str, ...] = ()
     detector_profile: str = "default"
+    term_files: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

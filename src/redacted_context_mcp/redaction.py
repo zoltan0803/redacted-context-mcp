@@ -20,6 +20,7 @@ from .defaults import (
     EMAIL_RE,
     GENERIC_SECRET_RE,
     HANDLE_RE,
+    HEX_SECRET_RE,
     IBAN_RE,
     IDENTITY_LINE_RE,
     IP_RE,
@@ -161,6 +162,7 @@ class Redactor:
         text = PLACEHOLDER_RE.sub(lambda match: session.stash_allowed(match.group(0)), text)
         text = PEM_PRIVATE_KEY_RE.sub(lambda match: stash("SECRET", match.group(0)), text)
         text = GENERIC_SECRET_RE.sub(lambda match: stash("SECRET", match.group(0)), text)
+        text = HEX_SECRET_RE.sub(lambda match: stash("SECRET", match.group(0)), text)
         text = URL_RE.sub(lambda match: stash("URL", match.group(0)), text)
         text = EMAIL_RE.sub(lambda match: stash("EMAIL", match.group(0)), text)
         text = UUID_RE.sub(lambda match: stash("ID", match.group(0)), text)

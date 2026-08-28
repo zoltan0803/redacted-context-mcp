@@ -19,6 +19,7 @@ DEFAULT_MAX_RAW_BYTES_PER_FILE = 5_000_000
 DEFAULT_MAX_TOTAL_RAW_BYTES = 50_000_000
 DEFAULT_MAX_TRAVERSAL_ENTRIES = 10_000
 DEFAULT_MAX_RESOURCE_BYTES = 1_000_000
+DEFAULT_MCP_SEARCH_SECONDS = 30.0
 DEFAULT_DISCOVERY_MODEL = "gemma4:e4b"
 DEFAULT_OLLAMA_ENDPOINT = "http://localhost:11434"
 DEFAULT_DISCOVERY_MAX_FILES = 80
@@ -29,6 +30,20 @@ SYSTEM_CA_CANDIDATES = (
     "/etc/ssl/cert.pem",
     "/opt/homebrew/etc/openssl@3/cert.pem",
     "/usr/local/etc/openssl@3/cert.pem",
+)
+
+# Files that are never served through redacted tools, even when the operator
+# passes --include-private. The redaction config and term files contain exact
+# sensitive terms and the vault salt; env/key/certificate files are secrets.
+NEVER_SERVE_GLOBS = frozenset(
+    {
+        LOCAL_CONFIG,
+        ".env",
+        ".env.*",
+        "*.crt",
+        "*.key",
+        "*.pem",
+    }
 )
 
 DEFAULT_EXCLUDE_DIRS = {
@@ -329,10 +344,15 @@ GENERIC_SECRET_RE = re.compile(
     r"\bgh[opsu]_[A-Za-z0-9_]{20,}\b|"
     r"\bsk-[A-Za-z0-9_-]{20,}\b|"
     r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b|"
+    r"\bAIza[0-9A-Za-z_-]{35}\b|"
     r"\bBearer\s+[A-Za-z0-9._~+/=-]{12,}\b|"
-    r"\b(?:api[_-]?key|secret|token|password|passwd|pwd|private[_-]?key)"
+    r"\b(?:api[_-]?key|secret|token|password|passwd|pwd|private[_-]?key|"
+    r"vault[_-]?salt|redaction[_-]?salt|salt)"
     r"\b\s*[:=]\s*[\"']?[A-Za-z0-9._~+/=@:-]{8,}[\"']?"
 )
+# Bare 128-bit-or-longer hex strings match the persisted vault-salt format and
+# other symmetric key material; redacted even outside the extended profile.
+HEX_SECRET_RE = re.compile(r"(?i)(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])")
 PEM_PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
     re.DOTALL,
@@ -546,6 +566,21 @@ NON_PERSON_NAME_WORDS = {
     "vendor",
     "workflow",
 }
+# Generic vocabulary excluded from round-trip leak probing of restored values.
+# Tokens here are common words whose survival in redacted output is expected.
+GENERIC_PROBE_STOPWORDS = frozenset(
+    term.casefold()
+    for term in (
+        DEFAULT_ALLOW_TERMS
+        | PATH_ALLOW_TERMS
+        | COMMON_CAPITALIZED_WORDS
+        | MONTHS_AND_DAYS
+        | GENERIC_ORG_WORDS
+        | NON_PERSON_NAME_WORDS
+        | RESERVED_PLACEHOLDER_WORDS
+    )
+)
+
 GENERIC_TERM_PATTERNS = (
     r"\bfindings?\b",
     r"\bworkflow[s]?\b",

@@ -14,10 +14,11 @@ import copy
 import contextlib
 import io
 import json
+import re
 import sys
 from argparse import Namespace
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,7 @@ try:
     from . import __version__
     from . import core as rc
 except ImportError:  # pragma: no cover - direct script fallback
-    __version__ = "0.6.0"
+    __version__ = "0.7.0"
     package_root = Path(__file__).resolve().parents[1]
     if str(package_root) not in sys.path:
         sys.path.insert(0, str(package_root))
@@ -374,7 +375,12 @@ class RedactedContextMcp:
         if not self.enable_writes:
             raise ToolExecutionError("Writes are disabled. Start the server with --enable-writes.")
         try:
-            replacements = rc.build_rehydration_map(self.ctx, self.redactor, budget=self.submit_budget())
+            replacements = rc.build_rehydration_map(
+                self.ctx,
+                self.redactor,
+                budget=self.submit_budget(),
+                exclude_roots=(self.write_root,),
+            )
         except rc.OperationLimitError as exc:
             raise ToolExecutionError(str(exc) or "Rehydration map limit exceeded.") from exc
         restored_target, target_replacements = rc.rehydrate_text_with_count(target_path, replacements)
@@ -387,6 +393,14 @@ class RedactedContextMcp:
         unresolved_text = rc.unresolved_rehydration_tokens(restored_text)
         if unresolved_text:
             raise ToolExecutionError(format_unresolved_tokens("text", unresolved_text))
+        text_placeholder_values, text_path_values = rc.applied_rehydration_values(text, replacements)
+        target_placeholder_values, target_path_values = rc.applied_rehydration_values(target_path, replacements)
+        self.verify_round_trip_redaction(
+            restored_target,
+            restored_text,
+            text_placeholder_values + target_placeholder_values,
+            text_path_values + target_path_values,
+        )
         if output_path.exists():
             if output_path.is_dir():
                 raise ToolExecutionError("Target already exists as a directory.")
@@ -408,6 +422,45 @@ class RedactedContextMcp:
             f"bytes: {len(restored_text.encode('utf-8'))}\n"
             f"replacements: {total_replacements}\n"
         )
+
+    def verify_round_trip_redaction(
+        self,
+        restored_target: str,
+        restored_text: str,
+        placeholder_values: list[str],
+        path_values: list[str],
+    ) -> None:
+        """Reject writes that would not redact consistently when read back.
+
+        A restored value glued into a surrounding token (for example
+        ``foo[PERSON_x]bar``) can defeat redaction word boundaries on
+        read-back. Every applied value must vanish from the re-redacted
+        result, and each distinctive word token of a sensitive value must not
+        survive either.         Relative-path values are only checked whole because
+        their generic path tokens are expected to remain visible.
+        """
+        haystacks = (
+            rc.PLACEHOLDER_RE.sub("", self.redactor.redact(restored_text)).casefold(),
+            rc.PLACEHOLDER_RE.sub("", self.redactor.redact_path(restored_target)).casefold(),
+        )
+        allow = self.redactor.allow_lookup
+        for value in placeholder_values + path_values:
+            probe = value.casefold()
+            if probe and any(probe in haystack for haystack in haystacks):
+                raise ToolExecutionError(self.round_trip_error_message)
+        for value in placeholder_values:
+            for token in re.split(r"[^A-Za-z0-9]+", value):
+                folded = token.casefold()
+                if len(folded) < 3 or folded in allow or folded in rc.GENERIC_PROBE_STOPWORDS:
+                    continue
+                if any(folded in haystack for haystack in haystacks):
+                    raise ToolExecutionError(self.round_trip_error_message)
+
+    round_trip_error_message = (
+        "Rehydrated document would not redact consistently on read-back. "
+        "Keep placeholder references separated by spaces or punctuation "
+        "so restored values redact cleanly."
+    )
 
 
 def resolve_write_root(root: Path, write_subdir: str) -> Path:
@@ -491,6 +544,7 @@ def safe_error_message(exc: SystemExit, redactor: rc.Redactor) -> str:
         "Could not reach GitHub API.",
         "GitHub state must be open, closed, or all.",
         "Invalid regex.",
+        rc.UNSAFE_REGEX_MESSAGE,
         "Refusing unsafe path.",
         "Traversal entry limit exceeded.",
         "File limit exceeded.",
@@ -684,6 +738,7 @@ def redctx_search(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
             glob=string_list_arg(arguments, "glob"),
             max_results=int_arg(arguments, "max_results", rc.DEFAULT_MAX_SEARCH_RESULTS)
             or rc.DEFAULT_MAX_SEARCH_RESULTS,
+            max_seconds=rc.DEFAULT_MCP_SEARCH_SECONDS,
         ),
     )
 
@@ -1194,10 +1249,65 @@ def write_response(request_id: Any, *, result: dict[str, Any] | None = None, err
         sys.stdout.flush()
 
 
-def serve(server: RedactedContextMcp) -> int:
-    input_stream = getattr(sys.stdin, "buffer", sys.stdin)
-    for line in input_stream:
-        raw = line.decode("utf-8", errors="replace").strip() if isinstance(line, bytes) else line.strip()
+MAX_REQUEST_LINE_BYTES = 10 * 1024 * 1024
+REQUEST_CHUNK_BYTES = 65536
+
+
+def _read_request_chunk(stream: Any) -> bytes:
+    """Read one available chunk without waiting for a full buffer."""
+    reader = getattr(stream, "read1", None)
+    if callable(reader):
+        return reader(REQUEST_CHUNK_BYTES)
+    # Nonstandard text stream fallback: readline keeps line semantics.
+    data = stream.readline()
+    if isinstance(data, str):
+        data = data.encode("utf-8", "replace")
+    return data
+
+
+def iter_request_lines(stream: Any, max_bytes: int) -> Iterator[bytes | None]:
+    """Yield newline-delimited request lines, capped at max_bytes each.
+
+    Oversized lines are reported as None so the server can answer with a
+    protocol error without buffering unbounded input in memory.
+    """
+    buffer = bytearray()
+    overflow = False
+    while True:
+        chunk = _read_request_chunk(stream)
+        if not chunk:
+            if overflow and buffer:
+                yield None
+            elif buffer:
+                yield bytes(buffer)
+            return
+        buffer.extend(chunk)
+        while True:
+            newline = buffer.find(b"\n")
+            if newline < 0:
+                break
+            line = bytes(buffer[:newline])
+            del buffer[: newline + 1]
+            if overflow or len(line) > max_bytes:
+                overflow = False
+                yield None
+            else:
+                yield line
+        if len(buffer) > max_bytes:
+            overflow = True
+            del buffer[:]
+
+
+def serve(server: RedactedContextMcp, stream: Any | None = None) -> int:
+    input_stream = stream if stream is not None else getattr(sys.stdin, "buffer", sys.stdin)
+    for raw_line in iter_request_lines(input_stream, MAX_REQUEST_LINE_BYTES):
+        if raw_line is None:
+            write_response(
+                None,
+                error={"code": -32600, "message": "Request line exceeds maximum size."},
+            )
+            continue
+        raw = raw_line.decode("utf-8", errors="replace").strip()
         if not raw:
             continue
         request_id: Any = None

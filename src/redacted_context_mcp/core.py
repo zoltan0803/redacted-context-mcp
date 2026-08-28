@@ -42,11 +42,14 @@ from .defaults import (
     DEFAULT_MAX_RAW_BYTES_PER_FILE,
     DEFAULT_MAX_RESOURCE_BYTES,
     DEFAULT_MAX_SEARCH_RESULTS,
+    DEFAULT_MCP_SEARCH_SECONDS,
     DEFAULT_MAX_TOTAL_RAW_BYTES,
     DEFAULT_MAX_TRAVERSAL_ENTRIES,
     DEFAULT_OLLAMA_ENDPOINT,
+    GENERIC_PROBE_STOPWORDS,
     LOCAL_CONFIG,
     PLACEHOLDER_CATEGORIES,
+    PLACEHOLDER_CATEGORY_PATTERN,
     PLACEHOLDER_RE,
     REPO_ROOT,
 )
@@ -197,6 +200,19 @@ def command_tree(args: argparse.Namespace, ctx: RedactedContext, redactor: Redac
     return 0
 
 
+PARTIAL_PLACEHOLDER_TAIL_RE = re.compile(
+    rf"\[(?:{PLACEHOLDER_CATEGORY_PATTERN})_[0-9a-f]{{0,31}}$"
+)
+
+
+def truncate_redacted(text: str, max_chars: int) -> str:
+    """Truncate redacted output without splitting a placeholder token."""
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    return PARTIAL_PLACEHOLDER_TAIL_RE.sub("", cut) + "\n[TRUNCATED]\n"
+
+
 def command_cat(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
     budget = operation_budget_from_args(args)
     path = ctx.resolve_ref(args.path, expected="text")
@@ -211,8 +227,7 @@ def command_cat(args: argparse.Namespace, ctx: RedactedContext, redactor: Redact
         raise SystemExit("--end-line must be greater than or equal to --start-line.")
     selected = "".join(lines[start - 1 : end])
     redacted = redactor.redact(selected)
-    if len(redacted) > args.max_chars:
-        redacted = redacted[: args.max_chars] + "\n[TRUNCATED]\n"
+    redacted = truncate_redacted(redacted, args.max_chars)
 
     rel = rel_posix(path, ctx.root)
     print(f"--- {ctx.display_ref(rel)} {redactor.redact_path(rel)} lines {start}-{min(end, len(lines))} ---")
@@ -243,9 +258,7 @@ def command_tail(args: argparse.Namespace, ctx: RedactedContext, redactor: Redac
     start = max(1, len(all_lines) - args.lines + 1)
     selected = "".join(all_lines[start - 1 :])
     redacted = redactor.redact(selected)
-    max_chars = args.max_chars or DEFAULT_MAX_CHARS
-    if len(redacted) > max_chars:
-        redacted = redacted[:max_chars] + "\n[TRUNCATED]\n"
+    redacted = truncate_redacted(redacted, args.max_chars or DEFAULT_MAX_CHARS)
     rel = rel_posix(path, ctx.root)
     print(f"--- {ctx.display_ref(rel)} {redactor.redact_path(rel)} lines {start}-{len(all_lines)} ---")
     if args.line_numbers:
@@ -256,12 +269,218 @@ def command_tail(args: argparse.Namespace, ctx: RedactedContext, redactor: Redac
     return 0
 
 
+UNSAFE_REGEX_MESSAGE = "Unsafe regex: potentially catastrophic backtracking pattern."
+
+
+def _regex_quantifier_at(pattern: str, index: int) -> tuple[str, int]:
+    """Classify the quantifier starting at pattern[index].
+
+    Returns ("none"|"bounded"|"unbounded", token_length).
+    """
+    n = len(pattern)
+    if index >= n:
+        return "none", 0
+    char = pattern[index]
+    if char in "*+":
+        if index + 1 < n and pattern[index + 1] == "+":
+            return "unbounded", 2
+        return "unbounded", 1
+    if char == "?":
+        if index + 1 < n and pattern[index + 1] in {"?", "+"}:
+            return "bounded", 2
+        return "bounded", 1
+    if char == "{":
+        end = pattern.find("}", index + 1)
+        if end == -1 or end - index > 12:
+            return "none", 0
+        body = pattern[index + 1 : end]
+        if not re.fullmatch(r"\d*,\d*|\d+", body):
+            return "none", 0
+        if "," in body and body.partition(",")[2] == "":
+            return "unbounded", end - index + 1
+        return "bounded", end - index + 1
+    return "none", 0
+
+
+def _split_top_level_alternation(body: str) -> list[str]:
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    index = 0
+    n = len(body)
+    while index < n:
+        char = body[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "[":
+            close = index + 1
+            if close < n and body[close] == "^":
+                close += 1
+            if close < n and body[close] == "]":
+                close += 1
+            while close < n and body[close] != "]":
+                if body[close] == "\\":
+                    close += 1
+                close += 1
+            index = close + 1
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif char == "|" and depth == 0:
+            parts.append(body[start:index])
+            start = index + 1
+        index += 1
+    parts.append(body[start:])
+    return parts
+
+
+def _branch_first_chars(branch: str) -> frozenset[str] | None:
+    """Approximate set of literal first characters a branch can start with.
+
+    Returns None when the estimate is unknown (escapes, ranges, groups);
+    callers must treat unknown as potentially overlapping.
+    """
+    branch = branch.lstrip("^")
+    if not branch:
+        return None
+    if branch[0] == "\\":
+        return None
+    if branch[0] == "[":
+        end = branch.find("]")
+        if end == -1:
+            return None
+        inner = branch[1:end].removeprefix("^")
+        if inner.startswith("]"):
+            inner = inner[1:]
+        if "-" in inner or "\\" in inner:
+            return None
+        return frozenset(inner)
+    if branch[0] == "(":
+        close = branch.find(")")
+        if close == -1:
+            return None
+        inner = branch[1:close]
+        if inner.startswith("?"):
+            return None
+        branch_sets = [_branch_first_chars(part) for part in _split_top_level_alternation(inner)]
+        if any(value is None for value in branch_sets):
+            return None
+        combined: set[str] = set()
+        for value in branch_sets:
+            combined.update(value)
+        return frozenset(combined)
+    return frozenset(branch[0])
+
+
+def _alternation_overlap(body: str) -> bool:
+    branches = _split_top_level_alternation(body)
+    if len(branches) < 2:
+        return False
+    first_sets = [_branch_first_chars(branch) for branch in branches]
+    for index in range(len(first_sets)):
+        for other in range(index + 1, len(first_sets)):
+            left, right = first_sets[index], first_sets[other]
+            if left is None or right is None or left & right:
+                return True
+    return False
+
+
+def regex_backtracking_violation(pattern: str) -> str | None:
+    """Return a violating snippet when a pattern can backtrack explosively.
+
+    Conservative screen over user-supplied regexes: an unbounded quantifier
+    applied to a group whose body contains any quantifier, or a top-level
+    alternation with overlapping (or unestimable) branch start characters, can
+    degrade to exponential matching time. Unknown shapes fail closed.
+    """
+    n = len(pattern)
+    index = 0
+    # Each stack entry: [group_open_position, has_quantifier_inside]
+    groups: list[list[object]] = []
+
+    while index < n:
+        char = pattern[index]
+        if char == "\\":
+            index += 2
+            kind, length = _regex_quantifier_at(pattern, index)
+            if kind != "none":
+                index += length
+                if groups:
+                    groups[-1][1] = True
+            continue
+        if char == "[":
+            close = index + 1
+            if close < n and pattern[close] == "^":
+                close += 1
+            if close < n and pattern[close] == "]":
+                close += 1
+            while close < n and pattern[close] != "]":
+                if pattern[close] == "\\":
+                    close += 1
+                close += 1
+            index = close + 1
+            kind, length = _regex_quantifier_at(pattern, index)
+            if kind != "none":
+                index += length
+                if groups:
+                    groups[-1][1] = True
+            continue
+        if char == "(":
+            groups.append([index, False])
+            index += 1
+            if index < n and pattern[index] == "?":
+                index += 1
+                if index < n and pattern[index] == "P":
+                    index += 1
+                    if index < n and pattern[index] == "<":
+                        gt = pattern.find(">", index)
+                        index = gt + 1 if gt != -1 else n
+            continue
+        if char == ")":
+            if not groups:
+                index += 1
+                continue
+            open_position, has_quantifier = groups.pop()
+            close_position = index
+            index += 1
+            kind, length = _regex_quantifier_at(pattern, index)
+            if kind != "none":
+                index += length
+            if kind == "unbounded":
+                if has_quantifier:
+                    return pattern[max(0, open_position - 12) : min(n, index + 4)]
+                body = pattern[open_position + 1 : close_position]
+                if body.startswith("?P") or body.startswith("?<"):
+                    gt = body.find(">")
+                    body = body[gt + 1 :] if gt != -1 else ""
+                elif body.startswith("?"):
+                    body = body[2:]
+                if _alternation_overlap(body):
+                    return pattern[max(0, open_position - 12) : min(n, index + 4)]
+            if groups and (kind != "none" or has_quantifier):
+                groups[-1][1] = True
+            continue
+        # Plain atom.
+        index += 1
+        kind, length = _regex_quantifier_at(pattern, index)
+        if kind != "none":
+            index += length
+            if groups:
+                groups[-1][1] = True
+    return None
+
+
 def command_grep(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
     budget = operation_budget_from_args(args)
     flags = re.IGNORECASE if args.ignore_case else 0
     matcher: re.Pattern[str] | None = None
     query = args.query
     if args.regex:
+        if regex_backtracking_violation(query) is not None:
+            raise SystemExit(UNSAFE_REGEX_MESSAGE)
         try:
             matcher = re.compile(query, flags)
         except re.error as exc:
@@ -272,6 +491,7 @@ def command_grep(args: argparse.Namespace, ctx: RedactedContext, redactor: Redac
     use_prefilter = can_use_raw_search_prefilter(args.query, regex=args.regex, ignore_case=args.ignore_case)
     results = 0
     for path in iter_target_files(ctx, args.paths, args.glob, budget=budget, text_only=not use_prefilter):
+        budget.check_deadline()
         if use_prefilter:
             path = ctx.validate_path(path, expected="file")
             raw_bytes = read_file_bytes_verified(path, budget=budget)
@@ -299,6 +519,7 @@ def command_grep(args: argparse.Namespace, ctx: RedactedContext, redactor: Redac
         redacted_lines = redactor.redact(raw, preserve_line_count=True).splitlines()
         matches: list[int] = []
         for index, line in enumerate(redacted_lines):
+            budget.check_deadline()
             haystack = line if args.regex or not args.ignore_case else line.casefold()
             found = bool(matcher.search(line)) if matcher else query in haystack
             if found:
@@ -373,8 +594,7 @@ def command_bundle(args: argparse.Namespace, ctx: RedactedContext, redactor: Red
             return 0
         raw = read_text_file(ctx.validate_path(path, expected="text"), budget=budget)
         redacted = redactor.redact(raw)
-        if len(redacted) > args.max_chars_per_file:
-            redacted = redacted[: args.max_chars_per_file] + "\n[TRUNCATED FILE]\n"
+        redacted = truncate_redacted(redacted, args.max_chars_per_file)
         rel = rel_posix(path, ctx.root)
         print(f"\n--- BEGIN {ctx.display_ref(rel)} {redactor.redact_path(rel)} ---")
         print(redacted, end="" if redacted.endswith("\n") else "\n")
@@ -389,8 +609,11 @@ def build_rehydration_map(
     redactor: Redactor,
     *,
     budget: OperationBudget | None = None,
+    exclude_roots: tuple[Path, ...] = (),
 ) -> dict[str, str]:
     for path in ctx.walk(include_dirs=True, budget=budget):
+        if any(path.is_relative_to(root) for root in exclude_roots):
+            continue
         rel = rel_posix(path, ctx.root)
         redactor.redact_path(rel)
         ref = ctx.display_ref(rel)
@@ -399,6 +622,26 @@ def build_rehydration_map(
         if path.is_file() and is_probably_text(path):
             redactor.redact(read_text_file(ctx.validate_path(path, expected="text"), budget=budget))
     return redactor.rehydration_map()
+
+
+def applied_rehydration_values(text: str, replacements: Mapping[str, str]) -> tuple[list[str], list[str]]:
+    """Return raw values a rehydration pass would substitute into text.
+
+    The first list holds values sourced from redaction placeholders (sensitive
+    content values); the second holds values sourced from opaque path
+    references (relative paths).
+    """
+    placeholder_values: list[str] = []
+    path_values: list[str] = []
+    for token in set(PLACEHOLDER_RE.findall(text)):
+        value = replacements.get(token)
+        if value is not None:
+            placeholder_values.append(value)
+    for token in set(OPAQUE_PATH_REF_RE.findall(text)):
+        value = replacements.get(token)
+        if value is not None:
+            path_values.append(value)
+    return placeholder_values, path_values
 
 
 def rehydrate_text(text: str, replacements: dict[str, str]) -> str:
@@ -782,6 +1025,7 @@ def command_discover(args: argparse.Namespace, ctx: RedactedContext, redactor: R
         model=args.model,
         timeout=args.timeout,
         postprocess=not args.raw_discovery,
+        allow_remote=getattr(args, "allow_remote_endpoint", False),
     )
     result = discover_entities(
         ctx,
@@ -854,6 +1098,7 @@ def command_discover_update(
                 model=args.model,
                 timeout=args.timeout,
                 postprocess=True,
+                allow_remote=getattr(args, "allow_remote_endpoint", False),
             )
             result = discover_documents(documents, client=client, postprocess=True)
         else:
@@ -1084,6 +1329,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     discover_parser.add_argument("--provider", choices=("ollama",), default="ollama")
     discover_parser.add_argument("--endpoint", default=DEFAULT_OLLAMA_ENDPOINT)
+    discover_parser.add_argument(
+        "--allow-remote-endpoint",
+        action="store_true",
+        help="allow non-loopback plain-http endpoints (sends private text off-machine)",
+    )
     discover_parser.add_argument("--model", default=DEFAULT_DISCOVERY_MODEL)
     discover_parser.add_argument("--timeout", type=float, default=120.0)
     discover_parser.add_argument("--glob", action="append", default=[])
@@ -1117,6 +1367,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="JSONL file containing path/text objects, or - for stdin",
     )
     discover_update_parser.add_argument("--endpoint", default=DEFAULT_OLLAMA_ENDPOINT)
+    discover_update_parser.add_argument(
+        "--allow-remote-endpoint",
+        action="store_true",
+        help="allow non-loopback plain-http endpoints (sends private text off-machine)",
+    )
     discover_update_parser.add_argument("--model", default=DEFAULT_DISCOVERY_MODEL)
     discover_update_parser.add_argument("--timeout", type=float, default=120.0)
     discover_update_parser.add_argument("--max-files", type=int, default=DEFAULT_DISCOVERY_MAX_FILES)

@@ -9,7 +9,13 @@ import stat
 from pathlib import Path
 from typing import Iterable
 
-from .defaults import DEFAULT_EXCLUDE_DIRS, DEFAULT_EXCLUDE_GLOBS, DEFAULT_MAX_TRAVERSAL_ENTRIES, TEXT_EXTENSIONS
+from .defaults import (
+    DEFAULT_EXCLUDE_DIRS,
+    DEFAULT_EXCLUDE_GLOBS,
+    DEFAULT_MAX_TRAVERSAL_ENTRIES,
+    NEVER_SERVE_GLOBS,
+    TEXT_EXTENSIONS,
+)
 from .limits import OperationBudget, OperationLimitError
 from .models import RedactionConfig
 from .paths import path_id, rel_posix
@@ -24,6 +30,9 @@ class RedactedContext:
         self.include_private = include_private
         self.exclude_dirs = set(DEFAULT_EXCLUDE_DIRS) | set(config.exclude_dirs)
         self.exclude_globs = set(DEFAULT_EXCLUDE_GLOBS) | set(config.exclude_globs)
+        # Loaded term files contain raw sensitive terms and must never be
+        # served, regardless of --include-private.
+        self.protected_term_files = set(config.term_files)
         self._path_index: dict[str, str] | None = None
 
     def resolve_ref(self, value: str, *, expected: str | None = None) -> Path:
@@ -155,13 +164,17 @@ class RedactedContext:
         return index
 
     def is_excluded(self, path: Path) -> bool:
-        if self.include_private:
-            return False
         rel = rel_posix(path, self.root)
         try:
             parts = path.relative_to(self.root).parts
         except ValueError:
             return True
+        if rel in self.protected_term_files:
+            return True
+        if any(fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(path.name, pattern) for pattern in NEVER_SERVE_GLOBS):
+            return True
+        if self.include_private:
+            return False
         if any(part in self.exclude_dirs for part in parts):
             return True
         return any(fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(path.name, pattern) for pattern in self.exclude_globs)

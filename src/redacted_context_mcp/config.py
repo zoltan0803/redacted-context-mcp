@@ -22,9 +22,10 @@ from .defaults import (
     TERMS_ENV,
 )
 from .models import GitHubRepoConfig, RedactionConfig
-from .paths import resolve_under_root
+from .paths import rel_posix, resolve_under_root
 
 def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
+    root = root.expanduser().resolve()
     values: dict[str, list[str]] = {
         "clients": [],
         "organizations": [],
@@ -44,6 +45,7 @@ def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
     salt = ""
     salt_source = "local-state"
     detector_profile = "default"
+    term_files: list[str] = []
 
     root_terms = derive_root_terms(root)
     for term in root_terms:
@@ -69,6 +71,7 @@ def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
                 term_file_values = read_term_file(term_path)
                 values["terms"].extend(term_file_values)
                 explicit_values["terms"].extend(term_file_values)
+                term_files.append(rel_posix(term_path, root))
         github_repos.update(parse_github_repos(data.get("github", {})))
 
     environment_terms: list[str] = []
@@ -104,6 +107,7 @@ def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
         explicit_people=dedupe(expand_person_terms(explicit_values["people"])),
         explicit_terms=dedupe(explicit_values["terms"]),
         detector_profile=detector_profile,
+        term_files=tuple(dedupe(term_files)),
     )
 
 

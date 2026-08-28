@@ -390,7 +390,9 @@ redctx --root ../source-private discover context --endpoint http://localhost:114
 ```
 
 The command uses Ollama's local `/api/generate` endpoint with streaming disabled
-and JSON output requested. No hosted LLM is called by this feature.
+and JSON output requested. No hosted LLM is called by this feature. Non-loopback
+plain-http endpoints are refused unless you pass `--allow-remote-endpoint`,
+because discovery payloads contain raw private text.
 
 ### Automate Incremental Config Updates
 
@@ -473,8 +475,26 @@ It helps because:
 The `rehydrate` command intentionally reverses redacted exports for the local
 operator. `redctx_submit_doc` can also rehydrate generated redacted text, but
 only when MCP writes are explicitly enabled and only into the configured write
-subdirectory. Do not run rehydration workflows from an agent workspace where the
+subdirectory. Submitted content is verified to redact consistently on
+read-back, and the write subdirectory itself is never used as a rehydration
+source. Do not run rehydration workflows from an agent workspace where the
 model can read raw output.
+
+Additional guardrails:
+
+- The redaction config, configured term files, `.env*`, `*.key`, `*.pem`, and
+  `*.crt` files are never served through redacted tools, even with
+  `--include-private`.
+- Bare long hex strings (the vault-salt shape) and `salt`-keyed assignments
+  are redacted as secrets by default.
+- MCP searches enforce an operation deadline, and user-supplied regexes are
+  screened for catastrophic-backtracking patterns and rejected when unsafe.
+- `redctx discover` refuses non-loopback plain-http Ollama endpoints unless
+  `--allow-remote-endpoint` acknowledges the exposure.
+- Placeholders are deterministic HMACs over the vault salt. Keep the salt in
+  the local config or user-local state; `REDACTED_CONTEXT_SALT` can be visible
+  in process environments, and anyone holding the salt can verify dictionary
+  guesses against placeholders.
 
 It is not a hard security boundary if the agent process runs as the same OS
 user that can read the private source folder. For hard enforcement, run the
