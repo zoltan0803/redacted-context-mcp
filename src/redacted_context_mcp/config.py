@@ -57,8 +57,9 @@ def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
     if path != default_config:
         # An explicit --config file holds the same secrets as the default
         # config and must never be served, wherever it lives under the root.
+        # Protected even when missing at load time: it may be created later.
         explicit_config = path.expanduser().resolve()
-        if explicit_config.exists() and is_relative_to(explicit_config, root):
+        if is_relative_to(explicit_config, root):
             protected_paths.append(rel_posix(explicit_config, root))
     if path.exists():
         data = read_toml(path)
@@ -74,11 +75,14 @@ def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
         detector_profile = str(redaction.get("detector_profile", detector_profile)).strip() or detector_profile
         for term_file in as_string_list(redaction.get("term_files", [])):
             term_path = resolve_under_root(root, term_file, allow_missing=True)
+            # Protected even when missing at load time: the operator may
+            # create the term file after the server has started, and its
+            # terms were never loaded into the redaction config.
+            term_files.append(rel_posix(term_path, root))
             if term_path.exists():
                 term_file_values = read_term_file(term_path)
                 values["terms"].extend(term_file_values)
                 explicit_values["terms"].extend(term_file_values)
-                term_files.append(rel_posix(term_path, root))
         github_repos.update(parse_github_repos(data.get("github", {})))
         for repo_config in github_repos.values():
             # Private GitHub owner/repo identifiers are sensitive terms so a

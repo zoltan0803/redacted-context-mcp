@@ -204,6 +204,12 @@ class RedactedContext:
         normalized_prune_roots = tuple(
             root.expanduser().resolve(strict=False) for root in prune_roots
         )
+        # Case-insensitive filesystems (macOS, Windows) may surface on-disk
+        # casing that differs from the configured prune-root string, so
+        # pruning also compares case-folded path prefixes. Over-pruning a
+        # case-only sibling directory on case-sensitive filesystems fails
+        # closed and only narrows scan results.
+        folded_prune_roots = tuple((str(root).casefold() + os.sep, str(root).casefold()) for root in normalized_prune_roots)
         seen: set[tuple[int, int]] = set()
         yield from self._walk(
             start,
@@ -213,6 +219,7 @@ class RedactedContext:
             seen=seen,
             budget=walk_budget,
             prune_roots=normalized_prune_roots,
+            folded_prune_roots=folded_prune_roots,
         )
 
     def _walk(
@@ -225,9 +232,14 @@ class RedactedContext:
         seen: set[tuple[int, int]],
         budget: OperationBudget,
         prune_roots: tuple[Path, ...],
+        folded_prune_roots: tuple[tuple[str, str], ...],
     ) -> Iterable[Path]:
         if any(path == root or path.is_relative_to(root) for root in prune_roots):
             return
+        if folded_prune_roots:
+            folded = str(path).casefold()
+            if any(folded == exact or folded.startswith(prefix) for prefix, exact in folded_prune_roots):
+                return
         budget.consume_entry()
         if path.is_symlink() or is_reparse_point(path):
             return
@@ -266,6 +278,7 @@ class RedactedContext:
                     seen=seen,
                     budget=budget,
                     prune_roots=prune_roots,
+                    folded_prune_roots=folded_prune_roots,
                 )
             else:
                 yield child
