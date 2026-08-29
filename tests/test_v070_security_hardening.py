@@ -164,6 +164,65 @@ class NeverServeTest(unittest.TestCase):
         self.assertNotIn("hunter2boogaloo", redacted)
         self.assertNotIn("abcdefghijklmnop", redacted)
 
+    def test_late_created_term_file_is_protected(self) -> None:
+        # A term_files entry that does not exist at config-load time must
+        # still be recorded as protected: the operator may create it after
+        # the server has started, and its terms were never loaded.
+        (self.root / ".agent-context-redactor.toml").write_text(
+            f'[redaction]\nsalt = "{TEST_SALT}"\npeople = ["{PERSON_NAME}"]\nterm_files = ["late-terms.txt"]\n',
+            encoding="utf-8",
+        )
+        mcp = server.RedactedContextMcp(
+            root=self.root,
+            config_path=None,
+            mode="balanced",
+            include_private=False,
+        )
+        (self.root / "late-terms.txt").write_text(f"{PERSON_NAME} raw names\n", encoding="utf-8")
+        result = mcp.call_tool("redctx_read", {"path": "late-terms.txt"})
+        self.assertTrue(result["isError"])
+        self.assertNotIn(PERSON_NAME, result["structuredContent"]["text"])
+
+    def test_late_created_explicit_config_is_protected(self) -> None:
+        (self.root / "custom.toml").unlink(missing_ok=True)
+        mcp = server.RedactedContextMcp(
+            root=self.root,
+            config_path=self.root / "custom.toml",
+            mode="strict",
+            include_private=False,
+        )
+        (self.root / "custom.toml").write_text(
+            f'[redaction]\nsalt = "later-created"\npeople = ["{PERSON_NAME}"]\n',
+            encoding="utf-8",
+        )
+        result = mcp.call_tool("redctx_read", {"path": "custom.toml"})
+        self.assertTrue(result["isError"])
+
+    def test_case_variant_write_dir_is_pruned_from_map(self) -> None:
+        # write_root keeps the configured casing when the directory does not
+        # exist at startup; on case-insensitive filesystems a differently
+        # cased directory is the same directory and must still be pruned.
+        incoming = self.root / "incoming"
+        incoming.unlink(missing_ok=True)
+        mcp = server.RedactedContextMcp(
+            root=self.root,
+            config_path=None,
+            mode="strict",
+            include_private=False,
+            enable_writes=True,
+            write_subdir="incoming",
+        )
+        on_disk = self.root / "Incoming"
+        on_disk.mkdir(exist_ok=True)
+        (on_disk / "agent-poison.md").write_text(f"{UNIQUE_NAME} fabricated\n", encoding="utf-8")
+        placeholder = person_placeholder(UNIQUE_NAME)
+        result = mcp.call_tool(
+            "redctx_submit_doc",
+            {"target_path": "reviews/case.md", "text": f"Draft by {placeholder}."},
+        )
+        self.assertTrue(result["isError"])
+        self.assertIn("Unresolved redaction token(s)", result["structuredContent"]["text"])
+
     def test_case_mangled_never_serve_files_are_excluded(self) -> None:
         # On case-insensitive filesystems these are the same files as their
         # lowercase forms; use TOML-valid content in case of an overwrite.
