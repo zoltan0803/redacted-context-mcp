@@ -161,14 +161,13 @@ class RedactedContextMcpTest(unittest.TestCase):
         self.assertTrue(github_tool["annotations"]["openWorldHint"])
         self.assertNotIn("redctx_submit_doc", names)
 
-    def test_modern_discover_reports_dual_era_capabilities(self) -> None:
+    def test_modern_discover_reports_only_modern_versions(self) -> None:
         response = self.rpc("server/discover", self.modern_params())
         self.assertNotIn("error", response)
         result = response["result"]
 
         self.assertEqual(result["resultType"], "complete")
-        self.assertEqual(result["supportedVersions"][0], MODERN_PROTOCOL_VERSION)
-        self.assertIn("2025-11-25", result["supportedVersions"])
+        self.assertEqual(result["supportedVersions"], [MODERN_PROTOCOL_VERSION])
         self.assertIn("tools", result["capabilities"])
         self.assertIn("resources", result["capabilities"])
         self.assertEqual(result["cacheScope"], "public")
@@ -285,10 +284,7 @@ class RedactedContextMcpTest(unittest.TestCase):
         )["error"]
         self.assertEqual(unsupported["code"], -32022)
         self.assertEqual(unsupported["data"]["requested"], "2099-01-01")
-        self.assertEqual(
-            unsupported["data"]["supported"][0],
-            MODERN_PROTOCOL_VERSION,
-        )
+        self.assertEqual(unsupported["data"]["supported"], [MODERN_PROTOCOL_VERSION])
 
     def test_falsey_non_object_params_and_arguments_are_rejected(self) -> None:
         params_error = self.raw_rpc("tools/list", [])["error"]

@@ -195,13 +195,25 @@ class RedactedContext:
         max_depth: int | None = None,
         max_entries: int | None = None,
         budget: OperationBudget | None = None,
+        prune_roots: tuple[Path, ...] = (),
     ) -> Iterable[Path]:
         start = self.validate_path(start or self.root)
         if self.is_excluded(start):
             return
         walk_budget = budget or OperationBudget(max_entries=max_entries)
+        normalized_prune_roots = tuple(
+            root.expanduser().resolve(strict=False) for root in prune_roots
+        )
         seen: set[tuple[int, int]] = set()
-        yield from self._walk(start, include_dirs=include_dirs, max_depth=max_depth, depth=0, seen=seen, budget=walk_budget)
+        yield from self._walk(
+            start,
+            include_dirs=include_dirs,
+            max_depth=max_depth,
+            depth=0,
+            seen=seen,
+            budget=walk_budget,
+            prune_roots=normalized_prune_roots,
+        )
 
     def _walk(
         self,
@@ -212,7 +224,10 @@ class RedactedContext:
         depth: int,
         seen: set[tuple[int, int]],
         budget: OperationBudget,
+        prune_roots: tuple[Path, ...],
     ) -> Iterable[Path]:
+        if any(path == root or path.is_relative_to(root) for root in prune_roots):
+            return
         budget.consume_entry()
         if path.is_symlink() or is_reparse_point(path):
             return
@@ -250,6 +265,7 @@ class RedactedContext:
                     depth=depth + 1,
                     seen=seen,
                     budget=budget,
+                    prune_roots=prune_roots,
                 )
             else:
                 yield child

@@ -39,7 +39,7 @@ SERVER_VERSION = __version__
 MODERN_PROTOCOL_VERSION = "2026-07-28"
 LATEST_LEGACY_PROTOCOL_VERSION = "2025-11-25"
 LEGACY_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
-SUPPORTED_PROTOCOL_VERSIONS = (MODERN_PROTOCOL_VERSION, *LEGACY_PROTOCOL_VERSIONS)
+MODERN_PROTOCOL_VERSIONS = (MODERN_PROTOCOL_VERSION,)
 PROTOCOL_VERSION_META_KEY = "io.modelcontextprotocol/protocolVersion"
 CLIENT_INFO_META_KEY = "io.modelcontextprotocol/clientInfo"
 CLIENT_CAPABILITIES_META_KEY = "io.modelcontextprotocol/clientCapabilities"
@@ -185,7 +185,10 @@ class RedactedContextMcp:
 
     def discover(self) -> dict[str, Any]:
         return {
-            "supportedVersions": list(SUPPORTED_PROTOCOL_VERSIONS),
+            # server/discover negotiates only the stateless modern era.
+            # Legacy revisions remain available through initialize and must
+            # not be offered for per-request metadata negotiation.
+            "supportedVersions": list(MODERN_PROTOCOL_VERSIONS),
             "capabilities": self.server_capabilities(),
             "instructions": self.instructions(),
         }
@@ -411,7 +414,10 @@ class RedactedContextMcp:
             rc.atomic_write_text(output_path, restored_text, overwrite=overwrite)
         except SystemExit as exc:
             raise ToolExecutionError(str(exc) or "Write failed.") from exc
-        self.ctx.refresh_index()
+        # The output ref is derived directly from its relative path and salt,
+        # so an eager full-tree refresh is unnecessary. Invalidate lazily to
+        # avoid traversing an arbitrarily large write subtree after publish.
+        self.ctx.invalidate_path_index()
         self.cache.clear()
         rel = rc.rel_posix(output_path, self.root)
         total_replacements = target_replacements + text_replacements
@@ -1198,7 +1204,7 @@ def validate_modern_request_metadata(params: dict[str, Any], *, required: bool) 
             -32022,
             "Unsupported protocol version",
             data={
-                "supported": list(SUPPORTED_PROTOCOL_VERSIONS),
+                "supported": list(MODERN_PROTOCOL_VERSIONS),
                 "requested": requested,
             },
         )

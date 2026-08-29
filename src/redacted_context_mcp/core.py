@@ -52,7 +52,6 @@ from .defaults import (
     GENERIC_PROBE_STOPWORDS,
     LOCAL_CONFIG,
     PLACEHOLDER_CATEGORIES,
-    PLACEHOLDER_CATEGORY_PATTERN,
     PLACEHOLDER_RE,
     REPO_ROOT,
 )
@@ -203,17 +202,18 @@ def command_tree(args: argparse.Namespace, ctx: RedactedContext, redactor: Redac
     return 0
 
 
-PARTIAL_PLACEHOLDER_TAIL_RE = re.compile(
-    rf"\[(?:{PLACEHOLDER_CATEGORY_PATTERN})_[0-9a-f]{{0,31}}$"
-)
-
-
 def truncate_redacted(text: str, max_chars: int) -> str:
     """Truncate redacted output without splitting a placeholder token."""
     if len(text) <= max_chars:
         return text
-    cut = text[:max_chars]
-    return PARTIAL_PLACEHOLDER_TAIL_RE.sub("", cut) + "\n[TRUNCATED]\n"
+    cut_at = max(0, max_chars)
+    for match in PLACEHOLDER_RE.finditer(text):
+        if match.start() < cut_at < match.end():
+            cut_at = match.start()
+            break
+        if match.start() >= cut_at:
+            break
+    return text[:cut_at] + "\n[TRUNCATED]\n"
 
 
 def command_cat(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
@@ -754,9 +754,11 @@ def build_rehydration_map(
     original_aliases = redactor.raw_aliases
     redactor.raw_aliases = {}
     try:
-        for path in ctx.walk(include_dirs=True, budget=budget):
-            if any(path.is_relative_to(root) for root in exclude_roots):
-                continue
+        for path in ctx.walk(
+            include_dirs=True,
+            budget=budget,
+            prune_roots=exclude_roots,
+        ):
             rel = rel_posix(path, ctx.root)
             redactor.redact_path(rel)
             ref = ctx.display_ref(rel)

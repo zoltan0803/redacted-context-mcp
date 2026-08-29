@@ -485,6 +485,37 @@ class SubmitDocHardeningTest(unittest.TestCase):
         self.assertTrue(result["isError"])
         self.assertIn("Unresolved redaction token(s)", result["structuredContent"]["text"])
 
+    def test_large_write_subdir_is_pruned_from_submit_scan(self) -> None:
+        incoming = self.root / "incoming"
+        for index in range(50):
+            (incoming / f"agent-output-{index}.md").write_text(
+                "agent generated content\n",
+                encoding="utf-8",
+            )
+
+        limited = server.RedactedContextMcp(
+            root=self.root,
+            config_path=None,
+            mode="strict",
+            include_private=False,
+            enable_writes=True,
+            write_subdir="incoming",
+            # Root + its three direct entries fit exactly. Descending into
+            # incoming would exceed this budget before scanning notes.md.
+            max_traversal_entries=4,
+        )
+        placeholder = person_placeholder(PERSON_NAME)
+        result = limited.call_tool(
+            "redctx_submit_doc",
+            {
+                "target_path": "reviews/pruned.md",
+                "text": f"Reviewer {placeholder} approved.",
+            },
+        )
+
+        self.assertFalse(result["isError"], result["structuredContent"]["text"])
+        self.assertTrue((incoming / "reviews" / "pruned.md").exists())
+
     def test_glue_that_only_balanced_mode_would_leak_is_rejected(self) -> None:
         # "Taylor Reedapproved" redacts cleanly under strict mode (title-case
         # fallback) but leaks the surname under balanced mode, so verification
@@ -563,12 +594,17 @@ class OllamaEndpointTest(unittest.TestCase):
 
 
 class TruncationTest(unittest.TestCase):
-    def test_truncate_redacted_does_not_split_placeholder(self) -> None:
+    def test_truncate_redacted_does_not_split_placeholder_at_any_boundary(self) -> None:
         placeholder = person_placeholder(PERSON_NAME)
-        text = "intro " + placeholder
-        cut = core.truncate_redacted(text, 10)
-        self.assertNotIn("[PERSON_", cut)
-        self.assertTrue(cut.endswith("[TRUNCATED]\n"))
+        prefix = "intro "
+        text = prefix + placeholder + " suffix"
+        for offset in range(len(placeholder) + 1):
+            with self.subTest(offset=offset):
+                cut = core.truncate_redacted(text, len(prefix) + offset)
+                before_marker = cut.removesuffix("\n[TRUNCATED]\n")
+                expected = prefix if offset < len(placeholder) else prefix + placeholder
+                self.assertEqual(before_marker, expected)
+                self.assertTrue(cut.endswith("[TRUNCATED]\n"))
 
     def test_truncate_redacted_keeps_short_text(self) -> None:
         text = "short text"
@@ -594,7 +630,7 @@ class TruncationTest(unittest.TestCase):
             core.command_cat(args, ctx, redactor)
         printed = output.getvalue()
         self.assertNotIn(PERSON_NAME, printed)
-        partials = re.findall(r"\[PERSON_[0-9a-f]{1,31}$", printed, re.MULTILINE)
+        partials = re.findall(r"\[PERSON_[0-9a-f]{0,32}$", printed, re.MULTILINE)
         self.assertEqual(partials, [])
 
 
