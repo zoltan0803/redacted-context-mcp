@@ -38,6 +38,7 @@ from .defaults import (
     PLACEHOLDER_RE,
     PROMPT_INJECTION_RE,
     RESERVED_PLACEHOLDER_WORDS,
+    SALT_ASSIGNMENT_RE,
     SERVICE_ACCOUNT_RE,
     SPEAKER_LABEL_RE,
     SSN_RE,
@@ -161,6 +162,7 @@ class Redactor:
 
         text = PLACEHOLDER_RE.sub(lambda match: session.stash_allowed(match.group(0)), text)
         text = PEM_PRIVATE_KEY_RE.sub(lambda match: stash("SECRET", match.group(0)), text)
+        text = SALT_ASSIGNMENT_RE.sub(lambda match: stash("SECRET", match.group(0)), text)
         text = GENERIC_SECRET_RE.sub(lambda match: stash("SECRET", match.group(0)), text)
         text = HEX_SECRET_RE.sub(lambda match: stash("SECRET", match.group(0)), text)
         text = URL_RE.sub(lambda match: stash("URL", match.group(0)), text)

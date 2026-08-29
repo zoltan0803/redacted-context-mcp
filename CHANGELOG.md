@@ -21,6 +21,22 @@ Security hardening release.
 - Refuses non-loopback plain-http Ollama discovery endpoints unless
   `--allow-remote-endpoint` is passed.
 - Truncation no longer splits redaction placeholders mid-token.
+- Matches user-supplied search regexes in an isolated, killable child process
+  so catastrophic patterns can never hang the single-threaded server; the
+  static backtracking screen now also rejects ambiguous dots, negated
+  classes, nested-group hazards, and high-repetition bounded quantifiers.
+- Case-folds never-serve matching so `.ENV`, `server.PEM`, and similar
+  case-mangled variants are refused on case-insensitive filesystems, and
+  protects an explicit `--config` file like the default config.
+- Redacts salt assignments with short, spaced, or triple-quoted values,
+  256-bit-plus hex runs of any length, and underscore-qualified secret
+  assignments such as `DB_PASSWORD=...`; treats configured GitHub
+  owner/repo identifiers as redaction terms.
+- Verifies `redctx_submit_doc` output against both strict and balanced
+  redaction modes and builds rehydration maps solely from the scanned
+  corpus, closing adjacent-placeholder and interactive-read aliasing gaps.
+- Reports an error for oversized unterminated stdio request lines and accepts
+  `localhost.` (trailing-dot) Ollama endpoints.
 
 ## 0.6.0
 

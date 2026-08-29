@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from argparse import Namespace
 from pathlib import Path
@@ -30,13 +31,17 @@ UNIQUE_NAME = "Zephyr Quill"
 
 
 def person_placeholder(name: str, salt: str = TEST_SALT) -> str:
+    return category_placeholder("PERSON", name, salt=salt)
+
+
+def category_placeholder(category: str, name: str, salt: str = TEST_SALT) -> str:
     normalized = " ".join(name.split()).casefold()
     digest = hmac.new(
         salt.encode("utf-8"),
-        f"PERSON:{normalized}".encode("utf-8"),
+        f"{category}:{normalized}".encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()[:32]
-    return f"[PERSON_{digest}]"
+    return f"[{category}_{digest}]"
 
 
 class FakeChunkStream:
@@ -128,6 +133,96 @@ class NeverServeTest(unittest.TestCase):
         redacted = redactor.redact(text)
         self.assertIn("cafebabe", redacted)
 
+    def test_longer_hex_runs_are_redacted(self) -> None:
+        redactor = Redactor(RedactionConfig(salt=TEST_SALT))
+        for length in (64, 65, 128):
+            with self.subTest(length=length):
+                value = "f" * length
+                redacted = redactor.redact(f"digest {value} end")
+                self.assertNotIn(value, redacted)
+
+    def test_salt_assignment_variants_are_redacted(self) -> None:
+        redactor = Redactor(RedactionConfig(salt=TEST_SALT))
+        cases = (
+            ('salt = "my-local-vault-passphrase"', "my-local-vault-passphrase"),
+            ("salt:hunter2", "hunter2"),
+            ('salt="x"', None),
+            ('salt = """multiline-salt-value-1234"""', "multiline-salt-value-1234"),
+            ("salt = 'correct horse battery'", "correct horse battery"),
+            ("vault_salt: another secret value", "another secret value"),
+        )
+        for text, raw in cases:
+            with self.subTest(text=text):
+                redacted = redactor.redact(text)
+                self.assertIn("[SECRET_", redacted)
+                if raw is not None:
+                    self.assertNotIn(raw, redacted)
+
+    def test_underscore_qualified_secrets_are_redacted(self) -> None:
+        redactor = Redactor(RedactionConfig(salt=TEST_SALT))
+        redacted = redactor.redact("DB_PASSWORD=hunter2boogaloo and API_TOKEN=abcdefghijklmnop")
+        self.assertNotIn("hunter2boogaloo", redacted)
+        self.assertNotIn("abcdefghijklmnop", redacted)
+
+    def test_case_mangled_never_serve_files_are_excluded(self) -> None:
+        # On case-insensitive filesystems these are the same files as their
+        # lowercase forms; use TOML-valid content in case of an overwrite.
+        for name in (".ENV", "server.PEM", "SERVER.Key", "host.CRT", ".Agent-Context-Redactor.toml"):
+            (self.root / name).write_text('note = "secret payload"\n', encoding="utf-8")
+        ctx = self.make_context(include_private=True)
+        for name in (".ENV", "server.PEM", "SERVER.Key", "host.CRT", ".Agent-Context-Redactor.toml"):
+            with self.subTest(name=name):
+                self.assertTrue(ctx.is_excluded(ctx.root / name), name)
+
+    def test_case_mangled_config_read_is_rejected_over_mcp(self) -> None:
+        (self.root / ".ENV").write_text("DB_PASSWORD=hunter2boogaloo\n", encoding="utf-8")
+        mcp = server.RedactedContextMcp(
+            root=self.root,
+            config_path=None,
+            mode="strict",
+            include_private=True,
+        )
+        result = mcp.call_tool("redctx_read", {"path": ".ENV"})
+        self.assertTrue(result["isError"])
+        self.assertNotIn("hunter2boogaloo", result["structuredContent"]["text"])
+
+    def test_explicit_config_file_is_protected(self) -> None:
+        (self.root / "myconfig.toml").write_text(
+            f'[redaction]\nsalt = "short"\npeople = ["{PERSON_NAME}"]\n',
+            encoding="utf-8",
+        )
+        mcp = server.RedactedContextMcp(
+            root=self.root,
+            config_path=self.root / "myconfig.toml",
+            mode="strict",
+            include_private=False,
+        )
+        result = mcp.call_tool("redctx_read", {"path": "myconfig.toml"})
+        self.assertTrue(result["isError"])
+        text = result["structuredContent"]["text"]
+        self.assertNotIn("short", text)
+
+    def test_github_owner_and_repo_become_terms(self) -> None:
+        (self.root / ".agent-context-redactor.toml").write_text(
+            f'[redaction]\nsalt = "{TEST_SALT}"\n'
+            "[github.repos.context]\nowner = \"acme-internal-org\"\nrepo = \"private-context\"\n",
+            encoding="utf-8",
+        )
+        (self.root / "notes.md").write_text(
+            "See acme-internal-org/private-context for details.\n",
+            encoding="utf-8",
+        )
+        mcp = server.RedactedContextMcp(
+            root=self.root,
+            config_path=None,
+            mode="strict",
+            include_private=False,
+        )
+        result = mcp.call_tool("redctx_read", {"path": "notes.md"})
+        text = result["structuredContent"]["text"]
+        self.assertNotIn("acme-internal-org", text)
+        self.assertNotIn("private-context", text)
+
 
 class RegexSafetyTest(unittest.TestCase):
     def test_unsafe_patterns_are_flagged(self) -> None:
@@ -142,6 +237,15 @@ class RegexSafetyTest(unittest.TestCase):
             "(a|a)*b",
             "(a|ab)+",
             "(x[0-9]+y)+",
+            # Second-round review findings: dot and negated-class ambiguity,
+            # nested-group hazards, and high-repetition bounded quantifiers.
+            r"(?:.|[^a])+Q",
+            r"([^b]z|az)+q",
+            r"((a|a)x)+z",
+            "(a|aa){0,60}b",
+            "(a{1,2}){1,60}b",
+            "(a?){40}b",
+            r"(?:a{0,3}){0,30}c",
         ):
             with self.subTest(pattern=pattern):
                 self.assertIsNotNone(core.regex_backtracking_violation(pattern))
@@ -158,6 +262,7 @@ class RegexSafetyTest(unittest.TestCase):
             "x{2,4}",
             "^(?:TODO|NOTE):",
             r"\b\w+@\w+\.com\b",
+            r"(?:\d{1,3}\.){8}\d",
         ):
             with self.subTest(pattern=pattern):
                 self.assertIsNone(core.regex_backtracking_violation(pattern))
@@ -248,6 +353,39 @@ class RequestLineCapTest(unittest.TestCase):
         lines = list(server.iter_request_lines(stream, 32))
         self.assertEqual(lines, [b'{"a": 1}', None])
 
+    def test_oversized_exact_line_without_newline_at_eof_reports_error(self) -> None:
+        # Exactly one over the cap with no further data: the overflow flag is
+        # set and the buffer is empty at EOF, which must still report None.
+        stream = FakeChunkStream(b'{"a": 1}\n' + b"y" * 33)
+        lines = list(server.iter_request_lines(stream, 32))
+        self.assertEqual(lines, [b'{"a": 1}', None])
+
+
+class RegexWorkerIsolationTest(unittest.TestCase):
+    def test_worker_returns_matches_for_safe_pattern(self) -> None:
+        matched = core.match_regex_lines(r"needle", 0, [["no", "needle here", "nope"]], 30.0)
+        self.assertEqual(matched, [[1]])
+
+    def test_worker_is_killed_on_timeout_for_catastrophic_pattern(self) -> None:
+        # Bypasses the screen deliberately: this exercises the enforcement
+        # boundary (killable child process), not the fast-fail screen.
+        started = time.monotonic()
+        with self.assertRaises(SystemExit) as raised:
+            core.match_regex_lines("(a|aa){0,60}b", 0, [["a" * 60]], 1.0)
+        elapsed = time.monotonic() - started
+        self.assertIn("deadline", str(raised.exception))
+        self.assertLess(elapsed, 20.0)
+
+    def test_mcp_regex_search_is_bounded_by_worker(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        (root / "big.md").write_text("a" * 60 + "\n", encoding="utf-8")
+        mcp = server.RedactedContextMcp(root=root, config_path=None, mode="strict", include_private=False)
+        result = mcp.call_tool("redctx_search", {"query": "a{50,60}", "regex": True})
+        self.assertFalse(result["isError"], result["structuredContent"]["text"])
+        self.assertIn("a" * 50, result["structuredContent"]["text"])
+
 
 class ServeOversizedLineTest(unittest.TestCase):
     def test_serve_rejects_oversized_line_then_serves_next_request(self) -> None:
@@ -282,10 +420,13 @@ class SubmitDocHardeningTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         (self.root / ".agent-context-redactor.toml").write_text(
-            f'[redaction]\nsalt = "{TEST_SALT}"\npeople = ["{PERSON_NAME}"]\n',
+            f'[redaction]\nsalt = "{TEST_SALT}"\npeople = ["{PERSON_NAME}"]\nterms = ["Project Meridian"]\n',
             encoding="utf-8",
         )
-        (self.root / "notes.md").write_text(f"{PERSON_NAME} wrote the assessment.\n", encoding="utf-8")
+        (self.root / "notes.md").write_text(
+            f"{PERSON_NAME} wrote the assessment for Project Meridian.\n",
+            encoding="utf-8",
+        )
         incoming = self.root / "incoming"
         incoming.mkdir()
         (incoming / "preexisting.md").write_text(f"{UNIQUE_NAME} draft only in write dir.\n", encoding="utf-8")
@@ -328,6 +469,74 @@ class SubmitDocHardeningTest(unittest.TestCase):
         text = result["structuredContent"]["text"]
         self.assertIn("Unresolved redaction token(s)", text)
 
+    def test_interactive_read_of_write_dir_cannot_seed_map(self) -> None:
+        # Reading a write-subdir file populates the redactor's alias table,
+        # but the submit map must still be derived solely from the corpus walk.
+        read = self.mcp.call_tool("redctx_read", {"path": "incoming/preexisting.md"})
+        self.assertFalse(read["isError"])
+        placeholder = person_placeholder(UNIQUE_NAME)
+        result = self.mcp.call_tool(
+            "redctx_submit_doc",
+            {"target_path": "reviews/seeded.md", "text": f"Draft by {placeholder}."},
+        )
+        self.assertTrue(result["isError"])
+        self.assertIn("Unresolved redaction token(s)", result["structuredContent"]["text"])
+
+    def test_glue_that_only_balanced_mode_would_leak_is_rejected(self) -> None:
+        # "Taylor Reedapproved" redacts cleanly under strict mode (title-case
+        # fallback) but leaks the surname under balanced mode, so verification
+        # must run against both profiles.
+        person = person_placeholder(PERSON_NAME)
+        result = self.mcp.call_tool(
+            "redctx_submit_doc",
+            {"target_path": "reviews/glued.md", "text": f"{person}approved and noted."},
+        )
+        self.assertTrue(result["isError"])
+        self.assertIn("redact consistently", result["structuredContent"]["text"])
+        self.assertFalse((self.root / "incoming" / "reviews" / "glued.md").exists())
+
+    def test_adjacent_placeholders_are_rejected_or_safe_in_both_modes(self) -> None:
+        person = person_placeholder(PERSON_NAME)
+        sensitive = category_placeholder("SENSITIVE", "project meridian")
+        result = self.mcp.call_tool(
+            "redctx_submit_doc",
+            {"target_path": "reviews/adjacent.md", "text": f"See {person}{sensitive} notes."},
+        )
+        if not result["isError"]:
+            for mode in ("strict", "balanced"):
+                with self.subTest(mode=mode):
+                    reader = server.RedactedContextMcp(
+                        root=self.root,
+                        config_path=None,
+                        mode=mode,
+                        include_private=False,
+                    )
+                    read = reader.call_tool("redctx_read", {"path": "incoming/reviews/adjacent.md"})
+                    self.assertFalse(read["isError"])
+                    text = read["structuredContent"]["text"]
+                    self.assertNotIn(PERSON_NAME.split()[0], text)
+                    self.assertNotIn(PERSON_NAME.split()[1], text)
+
+    def test_clean_submit_is_safe_in_both_read_modes(self) -> None:
+        placeholder = person_placeholder(PERSON_NAME)
+        result = self.mcp.call_tool(
+            "redctx_submit_doc",
+            {"target_path": "reviews/dual.md", "text": f"Reviewer {placeholder} approved."},
+        )
+        self.assertFalse(result["isError"], result["structuredContent"]["text"])
+        for mode in ("strict", "balanced"):
+            with self.subTest(mode=mode):
+                reader = server.RedactedContextMcp(
+                    root=self.root,
+                    config_path=None,
+                    mode=mode,
+                    include_private=False,
+                )
+                read = reader.call_tool("redctx_read", {"path": "incoming/reviews/dual.md"})
+                self.assertFalse(read["isError"])
+                text = read["structuredContent"]["text"]
+                self.assertNotIn(PERSON_NAME, text)
+
 
 class OllamaEndpointTest(unittest.TestCase):
     def test_remote_plain_http_is_refused(self) -> None:
@@ -335,7 +544,7 @@ class OllamaEndpointTest(unittest.TestCase):
             OllamaDiscoveryClient(endpoint="http://example.com:11434", model="m", timeout=1)
 
     def test_loopback_plain_http_is_allowed(self) -> None:
-        for endpoint in ("http://localhost:11434", "http://127.0.0.1:11434", "http://[::1]:11434"):
+        for endpoint in ("http://localhost:11434", "http://127.0.0.1:11434", "http://[::1]:11434", "http://localhost.:11434"):
             with self.subTest(endpoint=endpoint):
                 OllamaDiscoveryClient(endpoint=endpoint, model="m", timeout=1)
 

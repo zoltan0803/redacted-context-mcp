@@ -46,6 +46,7 @@ def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
     salt_source = "local-state"
     detector_profile = "default"
     term_files: list[str] = []
+    protected_paths: list[str] = []
 
     root_terms = derive_root_terms(root)
     for term in root_terms:
@@ -53,6 +54,12 @@ def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
 
     default_config = root / LOCAL_CONFIG
     path = config_path if config_path is not None else default_config
+    if path != default_config:
+        # An explicit --config file holds the same secrets as the default
+        # config and must never be served, wherever it lives under the root.
+        explicit_config = path.expanduser().resolve()
+        if explicit_config.exists() and is_relative_to(explicit_config, root):
+            protected_paths.append(rel_posix(explicit_config, root))
     if path.exists():
         data = read_toml(path)
         redaction = data.get("redaction", data)
@@ -73,6 +80,12 @@ def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
                 explicit_values["terms"].extend(term_file_values)
                 term_files.append(rel_posix(term_path, root))
         github_repos.update(parse_github_repos(data.get("github", {})))
+        for repo_config in github_repos.values():
+            # Private GitHub owner/repo identifiers are sensitive terms so a
+            # copy of the config cannot leak them verbatim.
+            values["terms"].append(repo_config.owner)
+            values["terms"].append(repo_config.repo)
+            values["terms"].append(f"{repo_config.owner}/{repo_config.repo}")
 
     environment_terms: list[str] = []
     env_terms = os.environ.get(TERMS_ENV)
@@ -108,6 +121,7 @@ def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
         explicit_terms=dedupe(explicit_values["terms"]),
         detector_profile=detector_profile,
         term_files=tuple(dedupe(term_files)),
+        protected_paths=tuple(dedupe(protected_paths)),
     )
 
 

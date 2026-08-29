@@ -17,9 +17,11 @@ claim of hard OS isolation.
   opening on some platforms; run the agent without direct private-root access
   for hard isolation.
 - Opaque path ids are collision-checked before resolution.
-- The redaction config, configured term files, `.env*`, `*.key`, `*.pem`, and
-  `*.crt` files are never served, listed, or readable through redacted tools,
-  even when the operator passes `--include-private`.
+- The redaction config (default or explicit `--config`), configured term
+  files, `.env*`, `*.key`, `*.pem`, and `*.crt` files are never served,
+  listed, or readable through redacted tools, even when the operator passes
+  `--include-private`. Matching is case-folded so case-mangled variants such
+  as `.ENV` or `server.PEM` are refused on case-insensitive filesystems.
 
 ## Output Safety
 
@@ -27,9 +29,11 @@ claim of hard OS isolation.
   MCP resources, errors, paths, metadata, or logs.
 - Multi-line secrets are redacted before search results are split into lines.
 - Dynamic upstream errors are summarized without relaying raw response text.
-- Bare 128-bit-plus hex strings (the persisted vault-salt shape) and
-  `salt`-keyed assignments are redacted as secrets in the default detector
-  profile, so an echoed vault salt cannot be served back to an agent.
+- Bare 256-bit-plus hex strings (the persisted vault-salt shape), salt-keyed
+  assignments (including short, spaced, and triple-quoted values), and
+  underscore-qualified secret assignments such as `DB_PASSWORD=...` are
+  redacted as secrets in the default detector profile, so an echoed vault salt
+  cannot be served back to an agent.
 
 ## Vault Unlinkability
 
@@ -61,11 +65,14 @@ claim of hard OS isolation.
 - MCP writes are disabled unless explicitly enabled.
 - Enabled writes stay under the configured write subdirectory.
 - Symlink write destinations are rejected.
-- Rehydration maps for controlled writes never scan the write subdirectory, so
-  agent-written content cannot extend or poison later rehydration.
-- Before publication, restored content is re-redacted and rejected when any
-  restored value would survive read-back redaction (for example when glued
-  into a surrounding token that defeats word boundaries).
+- Rehydration maps for controlled writes are derived solely from the scanned
+  source corpus: the write subdirectory is never scanned, and aliases created
+  by earlier interactive reads cannot leak into the map, so agent-written
+  content cannot extend or poison later rehydration.
+- Before publication, restored content is re-redacted under both strict and
+  balanced modes and rejected when any restored value or distinctive value
+  token would survive read-back redaction (for example when glued into a
+  surrounding token that defeats word boundaries).
 - No-overwrite writes publish a fully written same-directory temporary file
   without replacing an existing target where hard links are supported. Overwrite
   writes use same-directory atomic replacement. Directory fsync is best-effort
@@ -79,12 +86,16 @@ claim of hard OS isolation.
   otherwise grow without bound.
 - MCP-driven searches enforce a server-side operation deadline evaluated per
   file and per matching line.
-- User-supplied search regexes are screened for catastrophic-backtracking
-  shapes (nested quantifiers and overlapping alternations under unbounded
-  quantifiers) and fail closed; the screen is a mitigation, not a proof, so
-  deadlines back it up between matches.
+- User-supplied search regexes are matched inside an isolated child process
+  that is terminated when the deadline expires; CPython's `re` engine cannot
+  be interrupted mid-match in-process, so process isolation is the hard bound.
+- User-supplied regexes are additionally screened for catastrophic
+  backtracking shapes (nested or high-repetition quantifiers and ambiguous
+  alternations) and fail closed before any match attempt. The screen is a
+  fast-fail mitigation, not a proof of safety; the killable worker is the
+  enforcement boundary.
 - MCP stdio request lines are size-capped so a client cannot exhaust server
-  memory with an unbounded line.
+  memory with an unbounded line, including unterminated final lines.
 - MCP resources are cached only after redaction, bounded by bytes, and
   invalidated by file metadata changes, redaction mode/config changes, submit
   writes, or explicit index refresh.

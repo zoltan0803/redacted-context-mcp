@@ -56,7 +56,7 @@ def validate_local_ollama_endpoint(endpoint: str) -> None:
         raise SystemExit("Ollama endpoint must be an http:// or https:// URL.")
     if parsed.scheme == "https":
         return
-    host = parsed.hostname.casefold()
+    host = parsed.hostname.casefold().rstrip(".")
     if host in LOCAL_ENDPOINT_HOSTS or host.endswith(".localhost"):
         return
     raise SystemExit(

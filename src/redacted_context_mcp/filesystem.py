@@ -13,7 +13,7 @@ from .defaults import (
     DEFAULT_EXCLUDE_DIRS,
     DEFAULT_EXCLUDE_GLOBS,
     DEFAULT_MAX_TRAVERSAL_ENTRIES,
-    NEVER_SERVE_GLOBS,
+    NEVER_SERVE_GLOBS_FOLDED,
     TEXT_EXTENSIONS,
 )
 from .limits import OperationBudget, OperationLimitError
@@ -30,9 +30,12 @@ class RedactedContext:
         self.include_private = include_private
         self.exclude_dirs = set(DEFAULT_EXCLUDE_DIRS) | set(config.exclude_dirs)
         self.exclude_globs = set(DEFAULT_EXCLUDE_GLOBS) | set(config.exclude_globs)
-        # Loaded term files contain raw sensitive terms and must never be
-        # served, regardless of --include-private.
-        self.protected_term_files = set(config.term_files)
+        # Loaded term files and the explicit config file contain raw sensitive
+        # terms and must never be served, regardless of --include-private.
+        # Matching is case-folded because the served filesystem may be
+        # case-insensitive (macOS, Windows) even when fnmatch is not.
+        self.protected_rel_paths = {p.casefold() for p in config.term_files}
+        self.protected_rel_paths.update(p.casefold() for p in config.protected_paths)
         self._path_index: dict[str, str] | None = None
 
     def resolve_ref(self, value: str, *, expected: str | None = None) -> Path:
@@ -169,9 +172,14 @@ class RedactedContext:
             parts = path.relative_to(self.root).parts
         except ValueError:
             return True
-        if rel in self.protected_term_files:
+        rel_folded = rel.casefold()
+        name_folded = path.name.casefold()
+        if rel_folded in self.protected_rel_paths:
             return True
-        if any(fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(path.name, pattern) for pattern in NEVER_SERVE_GLOBS):
+        if any(
+            fnmatch.fnmatchcase(rel_folded, pattern) or fnmatch.fnmatchcase(name_folded, pattern)
+            for pattern in NEVER_SERVE_GLOBS_FOLDED
+        ):
             return True
         if self.include_private:
             return False

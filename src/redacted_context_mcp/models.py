@@ -32,6 +32,7 @@ class RedactionConfig:
     explicit_terms: tuple[str, ...] = ()
     detector_profile: str = "default"
     term_files: tuple[str, ...] = ()
+    protected_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

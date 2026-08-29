@@ -482,13 +482,17 @@ model can read raw output.
 
 Additional guardrails:
 
-- The redaction config, configured term files, `.env*`, `*.key`, `*.pem`, and
-  `*.crt` files are never served through redacted tools, even with
-  `--include-private`.
-- Bare long hex strings (the vault-salt shape) and `salt`-keyed assignments
-  are redacted as secrets by default.
+- The redaction config (default or explicit `--config`), configured term
+  files, `.env*`, `*.key`, `*.pem`, and `*.crt` files are never served through
+  redacted tools, even with `--include-private`, with case-folded matching so
+  `.ENV` and `server.PEM` variants are refused too.
+- Bare long hex strings (the vault-salt shape), salt-keyed assignments, and
+  underscore-qualified secrets such as `DB_PASSWORD=...` are redacted by
+  default.
 - MCP searches enforce an operation deadline, and user-supplied regexes are
-  screened for catastrophic-backtracking patterns and rejected when unsafe.
+  matched in an isolated, killable child process after a fast-fail screen for
+  catastrophic-backtracking patterns, so a crafted regex cannot hang the
+  server.
 - `redctx discover` refuses non-loopback plain-http Ollama endpoints unless
   `--allow-remote-endpoint` acknowledges the exposure.
 - Placeholders are deterministic HMACs over the vault salt. Keep the salt in

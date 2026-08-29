@@ -433,21 +433,47 @@ class RedactedContextMcp:
         """Reject writes that would not redact consistently when read back.
 
         A restored value glued into a surrounding token (for example
-        ``foo[PERSON_x]bar``) can defeat redaction word boundaries on
-        read-back. Every applied value must vanish from the re-redacted
+        ``foo[PERSON_x]bar`` or two adjacent placeholders) can defeat redaction
+        word boundaries on read-back. Verification runs against both the
+        server's strict mode and the weaker balanced mode, because the written
+        document may later be served by a server started with ``--mode
+        balanced``. Every applied value must vanish from the re-redacted
         result, and each distinctive word token of a sensitive value must not
-        survive either.         Relative-path values are only checked whole because
+        survive either. Relative-path values are only checked whole because
         their generic path tokens are expected to remain visible.
         """
-        haystacks = (
-            rc.PLACEHOLDER_RE.sub("", self.redactor.redact(restored_text)).casefold(),
-            rc.PLACEHOLDER_RE.sub("", self.redactor.redact_path(restored_target)).casefold(),
-        )
+        redactors = [self.redactor]
+        if self.mode != "balanced":
+            redactors.append(rc.Redactor(self.redactor.config, mode="balanced"))
+        haystacks: list[str] = []
+        for redactor in redactors:
+            haystacks.append(rc.PLACEHOLDER_RE.sub("", redactor.redact(restored_text)).casefold())
+            haystacks.append(rc.PLACEHOLDER_RE.sub("", redactor.redact_path(restored_target)).casefold())
         allow = self.redactor.allow_lookup
-        for value in placeholder_values + path_values:
+        for value in path_values:
             probe = value.casefold()
             if probe and any(probe in haystack for haystack in haystacks):
                 raise ToolExecutionError(self.round_trip_error_message)
+        for value in placeholder_values:
+            # Values made entirely of generic vocabulary (for example an
+            # ENTITY captured from a common word like "Email") are only
+            # sensitive under strict-mode over-redaction; balanced read-back
+            # legitimately shows them. Distinctive values are probed whole
+            # and token-wise in both modes.
+            tokens = [
+                token.casefold()
+                for token in re.split(r"[^A-Za-z0-9]+", value)
+                if len(token) >= 3
+            ]
+            distinctive = [
+                token
+                for token in tokens
+                if token not in allow and token not in rc.GENERIC_PROBE_STOPWORDS
+            ]
+            probes = [value.casefold()] + distinctive if distinctive else []
+            for probe in probes:
+                if any(probe in haystack for haystack in haystacks):
+                    raise ToolExecutionError(self.round_trip_error_message)
         for value in placeholder_values:
             for token in re.split(r"[^A-Za-z0-9]+", value):
                 folded = token.casefold()
@@ -1276,7 +1302,7 @@ def iter_request_lines(stream: Any, max_bytes: int) -> Iterator[bytes | None]:
     while True:
         chunk = _read_request_chunk(stream)
         if not chunk:
-            if overflow and buffer:
+            if overflow:
                 yield None
             elif buffer:
                 yield bytes(buffer)
