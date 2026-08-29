@@ -311,7 +311,10 @@ class RegexSafetyTest(unittest.TestCase):
             regex=False,
             context=0,
             max_results=10,
-            max_seconds=0,
+            # Negative: deadline is deterministically in the past even on
+            # Windows, where time.monotonic() has ~15.6ms resolution on
+            # Python <= 3.12 and a zero-second deadline may not tick over.
+            max_seconds=-1,
         )
         with self.assertRaises(SystemExit):
             core.command_grep(args, ctx, redactor)
