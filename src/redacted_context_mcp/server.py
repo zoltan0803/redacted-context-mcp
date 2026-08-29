@@ -14,10 +14,11 @@ import copy
 import contextlib
 import io
 import json
+import re
 import sys
 from argparse import Namespace
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,7 @@ try:
     from . import __version__
     from . import core as rc
 except ImportError:  # pragma: no cover - direct script fallback
-    __version__ = "0.5.0"
+    __version__ = "0.7.0"
     package_root = Path(__file__).resolve().parents[1]
     if str(package_root) not in sys.path:
         sys.path.insert(0, str(package_root))
@@ -35,8 +36,16 @@ except ImportError:  # pragma: no cover - direct script fallback
 SERVER_NAME = "redacted-context"
 SERVER_TITLE = "Redacted Context"
 SERVER_VERSION = __version__
-LATEST_PROTOCOL_VERSION = "2025-11-25"
-SUPPORTED_PROTOCOL_VERSIONS = {"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
+MODERN_PROTOCOL_VERSION = "2026-07-28"
+LATEST_LEGACY_PROTOCOL_VERSION = "2025-11-25"
+LEGACY_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
+MODERN_PROTOCOL_VERSIONS = (MODERN_PROTOCOL_VERSION,)
+PROTOCOL_VERSION_META_KEY = "io.modelcontextprotocol/protocolVersion"
+CLIENT_INFO_META_KEY = "io.modelcontextprotocol/clientInfo"
+CLIENT_CAPABILITIES_META_KEY = "io.modelcontextprotocol/clientCapabilities"
+SERVER_INFO_META_KEY = "io.modelcontextprotocol/serverInfo"
+DISCOVERY_TTL_MS = 300_000
+PUBLIC_LIST_TTL_MS = 300_000
 RESOURCE_PAGE_SIZE = 200
 RESOURCE_URI_PREFIX = "redctx://"
 READ_ONLY_ANNOTATIONS = {
@@ -63,10 +72,11 @@ TEXT_OUTPUT_SCHEMA = {
 
 
 class ProtocolError(Exception):
-    def __init__(self, code: int, message: str):
+    def __init__(self, code: int, message: str, *, data: dict[str, Any] | None = None):
         super().__init__(message)
         self.code = code
         self.message = message
+        self.data = data
 
 
 class ToolExecutionError(Exception):
@@ -161,33 +171,49 @@ class RedactedContextMcp:
 
     def initialize(self, params: dict[str, Any]) -> dict[str, Any]:
         requested = str(params.get("protocolVersion") or "")
-        protocol_version = requested if requested in SUPPORTED_PROTOCOL_VERSIONS else LATEST_PROTOCOL_VERSION
+        protocol_version = (
+            requested
+            if requested in LEGACY_PROTOCOL_VERSIONS
+            else LATEST_LEGACY_PROTOCOL_VERSION
+        )
         return {
             "protocolVersion": protocol_version,
-            "capabilities": {
-                "tools": {"listChanged": False},
-                "resources": {"listChanged": False},
-            },
-            "serverInfo": {
-                "name": SERVER_NAME,
-                "title": SERVER_TITLE,
-                "version": SERVER_VERSION,
-            },
-            "instructions": (
-                "Use redctx_tree, redctx_list, redctx_read, redctx_search, "
-                "redctx_stat, redctx_bundle, redctx_doctor, redctx_audit, "
-                "redctx_refresh_index, and redctx_github_* "
-                "tools for confidential local context. Redacted files are also "
-                "available as redctx://p_<id> MCP resources. Results are redacted "
-                "and file tools use opaque @p_<id> path references."
-                + (
-                    " redctx_submit_doc is enabled for controlled writes into "
-                    "the configured private-root write subdirectory."
-                    if self.enable_writes
-                    else ""
-                )
-            ),
+            "capabilities": self.server_capabilities(),
+            "serverInfo": server_info(),
+            "instructions": self.instructions(),
         }
+
+    def discover(self) -> dict[str, Any]:
+        return {
+            # server/discover negotiates only the stateless modern era.
+            # Legacy revisions remain available through initialize and must
+            # not be offered for per-request metadata negotiation.
+            "supportedVersions": list(MODERN_PROTOCOL_VERSIONS),
+            "capabilities": self.server_capabilities(),
+            "instructions": self.instructions(),
+        }
+
+    def server_capabilities(self) -> dict[str, Any]:
+        return {
+            "tools": {"listChanged": False},
+            "resources": {"listChanged": False},
+        }
+
+    def instructions(self) -> str:
+        return (
+            "Use redctx_tree, redctx_list, redctx_read, redctx_search, "
+            "redctx_stat, redctx_bundle, redctx_doctor, redctx_audit, "
+            "redctx_refresh_index, and redctx_github_* "
+            "tools for confidential local context. Redacted files are also "
+            "available as redctx://p_<id> MCP resources. Results are redacted "
+            "and file tools use opaque @p_<id> path references."
+            + (
+                " redctx_submit_doc is enabled for controlled writes into "
+                "the configured private-root write subdirectory."
+                if self.enable_writes
+                else ""
+            )
+        )
 
     def list_tools(self) -> dict[str, Any]:
         return {
@@ -352,7 +378,12 @@ class RedactedContextMcp:
         if not self.enable_writes:
             raise ToolExecutionError("Writes are disabled. Start the server with --enable-writes.")
         try:
-            replacements = rc.build_rehydration_map(self.ctx, self.redactor, budget=self.submit_budget())
+            replacements = rc.build_rehydration_map(
+                self.ctx,
+                self.redactor,
+                budget=self.submit_budget(),
+                exclude_roots=(self.write_root,),
+            )
         except rc.OperationLimitError as exc:
             raise ToolExecutionError(str(exc) or "Rehydration map limit exceeded.") from exc
         restored_target, target_replacements = rc.rehydrate_text_with_count(target_path, replacements)
@@ -365,6 +396,14 @@ class RedactedContextMcp:
         unresolved_text = rc.unresolved_rehydration_tokens(restored_text)
         if unresolved_text:
             raise ToolExecutionError(format_unresolved_tokens("text", unresolved_text))
+        text_placeholder_values, text_path_values = rc.applied_rehydration_values(text, replacements)
+        target_placeholder_values, target_path_values = rc.applied_rehydration_values(target_path, replacements)
+        self.verify_round_trip_redaction(
+            restored_target,
+            restored_text,
+            text_placeholder_values + target_placeholder_values,
+            text_path_values + target_path_values,
+        )
         if output_path.exists():
             if output_path.is_dir():
                 raise ToolExecutionError("Target already exists as a directory.")
@@ -375,7 +414,10 @@ class RedactedContextMcp:
             rc.atomic_write_text(output_path, restored_text, overwrite=overwrite)
         except SystemExit as exc:
             raise ToolExecutionError(str(exc) or "Write failed.") from exc
-        self.ctx.refresh_index()
+        # The output ref is derived directly from its relative path and salt,
+        # so an eager full-tree refresh is unnecessary. Invalidate lazily to
+        # avoid traversing an arbitrarily large write subtree after publish.
+        self.ctx.invalidate_path_index()
         self.cache.clear()
         rel = rc.rel_posix(output_path, self.root)
         total_replacements = target_replacements + text_replacements
@@ -386,6 +428,71 @@ class RedactedContextMcp:
             f"bytes: {len(restored_text.encode('utf-8'))}\n"
             f"replacements: {total_replacements}\n"
         )
+
+    def verify_round_trip_redaction(
+        self,
+        restored_target: str,
+        restored_text: str,
+        placeholder_values: list[str],
+        path_values: list[str],
+    ) -> None:
+        """Reject writes that would not redact consistently when read back.
+
+        A restored value glued into a surrounding token (for example
+        ``foo[PERSON_x]bar`` or two adjacent placeholders) can defeat redaction
+        word boundaries on read-back. Verification runs against both the
+        server's strict mode and the weaker balanced mode, because the written
+        document may later be served by a server started with ``--mode
+        balanced``. Every applied value must vanish from the re-redacted
+        result, and each distinctive word token of a sensitive value must not
+        survive either. Relative-path values are only checked whole because
+        their generic path tokens are expected to remain visible.
+        """
+        redactors = [self.redactor]
+        if self.mode != "balanced":
+            redactors.append(rc.Redactor(self.redactor.config, mode="balanced"))
+        haystacks: list[str] = []
+        for redactor in redactors:
+            haystacks.append(rc.PLACEHOLDER_RE.sub("", redactor.redact(restored_text)).casefold())
+            haystacks.append(rc.PLACEHOLDER_RE.sub("", redactor.redact_path(restored_target)).casefold())
+        allow = self.redactor.allow_lookup
+        for value in path_values:
+            probe = value.casefold()
+            if probe and any(probe in haystack for haystack in haystacks):
+                raise ToolExecutionError(self.round_trip_error_message)
+        for value in placeholder_values:
+            # Values made entirely of generic vocabulary (for example an
+            # ENTITY captured from a common word like "Email") are only
+            # sensitive under strict-mode over-redaction; balanced read-back
+            # legitimately shows them. Distinctive values are probed whole
+            # and token-wise in both modes.
+            tokens = [
+                token.casefold()
+                for token in re.split(r"[^A-Za-z0-9]+", value)
+                if len(token) >= 3
+            ]
+            distinctive = [
+                token
+                for token in tokens
+                if token not in allow and token not in rc.GENERIC_PROBE_STOPWORDS
+            ]
+            probes = [value.casefold()] + distinctive if distinctive else []
+            for probe in probes:
+                if any(probe in haystack for haystack in haystacks):
+                    raise ToolExecutionError(self.round_trip_error_message)
+        for value in placeholder_values:
+            for token in re.split(r"[^A-Za-z0-9]+", value):
+                folded = token.casefold()
+                if len(folded) < 3 or folded in allow or folded in rc.GENERIC_PROBE_STOPWORDS:
+                    continue
+                if any(folded in haystack for haystack in haystacks):
+                    raise ToolExecutionError(self.round_trip_error_message)
+
+    round_trip_error_message = (
+        "Rehydrated document would not redact consistently on read-back. "
+        "Keep placeholder references separated by spaces or punctuation "
+        "so restored values redact cleanly."
+    )
 
 
 def resolve_write_root(root: Path, write_subdir: str) -> Path:
@@ -469,6 +576,7 @@ def safe_error_message(exc: SystemExit, redactor: rc.Redactor) -> str:
         "Could not reach GitHub API.",
         "GitHub state must be open, closed, or all.",
         "Invalid regex.",
+        rc.UNSAFE_REGEX_MESSAGE,
         "Refusing unsafe path.",
         "Traversal entry limit exceeded.",
         "File limit exceeded.",
@@ -662,6 +770,7 @@ def redctx_search(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
             glob=string_list_arg(arguments, "glob"),
             max_results=int_arg(arguments, "max_results", rc.DEFAULT_MAX_SEARCH_RESULTS)
             or rc.DEFAULT_MAX_SEARCH_RESULTS,
+            max_seconds=rc.DEFAULT_MCP_SEARCH_SECONDS,
         ),
     )
 
@@ -1019,7 +1128,9 @@ TOOL_DEFINITION_BY_NAME: dict[str, dict[str, Any]] = {
 def handle_request(server: RedactedContextMcp, message: dict[str, Any]) -> dict[str, Any] | None:
     request_id = message.get("id")
     method = message.get("method")
-    params = message.get("params") or {}
+    params = message.get("params")
+    if params is None:
+        params = {}
     if not isinstance(params, dict):
         raise ProtocolError(-32602, "params must be an object.")
 
@@ -1028,24 +1139,131 @@ def handle_request(server: RedactedContextMcp, message: dict[str, Any]) -> dict[
 
     if method == "initialize":
         return server.initialize(params)
-    if method == "ping":
-        return {}
-    if method == "tools/list":
-        return server.list_tools()
-    if method == "tools/call":
-        name = params.get("name")
-        arguments = params.get("arguments") or {}
-        if not isinstance(name, str) or not isinstance(arguments, dict):
-            raise ProtocolError(-32602, "tools/call requires string name and object arguments.")
-        return server.call_tool(name, arguments)
-    if method == "resources/list":
-        return server.list_resources(params)
-    if method == "resources/read":
-        return server.read_resource(params)
-    if method == "resources/templates/list":
-        return server.list_resource_templates()
+    modern = validate_modern_request_metadata(params, required=method == "server/discover")
 
-    raise ProtocolError(-32601, f"Method not found: {method}")
+    try:
+        if method == "server/discover":
+            return modern_result(method, server.discover())
+        if method == "ping":
+            if modern:
+                raise ProtocolError(-32601, "Method not found: ping")
+            return {}
+        if method == "tools/list":
+            result = server.list_tools()
+            return modern_result(method, result) if modern else result
+        if method == "tools/call":
+            name = params.get("name")
+            arguments = params.get("arguments")
+            if arguments is None:
+                arguments = {}
+            if not isinstance(name, str) or not isinstance(arguments, dict):
+                raise ProtocolError(-32602, "tools/call requires string name and object arguments.")
+            result = server.call_tool(name, arguments)
+            return modern_result(method, result) if modern else result
+        if method == "resources/list":
+            result = server.list_resources(params)
+            return modern_result(method, result) if modern else result
+        if method == "resources/read":
+            result = server.read_resource(params)
+            return modern_result(method, result) if modern else result
+        if method == "resources/templates/list":
+            result = server.list_resource_templates()
+            return modern_result(method, result) if modern else result
+
+        raise ProtocolError(-32601, f"Method not found: {method}")
+    except ProtocolError as exc:
+        if modern and exc.code == -32002:
+            raise ProtocolError(-32602, exc.message, data=exc.data) from exc
+        raise
+
+
+def validate_modern_request_metadata(params: dict[str, Any], *, required: bool) -> bool:
+    meta = params.get("_meta")
+    if meta is None:
+        if required:
+            raise ProtocolError(-32602, "Modern MCP requests require params._meta.")
+        return False
+    if not isinstance(meta, dict):
+        raise ProtocolError(-32602, "params._meta must be an object.")
+
+    requested = meta.get(PROTOCOL_VERSION_META_KEY)
+    if requested is None:
+        if required:
+            raise ProtocolError(
+                -32602,
+                f"params._meta.{PROTOCOL_VERSION_META_KEY} is required.",
+            )
+        return False
+    if not isinstance(requested, str):
+        raise ProtocolError(
+            -32602,
+            f"params._meta.{PROTOCOL_VERSION_META_KEY} must be a string.",
+        )
+    if requested != MODERN_PROTOCOL_VERSION:
+        raise ProtocolError(
+            -32022,
+            "Unsupported protocol version",
+            data={
+                "supported": list(MODERN_PROTOCOL_VERSIONS),
+                "requested": requested,
+            },
+        )
+
+    client_capabilities = meta.get(CLIENT_CAPABILITIES_META_KEY)
+    if not isinstance(client_capabilities, dict):
+        raise ProtocolError(
+            -32602,
+            f"params._meta.{CLIENT_CAPABILITIES_META_KEY} must be an object.",
+        )
+
+    client_info = meta.get(CLIENT_INFO_META_KEY)
+    if client_info is not None:
+        if not isinstance(client_info, dict):
+            raise ProtocolError(
+                -32602,
+                f"params._meta.{CLIENT_INFO_META_KEY} must be an object.",
+            )
+        if not isinstance(client_info.get("name"), str) or not isinstance(
+            client_info.get("version"), str
+        ):
+            raise ProtocolError(
+                -32602,
+                f"params._meta.{CLIENT_INFO_META_KEY} requires string name and version.",
+            )
+    return True
+
+
+def modern_result(method: str, result: dict[str, Any]) -> dict[str, Any]:
+    modern = dict(result)
+    modern["resultType"] = "complete"
+    result_meta = modern.get("_meta")
+    if result_meta is None:
+        result_meta = {}
+    elif not isinstance(result_meta, dict):
+        raise ProtocolError(-32603, "Internal error.")
+    else:
+        result_meta = dict(result_meta)
+    result_meta[SERVER_INFO_META_KEY] = server_info()
+    modern["_meta"] = result_meta
+
+    if method == "server/discover":
+        modern["ttlMs"] = DISCOVERY_TTL_MS
+        modern["cacheScope"] = "public"
+    elif method in {"tools/list", "resources/templates/list"}:
+        modern["ttlMs"] = PUBLIC_LIST_TTL_MS
+        modern["cacheScope"] = "public"
+    elif method in {"resources/list", "resources/read"}:
+        modern["ttlMs"] = 0
+        modern["cacheScope"] = "private"
+    return modern
+
+
+def server_info() -> dict[str, str]:
+    return {
+        "name": SERVER_NAME,
+        "title": SERVER_TITLE,
+        "version": SERVER_VERSION,
+    }
 
 
 def write_response(request_id: Any, *, result: dict[str, Any] | None = None, error: dict[str, Any] | None = None) -> None:
@@ -1063,10 +1281,65 @@ def write_response(request_id: Any, *, result: dict[str, Any] | None = None, err
         sys.stdout.flush()
 
 
-def serve(server: RedactedContextMcp) -> int:
-    input_stream = getattr(sys.stdin, "buffer", sys.stdin)
-    for line in input_stream:
-        raw = line.decode("utf-8", errors="replace").strip() if isinstance(line, bytes) else line.strip()
+MAX_REQUEST_LINE_BYTES = 10 * 1024 * 1024
+REQUEST_CHUNK_BYTES = 65536
+
+
+def _read_request_chunk(stream: Any) -> bytes:
+    """Read one available chunk without waiting for a full buffer."""
+    reader = getattr(stream, "read1", None)
+    if callable(reader):
+        return reader(REQUEST_CHUNK_BYTES)
+    # Nonstandard text stream fallback: readline keeps line semantics.
+    data = stream.readline()
+    if isinstance(data, str):
+        data = data.encode("utf-8", "replace")
+    return data
+
+
+def iter_request_lines(stream: Any, max_bytes: int) -> Iterator[bytes | None]:
+    """Yield newline-delimited request lines, capped at max_bytes each.
+
+    Oversized lines are reported as None so the server can answer with a
+    protocol error without buffering unbounded input in memory.
+    """
+    buffer = bytearray()
+    overflow = False
+    while True:
+        chunk = _read_request_chunk(stream)
+        if not chunk:
+            if overflow:
+                yield None
+            elif buffer:
+                yield bytes(buffer)
+            return
+        buffer.extend(chunk)
+        while True:
+            newline = buffer.find(b"\n")
+            if newline < 0:
+                break
+            line = bytes(buffer[:newline])
+            del buffer[: newline + 1]
+            if overflow or len(line) > max_bytes:
+                overflow = False
+                yield None
+            else:
+                yield line
+        if len(buffer) > max_bytes:
+            overflow = True
+            del buffer[:]
+
+
+def serve(server: RedactedContextMcp, stream: Any | None = None) -> int:
+    input_stream = stream if stream is not None else getattr(sys.stdin, "buffer", sys.stdin)
+    for raw_line in iter_request_lines(input_stream, MAX_REQUEST_LINE_BYTES):
+        if raw_line is None:
+            write_response(
+                None,
+                error={"code": -32600, "message": "Request line exceeds maximum size."},
+            )
+            continue
+        raw = raw_line.decode("utf-8", errors="replace").strip()
         if not raw:
             continue
         request_id: Any = None
@@ -1081,7 +1354,10 @@ def serve(server: RedactedContextMcp) -> int:
         except json.JSONDecodeError as exc:
             write_response(None, error={"code": -32700, "message": f"Parse error: {exc.msg}"})
         except ProtocolError as exc:
-            write_response(request_id, error={"code": exc.code, "message": exc.message})
+            error: dict[str, Any] = {"code": exc.code, "message": exc.message}
+            if exc.data is not None:
+                error["data"] = exc.data
+            write_response(request_id, error=error)
         except Exception:
             write_response(request_id, error={"code": -32603, "message": "Internal error."})
     return 0

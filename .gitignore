@@ -8,6 +8,7 @@ dist/
 build/
 *.egg-info/
 .DS_Store
+.chloe/
 .agent-context-redactor.toml
 .redacted-context-mcp/
 agent-workdir/work/*

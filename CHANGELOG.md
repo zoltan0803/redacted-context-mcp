@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.7.0
+
+Security hardening release.
+
+- Never serves the redaction config, configured term files, `.env*`, `*.key`,
+  `*.pem`, or `*.crt` through redacted tools, even with `--include-private`.
+- Redacts bare long hex strings (the persisted vault-salt shape) and
+  `salt`-keyed assignments as secrets in the default detector profile, closing
+  a vault-salt disclosure path.
+- Adds Google API key (`AIza...`) detection to the default secret patterns.
+- Screens user-supplied search regexes for catastrophic-backtracking shapes
+  and rejects them; MCP searches now enforce a server-side operation deadline
+  checked per file and per matching line.
+- Caps MCP stdio request line size so clients cannot exhaust server memory.
+- Controlled-write rehydration maps no longer scan the write subdirectory,
+  preventing agent-written content from poisoning later rehydration.
+- Verifies `redctx_submit_doc` output re-redacts consistently on read-back and
+  rejects writes that would leak restored values past redaction boundaries.
+- Refuses non-loopback plain-http Ollama discovery endpoints unless
+  `--allow-remote-endpoint` is passed.
+- Truncation no longer splits redaction placeholders mid-token.
+- Matches user-supplied search regexes in an isolated, killable child process
+  so catastrophic patterns can never hang the single-threaded server; the
+  static backtracking screen now also rejects ambiguous dots, negated
+  classes, nested-group hazards, and high-repetition bounded quantifiers.
+- Case-folds never-serve matching so `.ENV`, `server.PEM`, and similar
+  case-mangled variants are refused on case-insensitive filesystems, and
+  protects an explicit `--config` file like the default config.
+- Redacts salt assignments with short, spaced, or triple-quoted values,
+  256-bit-plus hex runs of any length, and underscore-qualified secret
+  assignments such as `DB_PASSWORD=...`; treats configured GitHub
+  owner/repo identifiers as redaction terms.
+- Verifies `redctx_submit_doc` output against both strict and balanced
+  redaction modes and builds rehydration maps solely from the scanned
+  corpus, closing adjacent-placeholder and interactive-read aliasing gaps.
+- Reports an error for oversized unterminated stdio request lines and accepts
+  `localhost.` (trailing-dot) Ollama endpoints.
+
+## 0.6.0
+
+- Adds dual-era MCP support for stateless protocol version `2026-07-28` while
+  preserving the legacy initialization flow through `2025-11-25`.
+- Adds `server/discover`, per-request modern metadata validation, structured
+  unsupported-version errors, modern result metadata, and cache hints.
+- Keeps opaque path ids, the redacted content cache, and the persistent vault
+  salt independent of MCP protocol sessions.
+
 ## 0.5.0
 
 - Adds a reusable document-discovery and monotonic TOML-update API plus the

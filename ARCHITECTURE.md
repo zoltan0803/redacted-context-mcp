@@ -39,6 +39,11 @@ subdirectory.
 - Redacted files are available as MCP resources with `redctx://p_<id>` URIs.
 - MCP resource content is cached only after redaction and is bounded by byte
   limits.
+- The stdio server supports both stateless MCP `2026-07-28` requests and the
+  legacy initialization-based protocol through `2025-11-25`.
+- Opaque path references are explicit request arguments rather than implicit
+  protocol-session state. In-memory path and content indexes are reconstructable
+  caches; the persistent vault salt is durable server configuration.
 - Redaction happens before file content, file paths, search results, bundles,
   and GitHub issue text are returned.
 

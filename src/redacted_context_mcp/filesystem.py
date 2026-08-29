@@ -9,7 +9,13 @@ import stat
 from pathlib import Path
 from typing import Iterable
 
-from .defaults import DEFAULT_EXCLUDE_DIRS, DEFAULT_EXCLUDE_GLOBS, DEFAULT_MAX_TRAVERSAL_ENTRIES, TEXT_EXTENSIONS
+from .defaults import (
+    DEFAULT_EXCLUDE_DIRS,
+    DEFAULT_EXCLUDE_GLOBS,
+    DEFAULT_MAX_TRAVERSAL_ENTRIES,
+    NEVER_SERVE_GLOBS_FOLDED,
+    TEXT_EXTENSIONS,
+)
 from .limits import OperationBudget, OperationLimitError
 from .models import RedactionConfig
 from .paths import path_id, rel_posix
@@ -24,6 +30,12 @@ class RedactedContext:
         self.include_private = include_private
         self.exclude_dirs = set(DEFAULT_EXCLUDE_DIRS) | set(config.exclude_dirs)
         self.exclude_globs = set(DEFAULT_EXCLUDE_GLOBS) | set(config.exclude_globs)
+        # Loaded term files and the explicit config file contain raw sensitive
+        # terms and must never be served, regardless of --include-private.
+        # Matching is case-folded because the served filesystem may be
+        # case-insensitive (macOS, Windows) even when fnmatch is not.
+        self.protected_rel_paths = {p.casefold() for p in config.term_files}
+        self.protected_rel_paths.update(p.casefold() for p in config.protected_paths)
         self._path_index: dict[str, str] | None = None
 
     def resolve_ref(self, value: str, *, expected: str | None = None) -> Path:
@@ -155,13 +167,22 @@ class RedactedContext:
         return index
 
     def is_excluded(self, path: Path) -> bool:
-        if self.include_private:
-            return False
         rel = rel_posix(path, self.root)
         try:
             parts = path.relative_to(self.root).parts
         except ValueError:
             return True
+        rel_folded = rel.casefold()
+        name_folded = path.name.casefold()
+        if rel_folded in self.protected_rel_paths:
+            return True
+        if any(
+            fnmatch.fnmatchcase(rel_folded, pattern) or fnmatch.fnmatchcase(name_folded, pattern)
+            for pattern in NEVER_SERVE_GLOBS_FOLDED
+        ):
+            return True
+        if self.include_private:
+            return False
         if any(part in self.exclude_dirs for part in parts):
             return True
         return any(fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(path.name, pattern) for pattern in self.exclude_globs)
@@ -174,13 +195,25 @@ class RedactedContext:
         max_depth: int | None = None,
         max_entries: int | None = None,
         budget: OperationBudget | None = None,
+        prune_roots: tuple[Path, ...] = (),
     ) -> Iterable[Path]:
         start = self.validate_path(start or self.root)
         if self.is_excluded(start):
             return
         walk_budget = budget or OperationBudget(max_entries=max_entries)
+        normalized_prune_roots = tuple(
+            root.expanduser().resolve(strict=False) for root in prune_roots
+        )
         seen: set[tuple[int, int]] = set()
-        yield from self._walk(start, include_dirs=include_dirs, max_depth=max_depth, depth=0, seen=seen, budget=walk_budget)
+        yield from self._walk(
+            start,
+            include_dirs=include_dirs,
+            max_depth=max_depth,
+            depth=0,
+            seen=seen,
+            budget=walk_budget,
+            prune_roots=normalized_prune_roots,
+        )
 
     def _walk(
         self,
@@ -191,7 +224,10 @@ class RedactedContext:
         depth: int,
         seen: set[tuple[int, int]],
         budget: OperationBudget,
+        prune_roots: tuple[Path, ...],
     ) -> Iterable[Path]:
+        if any(path == root or path.is_relative_to(root) for root in prune_roots):
+            return
         budget.consume_entry()
         if path.is_symlink() or is_reparse_point(path):
             return
@@ -229,6 +265,7 @@ class RedactedContext:
                     depth=depth + 1,
                     seen=seen,
                     budget=budget,
+                    prune_roots=prune_roots,
                 )
             else:
                 yield child

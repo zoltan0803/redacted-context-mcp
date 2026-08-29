@@ -22,6 +22,7 @@ def rel_posix(path: Path, root: Path) -> str:
 
 
 def resolve_under_root(root: Path, value: str, *, allow_missing: bool = False) -> Path:
+    root = root.resolve()
     candidate = Path(value).expanduser()
     if not candidate.is_absolute():
         candidate = root / candidate

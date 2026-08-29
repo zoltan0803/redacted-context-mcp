@@ -7,6 +7,7 @@ import os
 import re
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Iterable, Protocol
@@ -41,9 +42,43 @@ class DiscoveryClient(Protocol):
     def extract(self, *, rel_path: str, text: str) -> DiscoveryResult: ...
 
 
+LOCAL_ENDPOINT_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+
+def validate_local_ollama_endpoint(endpoint: str) -> None:
+    """Refuse plain-http endpoints that are not loopback.
+
+    Discovery payloads contain raw private text; sending them to a remote
+    host over unencrypted HTTP must be an explicit operator decision.
+    """
+    parsed = urllib.parse.urlparse(endpoint)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise SystemExit("Ollama endpoint must be an http:// or https:// URL.")
+    if parsed.scheme == "https":
+        return
+    host = parsed.hostname.casefold().rstrip(".")
+    if host in LOCAL_ENDPOINT_HOSTS or host.endswith(".localhost"):
+        return
+    raise SystemExit(
+        "Refusing to send private documents to a non-local Ollama endpoint over plain http. "
+        "Use a loopback endpoint or https, or pass --allow-remote-endpoint to acknowledge "
+        "the exposure."
+    )
+
+
 class OllamaDiscoveryClient:
-    def __init__(self, *, endpoint: str, model: str, timeout: float, postprocess: bool = True):
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        model: str,
+        timeout: float,
+        postprocess: bool = True,
+        allow_remote: bool = False,
+    ):
         self.endpoint = endpoint.rstrip("/")
+        if not allow_remote:
+            validate_local_ollama_endpoint(self.endpoint)
         self.model = model
         self.timeout = timeout
         self.postprocess = postprocess

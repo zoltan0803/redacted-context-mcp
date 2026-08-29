@@ -20,7 +20,8 @@ agent workspace
 
 ## Features
 
-- MCP stdio server with `redctx_*` tools.
+- Dual-era MCP stdio server supporting stateless `2026-07-28` clients and
+  legacy initialization-based clients through `2025-11-25`.
 - Redacted MCP resources using `redctx://p_<id>` URIs.
 - Optional MCP `redctx_submit_doc` tool for controlled writes of generated
   redacted documents back into a configured private-root subdirectory.
@@ -209,6 +210,9 @@ redctx-mcp --root /absolute/path/to/source-private
 
 Use the client-specific configuration format to pass that command and args.
 The server advertises instructions and exposes only redacted `redctx_*` tools.
+Modern clients can use the stateless MCP `2026-07-28` flow with per-request
+metadata and `server/discover`; legacy clients continue to negotiate through
+`initialize`.
 
 ## MCP Tools
 
@@ -386,7 +390,9 @@ redctx --root ../source-private discover context --endpoint http://localhost:114
 ```
 
 The command uses Ollama's local `/api/generate` endpoint with streaming disabled
-and JSON output requested. No hosted LLM is called by this feature.
+and JSON output requested. No hosted LLM is called by this feature. Non-loopback
+plain-http endpoints are refused unless you pass `--allow-remote-endpoint`,
+because discovery payloads contain raw private text.
 
 ### Automate Incremental Config Updates
 
@@ -469,8 +475,30 @@ It helps because:
 The `rehydrate` command intentionally reverses redacted exports for the local
 operator. `redctx_submit_doc` can also rehydrate generated redacted text, but
 only when MCP writes are explicitly enabled and only into the configured write
-subdirectory. Do not run rehydration workflows from an agent workspace where the
+subdirectory. Submitted content is verified to redact consistently on
+read-back, and the write subdirectory itself is never used as a rehydration
+source. Do not run rehydration workflows from an agent workspace where the
 model can read raw output.
+
+Additional guardrails:
+
+- The redaction config (default or explicit `--config`), configured term
+  files, `.env*`, `*.key`, `*.pem`, and `*.crt` files are never served through
+  redacted tools, even with `--include-private`, with case-folded matching so
+  `.ENV` and `server.PEM` variants are refused too.
+- Bare long hex strings (the vault-salt shape), salt-keyed assignments, and
+  underscore-qualified secrets such as `DB_PASSWORD=...` are redacted by
+  default.
+- MCP searches enforce an operation deadline, and user-supplied regexes are
+  matched in an isolated, killable child process after a fast-fail screen for
+  catastrophic-backtracking patterns, so a crafted regex cannot hang the
+  server.
+- `redctx discover` refuses non-loopback plain-http Ollama endpoints unless
+  `--allow-remote-endpoint` acknowledges the exposure.
+- Placeholders are deterministic HMACs over the vault salt. Keep the salt in
+  the local config or user-local state; `REDACTED_CONTEXT_SALT` can be visible
+  in process environments, and anyone holding the salt can verify dictionary
+  guesses against placeholders.
 
 It is not a hard security boundary if the agent process runs as the same OS
 user that can read the private source folder. For hard enforcement, run the
