@@ -5,7 +5,9 @@
       "command": "redctx-mcp",
       "args": [
         "--root",
-        "examples/quickstart/context"
+        "examples/quickstart/context",
+        "--config",
+        "examples/quickstart/context/demo-redaction-config.toml"
       ],
       "protocolEra": "legacy"
     },
@@ -14,7 +16,9 @@
       "command": "redctx-mcp",
       "args": [
         "--root",
-        "examples/quickstart/context"
+        "examples/quickstart/context",
+        "--config",
+        "examples/quickstart/context/demo-redaction-config.toml"
       ],
       "protocolEra": "modern"
     }

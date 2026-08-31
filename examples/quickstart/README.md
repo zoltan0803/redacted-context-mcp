@@ -9,9 +9,13 @@ Run the commands from the repository root after installing
 
 ```sh
 pipx install redacted-context-mcp
-redctx --root examples/quickstart/context audit
-redctx --root examples/quickstart/context bundle . --glob "*.md" --max-files 10
-redctx-mcp --root examples/quickstart/context
+redctx --root examples/quickstart/context \
+  --config examples/quickstart/context/demo-redaction-config.toml audit
+redctx --root examples/quickstart/context \
+  --config examples/quickstart/context/demo-redaction-config.toml \
+  bundle . --glob "*.md" --max-files 10
+redctx-mcp --root examples/quickstart/context \
+  --config examples/quickstart/context/demo-redaction-config.toml
 ```
 
 The audit should report `PASS` checks. The bundle command prints representative
@@ -26,6 +30,6 @@ Ctrl-C when running it directly in a terminal. To inspect both supported MCP
 protocol modes with the official MCP Inspector, see the validation commands in
 [CONTRIBUTING.md](../../CONTRIBUTING.md).
 
-The demo's `.agent-context-redactor.toml` is intentionally committed because
-all of its values are fictional. A real redaction config can contain private
-terms and should remain untracked.
+The demo's `demo-redaction-config.toml` is intentionally committed because all
+of its values are fictional. A real `.agent-context-redactor.toml` can contain
+private terms and should remain untracked.
