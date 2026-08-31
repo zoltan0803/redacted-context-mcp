@@ -51,14 +51,40 @@ jobs:
           import os
           import subprocess
           import sys
+          import tempfile
 
-          wheels = glob.glob("dist/*.whl")
+          project_root = os.path.abspath(os.getcwd())
+          wheels = [os.path.abspath(path) for path in glob.glob("dist/*.whl")]
           if len(wheels) != 1:
               raise SystemExit(f"Expected one wheel, found {wheels!r}")
-          subprocess.check_call([sys.executable, "-m", "venv", "wheel-smoke"])
-          python = os.path.join("wheel-smoke", "bin", "python")
-          subprocess.check_call([python, "-m", "pip", "install", "--upgrade", "pip"])
-          subprocess.check_call([python, "-m", "pip", "install", wheels[0]])
-          bin_dir = os.path.join("wheel-smoke", "bin")
-          subprocess.check_call([os.path.join(bin_dir, "redctx"), "--help"])
-          subprocess.check_call([os.path.join(bin_dir, "redctx-mcp"), "--help"])
+          with tempfile.TemporaryDirectory() as temp_dir:
+              venv_dir = os.path.join(temp_dir, "wheel-smoke")
+              subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
+              bin_dir = os.path.join(venv_dir, "bin")
+              python = os.path.join(bin_dir, "python")
+              env = {**os.environ, "PYTHONNOUSERSITE": "1"}
+              env.pop("PYTHONPATH", None)
+              subprocess.check_call([python, "-m", "pip", "install", wheels[0]], cwd=temp_dir, env=env)
+              package_path = subprocess.check_output(
+                  [python, "-c", "import redacted_context_mcp; print(redacted_context_mcp.__file__)"],
+                  cwd=temp_dir,
+                  env=env,
+                  text=True,
+              ).strip()
+              if package_path.startswith(project_root):
+                  raise SystemExit(f"Wheel smoke test imported the checkout: {package_path}")
+              redctx = os.path.join(bin_dir, "redctx")
+              subprocess.check_call([redctx, "--help"], cwd=temp_dir, env=env)
+              subprocess.check_call([os.path.join(bin_dir, "redctx-mcp"), "--help"], cwd=temp_dir, env=env)
+              subprocess.check_call(
+                  [redctx, "--root", os.path.join(project_root, "examples", "quickstart", "context"), "audit"],
+                  cwd=temp_dir,
+                  env=env,
+              )
+      - name: Upload checked distributions
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
