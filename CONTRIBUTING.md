@@ -54,3 +54,31 @@ python3 -m py_compile src/redacted_context_mcp/core.py src/redacted_context_mcp/
 python3 -m build
 python3 -m twine check dist/*
 ```
+
+## MCP Protocol Validation
+
+The repository's unit tests exercise MCP JSON-RPC behavior directly. The
+official MCP Inspector adds an installed-command integration check for both the
+legacy initialization lifecycle and the modern stateless lifecycle.
+
+From the repository root, with `redctx-mcp` installed and Node.js 22.19 or
+newer available, run:
+
+```sh
+npx --yes @modelcontextprotocol/inspector@2.4.0 --cli \
+  --config examples/mcp-inspector.json \
+  --server redacted_context_legacy \
+  --method tools/list \
+  --strict
+npx --yes @modelcontextprotocol/inspector@2.4.0 --cli \
+  --config examples/mcp-inspector.json \
+  --server redacted_context_modern \
+  --method tools/list \
+  --strict
+```
+
+These commands validate connection negotiation plus the advertised tool
+schemas through the official Inspector. They are protocol smoke tests, not a
+claim of full MCP conformance. The official conformance framework's server
+runner currently accepts an HTTP URL, while this project intentionally exposes
+only stdio transport.
