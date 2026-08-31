@@ -63,7 +63,7 @@ folder directly.
 
 ## Install
 
-After the package is published:
+Install from PyPI:
 
 ```sh
 python3 -m pip install redacted-context-mcp
@@ -75,11 +75,7 @@ For isolated command installs, `pipx` also works:
 pipx install redacted-context-mcp
 ```
 
-Until then, install directly from the repository or from a checkout:
-
-```sh
-python3 -m pip install "git+https://github.com/zoltan0803/redacted-context-mcp.git"
-```
+To install from a checkout for development:
 
 ```sh
 python3 -m pip install -e .
