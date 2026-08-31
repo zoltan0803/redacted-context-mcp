@@ -27,15 +27,31 @@ for one local vault salt and will differ.
 
 ## Quick Start
 
-Python 3.11 or newer is required. Install the commands in an isolated
-environment with `pipx`, audit a private context folder, then start the stdio
-MCP server:
+Python 3.11 or newer is required. Install the commands with `pipx`, then use a
+local Ollama model to draft the project-specific redaction terms:
 
 ```sh
 pipx install redacted-context-mcp
+ollama pull gemma4:e4b
+redctx --root ~/private-context discover \
+  --model gemma4:e4b \
+  --output .agent-context-redactor.toml
+```
+
+Review the generated `.agent-context-redactor.toml` because it intentionally
+contains the raw names and terms that should be hidden. Then audit the setup
+and start the stdio MCP server:
+
+```sh
 redctx --root ~/private-context audit
 redctx-mcp --root ~/private-context
 ```
+
+Discovery is explicit: `audit` does not call a model or generate this config.
+Without an explicit config, the built-in detectors still cover common emails,
+URLs, phone numbers, domains, secrets, and some names, but project-specific
+client names and codenames may be missed. To avoid Ollama, create the config
+manually using the [Local Redaction Config](#local-redaction-config) example.
 
 The server waits for an MCP client on standard input; press Ctrl-C if you start
 it directly in a terminal. For a no-credentials walkthrough using fictional
