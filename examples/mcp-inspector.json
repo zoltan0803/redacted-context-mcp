@@ -1,0 +1,26 @@
+{
+  "mcpServers": {
+    "redacted_context_legacy": {
+      "type": "stdio",
+      "command": "redctx-mcp",
+      "args": [
+        "--root",
+        "examples/quickstart/context",
+        "--config",
+        "examples/quickstart/context/demo-redaction-config.toml"
+      ],
+      "protocolEra": "legacy"
+    },
+    "redacted_context_modern": {
+      "type": "stdio",
+      "command": "redctx-mcp",
+      "args": [
+        "--root",
+        "examples/quickstart/context",
+        "--config",
+        "examples/quickstart/context/demo-redaction-config.toml"
+      ],
+      "protocolEra": "modern"
+    }
+  }
+}

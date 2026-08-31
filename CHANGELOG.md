@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.7.1
+
+Public-launch polish release.
+
+- Refreshes the README and setup guide around the published PyPI package,
+  including a shorter introduction, working quick start, and clearer security
+  boundary.
+- Adds a self-contained fictional-data demo for auditing, redacted output, and
+  MCP server startup without private data or third-party credentials.
+- Adds a valid Documentation project link and strengthens CI checks for built
+  distributions and installed console commands.
+- Separates non-privileged package building from PyPI Trusted Publishing and
+  publishes the exact distributions produced by the build job.
+- Adds official MCP Inspector smoke validation for the supported legacy and
+  modern stdio protocol modes. This is protocol integration coverage, not a
+  claim of full MCP conformance.
+
 ## 0.7.0
 
 Security hardening release.

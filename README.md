@@ -1,13 +1,102 @@
 # Redacted Context MCP
 
-Read-only by default, redacted local knowledgebase context for coding agents.
+Give coding agents useful local project context without exposing raw client
+names, people, email addresses, URLs, phone numbers, secrets, or meaningful
+filenames.
 
-`redacted-context-mcp` lets Claude Code, Codex, or another MCP client inspect a
-private local knowledgebase through redacted tools instead of raw filesystem
-reads. It is designed for the common case where a coding agent needs
-architecture notes, meeting notes, transcripts, support history, project
-documentation, or issue context, but should not see client names, stakeholder
-names, email addresses, URLs, phone numbers, or meaningful filenames.
+`redacted-context-mcp` is a read-only-by-default MCP server and CLI. It lets an
+agent search, navigate, and read useful content from a private local folder
+while replacing sensitive text and returning opaque file references.
+
+Before redaction:
+
+```text
+Client Example Lantern Labs uses production-db.internal.example
+Contact avery@example.com about PROJECT-LANTERN-042.
+```
+
+Agent-visible result:
+
+```text
+Client [ORG_a81f29d4a9c1e672540f68afc10d22c7] uses [DOMAIN_d12c88e1f730065c97d3f82f06d1188c].
+Contact [EMAIL_711ae704108cd6e952dcb27f0d6e999a] about [SENSITIVE_45f80ab22bc94e105a93aa830c7d3b9c].
+```
+
+The placeholder values above are illustrative. Real values are deterministic
+for one local vault salt and will differ.
+
+## Quick Start
+
+Python 3.11 or newer is required. Install the commands with `pipx`, then use a
+local Ollama model to draft the project-specific redaction terms:
+
+```sh
+pipx install redacted-context-mcp
+ollama pull gemma4:e4b
+redctx --root ~/private-context discover \
+  --model gemma4:e4b \
+  --output .agent-context-redactor.toml
+```
+
+Review the generated `.agent-context-redactor.toml` because it intentionally
+contains the raw names and terms that should be hidden. Then audit the setup
+and start the stdio MCP server:
+
+```sh
+redctx --root ~/private-context audit
+redctx-mcp --root ~/private-context
+```
+
+Discovery is explicit: `audit` does not call a model or generate this config.
+Without an explicit config, the built-in detectors still cover common emails,
+URLs, phone numbers, domains, secrets, and some names, but project-specific
+client names and codenames may be missed. To avoid Ollama, create the config
+manually using the [Local Redaction Config](#local-redaction-config) example.
+
+The server waits for an MCP client on standard input; press Ctrl-C if you start
+it directly in a terminal. For a no-credentials walkthrough using fictional
+data, see the [self-contained quick-start demo](examples/quickstart/README.md).
+
+### Claude Code MCP Configuration
+
+Claude Code is one of the clients already supported by this repository. Put
+the following in the agent workspace's `.mcp.json`, replacing the root with an
+absolute path to the private context folder:
+
+```json
+{
+  "mcpServers": {
+    "redacted_context": {
+      "type": "stdio",
+      "command": "redctx-mcp",
+      "args": [
+        "--root",
+        "/absolute/path/to/private-context"
+      ]
+    }
+  }
+}
+```
+
+The same installed `redctx-mcp` command can be used with the Codex and generic
+stdio configurations documented below.
+
+## Security Boundary
+
+This project provides practical privacy guardrails, not guaranteed
+anonymization, sandboxing, cryptographic isolation, complete DLP, or perfect
+prevention of metadata leakage. File sizes, line counts, and timing remain
+possible metadata side channels.
+
+The protection can be bypassed if the coding agent can also read the
+unredacted source directory through shell commands or other filesystem tools.
+For hard enforcement, run the agent as a separate OS user or in a container
+that cannot access that directory directly, and expose only the MCP server or a
+separate redaction service.
+
+Read [SECURITY.md](SECURITY.md) for the threat model and
+[SECURITY_INVARIANTS.md](SECURITY_INVARIANTS.md) for the behavior the test suite
+is intended to preserve.
 
 The core workflow is:
 
@@ -57,28 +146,26 @@ Good fits:
 - private GitHub issues that should be summarized through neutral aliases.
 
 Do not treat this as a formal anonymization or data-loss-prevention system.
-Redaction is a practical workflow guardrail. For hard isolation, run the agent
-as a separate OS user or in a container that cannot read the private source
-folder directly.
 
-## Install
+## Installation Options
 
-Install from PyPI:
-
-```sh
-python3 -m pip install redacted-context-mcp
-```
-
-For isolated command installs, `pipx` also works:
+The recommended installation method is `pipx`:
 
 ```sh
 pipx install redacted-context-mcp
 ```
 
-To install from a checkout for development:
+Regular `pip` installation is also supported:
 
 ```sh
-python3 -m pip install -e .
+python -m pip install redacted-context-mcp
+```
+
+Install from a source checkout only for development or to test an unreleased
+version:
+
+```sh
+python -m pip install -e .
 ```
 
 This installs two console commands:
@@ -87,8 +174,6 @@ This installs two console commands:
 redctx      # CLI
 redctx-mcp  # MCP stdio server
 ```
-
-Python 3.11 or newer is required.
 
 For `redctx discover`, install [Ollama](https://ollama.com/) separately and
 pull a local model such as `gemma4:e4b`. The core redacted CLI and MCP server do

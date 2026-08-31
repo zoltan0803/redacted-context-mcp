@@ -9,40 +9,45 @@ permissions:
   contents: read
 
 jobs:
-  pypi:
+  build:
     runs-on: ubuntu-latest
-    environment: pypi
     permissions:
-      # Required for PyPI trusted publishing (OIDC).
-      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
       - run: python -m pip install --upgrade pip build twine
+      - run: python -m pip install -e .
+      - run: python -m unittest discover -s tests -p 'test_*.py'
+      - run: python -m py_compile src/redacted_context_mcp/core.py src/redacted_context_mcp/server.py
       - run: python -m build
-      # Manual trusted publishing (equivalent to pypa/gh-action-pypi-publish):
-      # exchange the GitHub OIDC token for a short-lived PyPI upload token,
-      # then upload with twine. Avoids the action's Docker-based internals,
-      # whose image is currently unpullable on the runner.
-      - name: Mint short-lived PyPI token from OIDC identity
-        id: mint
-        run: |
-          set -euo pipefail
-          oidc_token="$(curl -fsS \
-            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=pypi" | jq -r '.value')"
-          minted="$(curl -fsS -X POST https://pypi.org/_/oidc/mint-token \
-            -d "{\"token\": \"${oidc_token}\"}" | jq -r '.token')"
-          if [ -z "$minted" ] || [ "$minted" = "null" ]; then
-            echo "Failed to mint PyPI token" >&2
-            exit 1
-          fi
-          echo "::add-mask::${minted}"
-          echo "token=${minted}" >> "$GITHUB_OUTPUT"
-      - name: Upload distributions with twine
-        env:
-          PYPI_TOKEN: ${{ steps.mint.outputs.token }}
-        run: |
-          python -m twine upload --non-interactive -u __token__ -p "$PYPI_TOKEN" dist/*
+      - run: python -m twine check dist/*
+      - name: Upload checked distributions
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/redacted-context-mcp
+    permissions:
+      # Required only here for PyPI Trusted Publishing (OIDC).
+      id-token: write
+    steps:
+      - name: Download checked distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: python-package-distributions
+          path: dist/
+      - name: Publish distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist/
