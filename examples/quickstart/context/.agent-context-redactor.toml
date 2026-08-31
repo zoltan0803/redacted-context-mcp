@@ -1,0 +1,5 @@
+[redaction]
+organizations = ["Example Lantern Labs", "Fictional Harbor Studio"]
+people = ["Avery Example", "Morgan Sample"]
+terms = ["PROJECT-LANTERN-042", "CASE-MOONLIGHT-017"]
+allow = ["Python", "SQLite"]
