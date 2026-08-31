@@ -25,10 +25,16 @@ the private folder.
 
 ## 2. Install The Tool
 
-From the `redacted-context-mcp` checkout:
+Install the published package in an isolated command environment:
 
 ```sh
-python3 -m pip install -e .
+pipx install redacted-context-mcp
+```
+
+Regular `pip` installation is also supported:
+
+```sh
+python -m pip install redacted-context-mcp
 ```
 
 Confirm commands are available:
@@ -36,6 +42,12 @@ Confirm commands are available:
 ```sh
 redctx --help
 redctx-mcp --help
+```
+
+For development or an unreleased checkout only, use:
+
+```sh
+python -m pip install -e .
 ```
 
 Optional, for local entity discovery:
