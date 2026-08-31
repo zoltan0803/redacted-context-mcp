@@ -22,4 +22,4 @@ jobs:
           python-version: "3.13"
       - run: python -m pip install --upgrade pip build
       - run: python -m build
-      - uses: pypa/gh-action-pypi-publish@a892a5a61159132606e93a2fa6f4358831b04d26 # v1.14.2
+      - uses: pypa/gh-action-pypi-publish@7f25271a4aa483500f742f9492b2ab5648d61011 # v1.12.4
