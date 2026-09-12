@@ -31,7 +31,7 @@ from .defaults import (
     ROLE_WORDS,
 )
 from .filesystem import RedactedContext, iter_target_files, read_text_file
-from .limits import OperationLimitError
+from .limits import OperationBudget, OperationLimitError
 from .models import DiscoveryDocument, DiscoveryParseError, DiscoveryResult, DiscoveryUpdate
 from .paths import rel_posix, resolve_under_root
 
@@ -510,7 +510,18 @@ def discover_entities(
         if index >= max_files:
             break
         rel = rel_posix(path, ctx.root)
-        text, bytes_read, truncated = read_discovery_sample(path, max_bytes=max_chars_per_file)
+        if ctx.is_document(path):
+            # Extract locally before sampling; binary container bytes are not
+            # meaningful discovery input. Charge the compressed source size.
+            document_budget = OperationBudget(max_total_raw_bytes=(
+                max_total_raw_bytes - total_bytes if max_total_raw_bytes is not None else None
+            ))
+            extracted = ctx.read_text(path, budget=document_budget)
+            text = extracted[:max_chars_per_file]
+            bytes_read = document_budget.raw_bytes_seen
+            truncated = len(extracted) > max_chars_per_file
+        else:
+            text, bytes_read, truncated = read_discovery_sample(path, max_bytes=max_chars_per_file)
         total_bytes += bytes_read
         if max_total_raw_bytes is not None and total_bytes > max_total_raw_bytes:
             raise OperationLimitError("Discovery total byte limit exceeded.")

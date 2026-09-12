@@ -130,6 +130,8 @@ agent workspace
 - Optional local-LLM discovery command to draft that config from private files
   without sending content to Claude or a hosted model.
 - No runtime Python dependencies.
+- Optional local DOCX, PPTX, PDF, XLSX, and XLS extraction using Microsoft MarkItDown.
+- Ranked multi-word passage retrieval with opaque references and line citations.
 - Works well with a neutral agent workspace that does not contain raw context
   files.
 
@@ -303,6 +305,7 @@ The server exposes:
 - `redctx_list` — list redacted directory entries
 - `redctx_read` — read redacted file contents by path or `@p_<id>`
 - `redctx_search` — search redacted text
+- `redctx_retrieve` — retrieve relevant passages ranked by keyword coverage and relevance
 - `redctx_stat` — inspect redacted metadata
 - `redctx_bundle` — concatenate redacted context files
 - `redctx_doctor` — show config counts without sensitive terms
@@ -346,6 +349,72 @@ redctx --root ../source-private bundle context --glob "*.md" --max-files 10
 redctx --root ../source-private audit --format json
 redctx --root ../source-private benchmark --format json
 ```
+
+### Ranked Retrieval
+
+Use `retrieve` when you want relevant passages for several keywords, even when
+the words appear in a different order or on different lines:
+
+```sh
+redctx --root ../source-private retrieve "database backup recovery" \
+  --max-results 8 --max-chars 12000
+```
+
+The MCP equivalent is `redctx_retrieve` with `query`, optional `paths` and
+`glob`, `max_results`, and `max_chars`. Each result includes an opaque file
+reference and a line range that can be passed to `redctx_read` for more context.
+Passages covering more query terms rank first, then BM25 keyword relevance;
+matching is case-insensitive and ignores a small set of common English words.
+Existing literal and regex `search` behavior is unchanged.
+
+Only redacted text is tokenized and scored. Complete placeholders can be used
+as search terms. Retrieval keeps no persistent index, makes no model calls,
+and has no additional dependencies. Results contain complete passages within
+the character budget; if none fits, increase `max_chars`. A limit notice marks
+omitted matches. Scan limits fail the request instead of presenting a partial
+scan as a complete ranking. Narrow `paths` or `glob` for large knowledgebases.
+
+### Optional Document Extraction
+
+Install the optional [Microsoft MarkItDown](https://github.com/microsoft/markitdown)
+integration and enable it explicitly for the CLI or MCP server:
+
+```sh
+python -m pip install 'redacted-context-mcp[documents]'
+redctx --root ../source-private --documents retrieve "database backup recovery"
+redctx --root ../source-private --documents read @p_1a2b3c4d5e6f
+redctx-mcp --root ../source-private --documents
+```
+
+For pipx, install with `pipx install 'redacted-context-mcp[documents]'`, or add
+the dependencies to an existing installation with
+`pipx inject redacted-context-mcp 'markitdown[docx,pptx,pdf,xlsx,xls]>=0.1.7,<0.2'`.
+For an MCP client configuration, add `--documents` to the server's `args`.
+
+Supported formats are **DOCX, PPTX, PDF, XLSX, and XLS**. They become available
+through read/head/tail, search, retrieve, bundle, local discovery, rehydration
+source scans, and MCP resources. Conversion produces local Markdown, then the
+same redactor processes it. Line citations refer to extracted Markdown lines,
+not PDF pages or slide numbers. The extractor does not reproduce document
+layout or evaluate spreadsheet formulas.
+
+The plain installation stays dependency-free. Installing the extra alone does
+not change which files are exposed; `--documents` removes only the built-in
+exclusions for supported formats. Configured exclusions and never-serve paths
+still apply. Each document is read through the existing containment checks and
+converted in a short-lived local worker with a 15-second deadline, 5 MB input
+cap, 1 million extracted-character cap, and OOXML expansion limits (50 MB and
+2,000 ZIP members). Existing operation budgets also apply. No raw converted
+Markdown is persisted; the MCP resource cache holds redacted text only.
+
+Only the selected format converter is invoked on local bytes. URL fetching,
+plugins, cloud conversion, audio transcription, and LLM/OCR clients are not
+enabled. Legacy `.doc` and `.ppt` files must be exported to a supported format.
+Scanned PDFs need OCR outside this MCP; an empty extraction produces a clear
+error. Encrypted, malformed, or oversized documents fail with non-sensitive
+errors. Conversion is an additional parser surface, not a hard sandbox; use
+the isolation described in [Security Boundary](#security-boundary) for untrusted
+source files.
 
 ### Local Rehydration
 
@@ -402,6 +471,34 @@ GitHub repo entries are optional. Use neutral aliases such as `context`; agents
 use the alias, while the real `owner/repo` stays in this local config. Private
 repos require the named token environment variable in the shell that starts
 `redctx` or `redctx-mcp`.
+
+### Updating Rules During an MCP Session
+
+The MCP server automatically checks the local config and its referenced
+`term_files` before each tool call or resource list/read. Save your reviewed
+rules and retry the request: new terms, exclusions, allow-list changes, and
+detector profiles take effect without reconnecting. This also picks up config
+updates written by `discover-update`.
+
+For example, adding a project codename to `terms` causes the next read of an
+already cached document to redact that codename. Successful policy changes
+clear the redacted resource cache, path index, and old rehydration mappings.
+Opaque path references and placeholders for unchanged terms remain stable as
+long as the salt and applicable redaction category stay the same.
+
+If the config is invalid or unreadable, or a previously loaded config or
+still-referenced term file disappears, context requests fail closed with a
+non-sensitive error. Repair the file and retry; the server recovers without a
+restart. Referenced term files remain optional until first loaded and are
+watched for creation.
+To deliberately stop using a term file, remove its `term_files` entry.
+
+Salt changes require a server restart and fresh opaque references; requests
+are blocked until restart or restoration of the original salt. Changes to the
+launch environment, server flags, or external vault-salt state also require a
+restart. Reload checks use file metadata at request boundaries; they do not
+retract previously returned content or provide protection against adversarial
+concurrent filesystem changes.
 
 ## Redacted GitHub Issues
 

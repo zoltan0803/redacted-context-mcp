@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from tests.fixtures import PUBLIC_TECH, RAW_PRIVATE_VALUES, write_knowledgebase
+from tests.test_documents import HAS_DOCUMENTS, write_docx
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -134,6 +135,68 @@ class RedactedContextMcpTest(unittest.TestCase):
             },
         }
 
+    def test_live_config_reload_over_legacy_stdio(self) -> None:
+        self.check_live_config_reload(modern=False)
+
+    def test_live_config_reload_over_modern_stdio(self) -> None:
+        self.check_live_config_reload(modern=True)
+
+    def check_live_config_reload(self, *, modern: bool) -> None:
+        (self.root / "reload.txt").write_text("the quokkaproject uses PostgreSQL\n", encoding="utf-8")
+
+        def request(method: str, **values: Any) -> dict[str, Any]:
+            return self.rpc(method, self.modern_params(**values) if modern else values)
+
+        # Warm the resource cache in the actual running subprocess.
+        resources = request("resources/list")["result"]["resources"]
+        uri = next(
+            resource["uri"] for resource in resources
+            if "quokkaproject" in json.dumps(request("resources/read", uri=resource["uri"]))
+        )
+        config = self.root / ".agent-context-redactor.toml"
+        original = config.read_text(encoding="utf-8")
+        updated = original.replace('terms = [', 'terms = ["quokkaproject", ')
+        config.write_text(updated, encoding="utf-8")
+        redacted = request("resources/read", uri=uri)
+        self.assertNotIn("error", redacted)
+        self.assertNotIn("quokkaproject", json.dumps(redacted))
+        self.assertIn("PostgreSQL", json.dumps(redacted))
+
+        config.write_text('[redaction]\nterms = ["private-parser-canary"', encoding="utf-8")
+        failed = request("resources/read", uri=uri)
+        self.assertEqual(failed["error"]["code"], -32602 if modern else -32002)
+        self.assertNotIn("private-parser-canary", json.dumps(failed))
+        failed_tool = request("tools/call", name="redctx_read", arguments={"path": "reload.txt"})
+        self.assertTrue(failed_tool["result"]["isError"])
+        self.assertNotIn("private-parser-canary", json.dumps(failed_tool))
+
+        config.write_text(updated, encoding="utf-8")
+        recovered = request("resources/read", uri=uri)
+        self.assertNotIn("error", recovered)
+        self.assertNotIn("quokkaproject", json.dumps(recovered))
+
+    def test_ranked_retrieval_over_stdio(self) -> None:
+        (self.root / "a.txt").write_text("backup " * 50, encoding="utf-8")
+        (self.root / "z.txt").write_text("database recovery\nbackup procedures\n", encoding="utf-8")
+        result = self.call_tool("redctx_retrieve", {"query": "database backup recovery", "max_results": 1})
+        self.assertFalse(result["isError"], result)
+        self.assertIn("database recovery", result["content"][0]["text"])
+        self.assertIn("lines 1-2", result["content"][0]["text"])
+        self.assertIn("@p_", result["content"][0]["text"])
+
+    @unittest.skipUnless(HAS_DOCUMENTS, "optional documents extra is not installed")
+    def test_document_read_and_retrieve_over_stdio(self) -> None:
+        write_docx(self.root / "notes.docx", "Client Alpha database backup PostgreSQL")
+        self.restart_server("--documents")
+        for name, arguments in (
+            ("redctx_read", {"path": "notes.docx"}),
+            ("redctx_retrieve", {"query": "database backup", "paths": ["notes.docx"]}),
+        ):
+            result = self.call_tool(name, arguments)
+            self.assertFalse(result["isError"], result)
+            self.assertNotIn("Client Alpha", json.dumps(result))
+            self.assertIn("PostgreSQL", json.dumps(result))
+
     def test_initialize_and_list_tools(self) -> None:
         response = self.rpc(
             "initialize",
@@ -174,7 +237,7 @@ class RedactedContextMcpTest(unittest.TestCase):
         self.assertGreater(result["ttlMs"], 0)
         server_info = result["_meta"][SERVER_INFO_META_KEY]
         self.assertEqual(server_info["name"], "redacted-context")
-        self.assertEqual(server_info["version"], "0.7.1")
+        self.assertEqual(server_info["version"], "0.8.0")
 
     def test_modern_tools_and_resources_use_modern_result_shapes(self) -> None:
         tools_result = self.rpc("tools/list", self.modern_params())["result"]

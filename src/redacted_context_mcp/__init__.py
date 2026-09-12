@@ -9,7 +9,7 @@ from .discovery import (
 )
 from .models import DiscoveryDocument, DiscoveryResult, DiscoveryUpdate
 
-__version__ = "0.7.1"
+__version__ = "0.8.0"
 
 __all__ = [
     "DiscoveryDocument",

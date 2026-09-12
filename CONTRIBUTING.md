@@ -19,6 +19,19 @@ python3 -m build
 python3 -m twine check dist/*
 ```
 
+## Optional Document Tests
+
+The default suite runs without document dependencies. To exercise the optional
+real DOCX/PPTX/PDF/XLSX converters and their CLI/MCP flows as well:
+
+```sh
+python3 -m pip install -e '.[documents]'
+python3 -m unittest discover -s tests -p 'test_*.py'
+```
+
+CI keeps the dependency-free matrix and runs a separate document-integration
+job on Linux and Windows.
+
 ## Standards
 
 - Keep runtime dependencies at zero unless there is a strong reason to add one.

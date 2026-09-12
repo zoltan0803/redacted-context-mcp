@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.8.0 — 2026-09-12
+
+- Adds dependency-free `redctx retrieve` / `redctx_retrieve` for ranked,
+  redacted passages with opaque references, line citations, and output budgets.
+- Adds the optional `documents` extra and explicit `--documents` flag for local
+  MarkItDown extraction of DOCX, PPTX, PDF, XLSX, and XLS across context tools.
+- Redacts whole files before applying read/head/tail line ranges so multiline
+  secrets cannot escape when a range excludes their delimiters.
+- Automatically reloads local MCP redaction rules and referenced term files
+  before context requests, including updates made by `discover-update`.
+- Invalidates cached resources, path indexes, and old rehydration mappings when
+  the policy changes. Invalid or removed previously loaded inputs block access
+  until repaired, with non-sensitive errors and recovery on a later request.
+- Refuses live salt rotation to preserve reference consistency; salt changes
+  require restarting the server and obtaining new opaque references.
+
 ## 0.7.1
 
 Public-launch polish release.

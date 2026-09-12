@@ -6,6 +6,7 @@ import fnmatch
 import os
 import re
 import stat
+import time
 from pathlib import Path
 from typing import Iterable
 
@@ -18,18 +19,28 @@ from .defaults import (
 )
 from .limits import OperationBudget, OperationLimitError
 from .models import RedactionConfig
+from .documents import (
+    DOCUMENT_EXTENSIONS, LEGACY_OFFICE_EXTENSIONS, MAX_DOCUMENT_BYTES, EXTRACTION_SECONDS,
+    DISABLED_MESSAGE, LEGACY_MESSAGE, extract_document, require_document_support,
+)
 from .paths import path_id, rel_posix
 
 TEXT_DETECTION_PREFIX_BYTES = 4096
 
 
 class RedactedContext:
-    def __init__(self, root: Path, config: RedactionConfig, *, include_private: bool = False):
+    def __init__(self, root: Path, config: RedactionConfig, *, include_private: bool = False, documents: bool = False):
         self.root = root.resolve()
         self.config = config
         self.include_private = include_private
+        self.documents = documents
+        if documents:
+            require_document_support()
         self.exclude_dirs = set(DEFAULT_EXCLUDE_DIRS) | set(config.exclude_dirs)
-        self.exclude_globs = set(DEFAULT_EXCLUDE_GLOBS) | set(config.exclude_globs)
+        default_globs = set(DEFAULT_EXCLUDE_GLOBS)
+        if documents:
+            default_globs -= {f"*{extension}" for extension in DOCUMENT_EXTENSIONS}
+        self.exclude_globs = default_globs | set(config.exclude_globs)
         # Loaded term files and the explicit config file contain raw sensitive
         # terms and must never be served, regardless of --include-private.
         # Matching is case-folded because the served filesystem may be
@@ -103,9 +114,41 @@ class RedactedContext:
         if expected == "text":
             if not resolved.is_file():
                 raise SystemExit("Not a file.")
-            if not is_probably_text(resolved):
+            if resolved.suffix.casefold() in LEGACY_OFFICE_EXTENSIONS:
+                raise SystemExit(LEGACY_MESSAGE)
+            if self.is_document(resolved) and not self.documents:
+                raise SystemExit(DISABLED_MESSAGE)
+            if not self.is_readable(resolved):
                 raise SystemExit("Refusing to print non-text file. Use stat/list to inspect metadata.")
         return resolved
+
+    def is_document(self, path: Path) -> bool:
+        return path.suffix.casefold() in DOCUMENT_EXTENSIONS
+
+    def is_readable(self, path: Path) -> bool:
+        if self.is_document(path):
+            return self.documents
+        if path.suffix.casefold() in LEGACY_OFFICE_EXTENSIONS:
+            return False
+        return is_probably_text(path)
+
+    def read_text(self, path: Path, *, budget: OperationBudget | None = None) -> str:
+        path = self.validate_path(path, expected="text")
+        if self.is_excluded(path):
+            raise SystemExit("Path is excluded by policy.")
+        if not self.is_document(path):
+            return read_text_file(path, budget=budget)
+        document_budget = budget or OperationBudget(max_raw_bytes_per_file=MAX_DOCUMENT_BYTES)
+        if path.stat().st_size > MAX_DOCUMENT_BYTES:
+            raise SystemExit("Document input byte limit exceeded.")
+        data = read_file_bytes_verified(path, budget=document_budget)
+        timeout = EXTRACTION_SECONDS
+        if document_budget.deadline is not None:
+            document_budget.check_deadline()
+            timeout = min(timeout, document_budget.deadline - time.monotonic())
+        text = extract_document(data, path.suffix.casefold(), timeout=timeout)
+        document_budget.check_deadline()
+        return text
 
     def path_id(self, rel_path: str) -> str:
         return path_id(rel_path, self.config.salt)
@@ -465,7 +508,11 @@ def iter_target_files(
                 continue
             if not stat.S_ISREG(mode):
                 continue
-            if text_only and not is_probably_text(path):
+            if ctx.is_document(path) and not ctx.documents:
+                continue
+            if path.suffix.casefold() in LEGACY_OFFICE_EXTENSIONS:
+                continue
+            if text_only and not ctx.is_readable(path):
                 continue
             rel = rel_posix(path, ctx.root)
             if globs and not any(fnmatch.fnmatch(rel, pattern) for pattern in globs):

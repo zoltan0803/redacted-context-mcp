@@ -56,10 +56,33 @@ subdirectory.
 - `models.py`: shared dataclasses.
 - `redaction.py`: text/path redaction logic.
 - `config.py`: local TOML config loading and validation.
+- `config_reload.py`: request-boundary policy change detection, stable reloads,
+  and fail-closed handling of invalid or missing policy inputs.
 - `paths.py`: root-constrained path resolution and opaque path ids.
 - `filesystem.py`: read-only filesystem traversal and text-file detection.
+- `documents.py`: optional local MarkItDown extraction through explicitly
+  selected format converters and a bounded worker process.
+- `retrieval.py`: transient passage tokenization and ranking over redacted text.
 - `discovery.py`: local Ollama discovery workflow and post-processing.
 - `github.py`: read-only GitHub issue access through neutral aliases.
+
+## Retrieval and Documents
+
+`RedactedContext.read_text` is the shared input path for context reads. With
+`--documents`, supported local binary documents are read as verified bytes and
+passed to a short-lived worker. That worker invokes the selected MarkItDown
+converter directly, without auto-detection, plugins, URLs, or cloud clients.
+Raw extracted Markdown returns over a local pipe and is redacted before tool
+output or resource caching. Source bytes, expanded OOXML size, extracted text,
+and worker duration are bounded. No raw extraction cache or persistent index is
+created. Plain-text reads do not import MarkItDown.
+
+`redctx_retrieve` scans readable files under existing traversal/read budgets,
+redacts whole documents while preserving line counts, and splits the result
+into bounded passages. It orders matches by query-term coverage, then BM25,
+with deterministic opaque-reference/line tie-breaking. Only matching redacted
+passages and query statistics are retained for the request. Result count and
+character limits bound the returned context; exhausted scan budgets fail closed.
 
 ## Controlled Write Path
 
@@ -113,6 +136,20 @@ instead of rotating aliases silently. `redctx doctor` reports the salt source.
 `redctx discover` can draft that file with a local Ollama model. It is a setup
 command for a human operator, not an MCP tool, because its output intentionally
 contains raw sensitive terms.
+
+The MCP server probes config and term-file metadata before tool execution and
+resource listing/reads. Unchanged requests keep the existing policy and cache.
+Changed inputs are loaded twice around dependency snapshots, including newly
+referenced term files. A validated policy replaces the context and redactor
+together and clears cached content, path indexes, and rehydration state.
+Invalid, unreadable, unstable, or removed previously loaded inputs block
+context requests and clear the content cache; the next request retries. Public
+protocol discovery and tool schemas remain available during recovery.
+
+Live reload refuses salt rotation to avoid silently invalidating references.
+Environment, launch-option, and external salt-state changes require a restart.
+Metadata checks are a local workflow guardrail, not a concurrent-mutation
+sandbox, and do not revoke content already returned to a client.
 
 ## GitHub Issue Access
 

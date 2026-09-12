@@ -236,7 +236,7 @@ class FollowupHardeningTest(unittest.TestCase):
             (root / "doc.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
             ctx = RedactedContext(root, RedactionConfig(salt="salt"))
             calls = 0
-            real_read = core.read_text_file
+            real_read = ctx.read_text
 
             def counted(*args, **kwargs):
                 nonlocal calls
@@ -244,7 +244,7 @@ class FollowupHardeningTest(unittest.TestCase):
                 return real_read(*args, **kwargs)
 
             args = argparse.Namespace(path="doc.txt", lines=2, max_chars=1000, line_numbers=False, max_files=None, max_raw_bytes_per_file=1000, max_total_raw_bytes=1000, max_entries=100, max_seconds=None)
-            with patch("redacted_context_mcp.core.read_text_file", counted), contextlib.redirect_stdout(io.StringIO()):
+            with patch.object(ctx, "read_text", counted), contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(core.command_tail(args, ctx, Redactor(ctx.config)), 0)
             self.assertEqual(calls, 1)
 

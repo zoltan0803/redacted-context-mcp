@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 from tests.fixtures import PUBLIC_TECH, RAW_PRIVATE_VALUES, write_knowledgebase
+from tests.test_documents import HAS_DOCUMENTS, write_docx
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +40,27 @@ class RedactedContextCliTest(unittest.TestCase):
             cwd=PROJECT_ROOT,
             env={**ENV, "REDACTED_CONTEXT_STATE_DIR": str(self.state_dir)},
         )
+
+    def test_ranked_retrieval_cli(self) -> None:
+        (self.root / "retrieval.txt").write_text("database backup policy\n", encoding="utf-8")
+        result = self.run_cli("retrieve", "database policy", "retrieval.txt")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("database backup policy", result.stdout)
+        self.assertIn("lines 1-1", result.stdout)
+
+    @unittest.skipUnless(HAS_DOCUMENTS, "optional documents extra is not installed")
+    def test_document_retrieval_cli(self) -> None:
+        write_docx(self.root / "notes.docx", "Client Alpha database backup PostgreSQL")
+        result = self.run_cli("--documents", "retrieve", "database backup", "notes.docx")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PostgreSQL", result.stdout)
+        self.assertNotIn("Client Alpha", result.stdout)
+
+    def test_read_range_redacts_entire_multiline_secret(self) -> None:
+        (self.root / "secret.txt").write_text("-----BEGIN PRIVATE KEY-----\nprivate-canary\n-----END PRIVATE KEY-----\n", encoding="utf-8")
+        result = self.run_cli("read", "secret.txt", "--start-line", "2", "--end-line", "2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("private-canary", result.stdout)
 
     def test_ls_redacts_paths_and_returns_opaque_id(self) -> None:
         result = self.run_cli("ls", "context")

@@ -35,6 +35,34 @@ claim of hard OS isolation.
   redacted as secrets in the default detector profile, so an echoed vault salt
   cannot be served back to an agent.
 
+## Retrieval and Document Extraction
+
+- Ranked retrieval tokenizes and scores redacted text, never raw content or raw
+  filenames. Complete placeholders and opaque file references remain usable.
+- Content is redacted before passage splitting and read/head/tail line slicing.
+- Optional document extraction requires `--documents`. Enabling it preserves
+  configured exclusions, protected paths, and path-containment checks.
+- Workers receive only verified local bytes and the supported extension, with
+  no URL or private filename. Only the selected converter runs; plugins and
+  cloud/model clients are not enabled. Parser diagnostics are suppressed.
+- Extraction has source-byte, OOXML expansion, output-character, and worker-time
+  limits. These are workflow guards, not a memory sandbox or formal guarantee
+  against hostile parser inputs. Failed conversions never return raw diagnostics.
+
+## Live Policy Updates
+
+- MCP tool calls and resource listing/reads check config and term-file metadata
+  before accessing context. Detected changes replace the policy and invalidate
+  cached redacted content, opaque path indexes, and old rehydration mappings.
+- Invalid or unreadable policy inputs, or disappearance of a previously loaded
+  config or still-referenced term file, block context access rather than serving
+  with stale rules. Error responses contain no raw parser or filesystem details.
+- Repairing the inputs allows a later request to recover. Salt rotation requires
+  restart or restoration of the original salt.
+- Reload checks operate at request boundaries and are subject to the same
+  concurrent-mutation limitations as filesystem reads. Already returned content
+  cannot be revoked.
+
 ## Vault Unlinkability
 
 - Missing default salt state creates and persists a new random 256-bit salt in

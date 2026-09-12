@@ -26,11 +26,14 @@ try:
     from . import __version__
     from . import core as rc
 except ImportError:  # pragma: no cover - direct script fallback
-    __version__ = "0.7.1"
+    __version__ = "0.8.0"
     package_root = Path(__file__).resolve().parents[1]
     if str(package_root) not in sys.path:
         sys.path.insert(0, str(package_root))
     from redacted_context_mcp import core as rc
+
+from redacted_context_mcp.config_reload import ConfigReloadError, LiveConfig
+from redacted_context_mcp.documents import SAFE_ERROR_MESSAGES as DOCUMENT_ERROR_MESSAGES
 
 
 SERVER_NAME = "redacted-context"
@@ -128,6 +131,7 @@ class RedactedContextMcp:
         config_path: Path | None,
         mode: str,
         include_private: bool,
+        documents: bool = False,
         enable_writes: bool = False,
         write_subdir: str = "incoming",
         max_resource_bytes: int = rc.DEFAULT_MAX_RESOURCE_BYTES,
@@ -140,14 +144,18 @@ class RedactedContextMcp:
         self.root = root.expanduser().resolve()
         if not self.root.exists() or not self.root.is_dir():
             raise SystemExit("Root must be an existing directory.")
-        config = rc.load_config(
+        self.config_path = config_path.expanduser().resolve() if config_path is not None else None
+        self.live_config = LiveConfig(
             self.root,
-            config_path.expanduser().resolve() if config_path is not None else None,
+            self.config_path,
         )
-        self.ctx = rc.RedactedContext(self.root, config, include_private=include_private)
+        try:
+            config = self.live_config.load()
+        except ConfigReloadError as exc:
+            raise SystemExit(str(exc)) from exc
+        self.ctx = rc.RedactedContext(self.root, config, include_private=include_private, documents=documents)
         self.redactor = rc.Redactor(config, mode=mode)
         self.config_fingerprint = redaction_config_fingerprint(config)
-        self.config_path = config_path
         self.mode = mode
         self.enable_writes = enable_writes
         self.write_root = resolve_write_root(self.root, write_subdir)
@@ -157,6 +165,34 @@ class RedactedContextMcp:
         self.max_raw_bytes_per_file = max_raw_bytes_per_file
         self.max_total_raw_bytes = max_total_raw_bytes
         self.cache = RedactedContentCache(cache_bytes)
+
+    def ensure_current_config(self) -> None:
+        try:
+            config = self.live_config.load()
+            if config == self.ctx.config:
+                return
+            # Build the replacement completely before publishing it. This also
+            # discards old raw rehydration mappings and the opaque path index.
+            ctx = rc.RedactedContext(self.root, config, include_private=self.ctx.include_private, documents=self.ctx.documents)
+            redactor = rc.Redactor(config, mode=self.mode)
+            fingerprint = redaction_config_fingerprint(config)
+        except (Exception, SystemExit) as exc:
+            self.cache.clear()
+            message = str(exc) if isinstance(exc, ConfigReloadError) else (
+                "Redaction configuration could not be applied safely. Repair the local "
+                "config, then retry. Context access is blocked."
+            )
+            raise ToolExecutionError(message) from exc
+        self.ctx = ctx
+        self.redactor = redactor
+        self.config_fingerprint = fingerprint
+        self.cache.clear()
+
+    def ensure_resource_config(self) -> None:
+        try:
+            self.ensure_current_config()
+        except ToolExecutionError as exc:
+            raise ProtocolError(-32002, str(exc)) from exc
 
     def traversal_budget(self) -> rc.OperationBudget:
         return rc.OperationBudget(max_entries=self.max_traversal_entries)
@@ -202,11 +238,16 @@ class RedactedContextMcp:
     def instructions(self) -> str:
         return (
             "Use redctx_tree, redctx_list, redctx_read, redctx_search, "
-            "redctx_stat, redctx_bundle, redctx_doctor, redctx_audit, "
+            "redctx_retrieve, redctx_stat, redctx_bundle, redctx_doctor, redctx_audit, "
             "redctx_refresh_index, and redctx_github_* "
             "tools for confidential local context. Redacted files are also "
             "available as redctx://p_<id> MCP resources. Results are redacted "
             "and file tools use opaque @p_<id> path references."
+            " Local redaction config and term-file changes apply before the next "
+            "context request. If a policy reload fails, ask the operator to repair "
+            "the local configuration before retrying."
+            " Use redctx_retrieve for ranked multi-word passage lookup with line citations."
+            + (" Document extraction is enabled; document line citations refer to extracted Markdown." if self.ctx.documents else "")
             + (
                 " redctx_submit_doc is enabled for controlled writes into "
                 "the configured private-root write subdirectory."
@@ -225,13 +266,14 @@ class RedactedContextMcp:
         }
 
     def list_resources(self, params: dict[str, Any]) -> dict[str, Any]:
+        self.ensure_resource_config()
         offset = parse_cursor(params.get("cursor"))
         page: list[Path] = []
         next_cursor: str | None = None
         seen = 0
         try:
             for path in self.ctx.walk(budget=self.traversal_budget()):
-                if not path.is_file() or not rc.is_probably_text(path):
+                if not path.is_file() or not self.ctx.is_readable(path):
                     continue
                 if seen < offset:
                     seen += 1
@@ -250,6 +292,7 @@ class RedactedContextMcp:
         return result
 
     def read_resource(self, params: dict[str, Any]) -> dict[str, Any]:
+        self.ensure_resource_config()
         uri = params.get("uri")
         if not isinstance(uri, str):
             raise ProtocolError(-32602, "resources/read requires string uri.")
@@ -288,7 +331,9 @@ class RedactedContextMcp:
         handler = TOOL_HANDLERS.get(name)
         if handler is None:
             raise ProtocolError(-32602, f"Unknown tool: {name}")
+        before = self.redactor.stats_snapshot()
         try:
+            self.ensure_current_config()
             before = self.redactor.stats_snapshot()
             validate_tool_arguments(name, arguments)
             text = handler(self, arguments)
@@ -296,7 +341,7 @@ class RedactedContextMcp:
             text = str(exc) or "Tool execution failed."
             return {
                 "content": [{"type": "text", "text": text}],
-                "structuredContent": {"text": text, "receipt": self.redactor.receipt(before if "before" in locals() else None)},
+                "structuredContent": {"text": text, "receipt": self.redactor.receipt(before)},
                 "isError": True,
             }
         return {
@@ -369,8 +414,10 @@ class RedactedContextMcp:
         cached = self.cache.get(key)
         if cached is not None:
             return cached
-        text = rc.read_text_file(path)
+        text = self.ctx.read_text(path)
         redacted = self.redactor.redact(text, preserve_line_count=preserve_line_count)
+        if self.ctx.is_document(path) and len(redacted.encode("utf-8")) > self.max_resource_bytes:
+            raise ToolExecutionError("Extracted resource exceeds the server resource byte limit. Use redctx_read with a narrower range.")
         self.cache.put(key, redacted)
         return redacted
 
@@ -586,6 +633,11 @@ def safe_error_message(exc: SystemExit, redactor: rc.Redactor) -> str:
         "Discovery total byte limit exceeded.",
         "Output already exists.",
         "Could not publish output atomically.",
+        "Retrieval requires max_results between 1 and 50 and max_chars between 256 and 100000.",
+        "Retrieval query exceeds the 2000 character limit.",
+        "Retrieval requires 1 to 64 searchable query terms.",
+        "Retrieval passage limit exceeded. Narrow the paths or glob.",
+        *DOCUMENT_ERROR_MESSAGES,
     }
     if (
         value in safe_messages
@@ -613,6 +665,8 @@ def resource_uri(ref_id: str) -> str:
 
 
 def mime_type_for_path(path: Path) -> str:
+    if path.suffix.casefold() in rc.DOCUMENT_EXTENSIONS:
+        return "text/markdown"
     suffix = path.suffix.casefold()
     if suffix == ".md":
         return "text/markdown"
@@ -781,6 +835,19 @@ def redctx_stat(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
         Namespace(path=string_arg(arguments, "path", ".")),
     )
 
+def redctx_retrieve(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
+    return server.run_cli_command(
+        rc.command_retrieve,
+        Namespace(
+            query=string_arg(arguments, "query", ""),
+            paths=string_list_arg(arguments, "paths"), glob=string_list_arg(arguments, "glob"),
+            max_results=int_arg(arguments, "max_results", 8), max_chars=int_arg(arguments, "max_chars", 12_000),
+            max_files=rc.DEFAULT_MAX_FILES, max_entries=server.max_traversal_entries,
+            max_raw_bytes_per_file=server.max_raw_bytes_per_file,
+            max_total_raw_bytes=server.max_total_raw_bytes, max_seconds=rc.DEFAULT_MCP_SEARCH_SECONDS,
+        ),
+    )
+
 
 def redctx_bundle(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
     return server.run_cli_command(
@@ -886,6 +953,7 @@ TOOL_HANDLERS: dict[str, Callable[[RedactedContextMcp, dict[str, Any]], str]] = 
     "redctx_list": redctx_list,
     "redctx_read": redctx_read,
     "redctx_search": redctx_search,
+    "redctx_retrieve": redctx_retrieve,
     "redctx_stat": redctx_stat,
     "redctx_bundle": redctx_bundle,
     "redctx_submit_doc": redctx_submit_doc,
@@ -956,6 +1024,21 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "context": {"type": "integer", "default": 0, "minimum": 0},
                 "glob": {"type": "array", "items": {"type": "string"}, "default": []},
                 "max_results": {"type": "integer", "default": rc.DEFAULT_MAX_SEARCH_RESULTS, "minimum": 1},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "redctx_retrieve",
+        "description": "Rank redacted passages by multi-word keyword relevance. Returns opaque references and line citations (extracted Markdown lines for documents). No embeddings or persistent index.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "maxLength": 2000},
+                "paths": {"type": "array", "items": {"type": "string"}, "default": []},
+                "glob": {"type": "array", "items": {"type": "string"}, "default": []},
+                "max_results": {"type": "integer", "default": 8, "minimum": 1, "maximum": 50},
+                "max_chars": {"type": "integer", "default": 12000, "minimum": 256, "maximum": 100000},
             },
             "required": ["query"],
         },
@@ -1369,6 +1452,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, help=f"TOML config path, defaults to {rc.LOCAL_CONFIG}")
     parser.add_argument("--mode", choices=("balanced", "strict"), default="strict")
     parser.add_argument("--include-private", action="store_true")
+    parser.add_argument("--documents", action="store_true", help="enable local document extraction; requires the documents extra")
     parser.add_argument(
         "--enable-writes",
         action="store_true",
@@ -1426,6 +1510,7 @@ def main(argv: list[str] | None = None) -> int:
         config_path=args.config,
         mode=args.mode,
         include_private=args.include_private,
+        documents=args.documents,
         enable_writes=args.enable_writes,
         write_subdir=args.write_subdir,
         max_resource_bytes=args.max_resource_bytes,

@@ -128,6 +128,8 @@ from .models import (
 )
 from .paths import display_ref, path_id, rel_posix, resolve_under_root
 from .redaction import Redactor, compile_literal_pattern, normalize_alias
+from .retrieval import retrieve
+from .documents import DOCUMENT_EXTENSIONS
 
 
 HEX_QUERY_RE = re.compile(r"[0-9a-fA-F]+")
@@ -222,14 +224,14 @@ def command_cat(args: argparse.Namespace, ctx: RedactedContext, redactor: Redact
     if ctx.is_excluded(path):
         raise SystemExit("Path is excluded by policy.")
     path = ctx.validate_path(path, expected="text")
-    text = read_text_file(path, budget=budget)
-    lines = text.splitlines(keepends=True)
+    text = ctx.read_text(path, budget=budget)
+    lines = redactor.redact(text, preserve_line_count=True).splitlines(keepends=True)
     start = max(args.start_line or 1, 1)
     end = args.end_line or len(lines)
     if end < start:
         raise SystemExit("--end-line must be greater than or equal to --start-line.")
     selected = "".join(lines[start - 1 : end])
-    redacted = redactor.redact(selected)
+    redacted = selected
     redacted = truncate_redacted(redacted, args.max_chars)
 
     rel = rel_posix(path, ctx.root)
@@ -256,11 +258,11 @@ def command_tail(args: argparse.Namespace, ctx: RedactedContext, redactor: Redac
     if ctx.is_excluded(path):
         raise SystemExit("Path is excluded by policy.")
     path = ctx.validate_path(path, expected="text")
-    text = read_text_file(path, budget=budget)
-    all_lines = text.splitlines(keepends=True)
+    text = ctx.read_text(path, budget=budget)
+    all_lines = redactor.redact(text, preserve_line_count=True).splitlines(keepends=True)
     start = max(1, len(all_lines) - args.lines + 1)
     selected = "".join(all_lines[start - 1 :])
-    redacted = redactor.redact(selected)
+    redacted = selected
     redacted = truncate_redacted(redacted, args.max_chars or DEFAULT_MAX_CHARS)
     rel = rel_posix(path, ctx.root)
     print(f"--- {ctx.display_ref(rel)} {redactor.redact_path(rel)} lines {start}-{len(all_lines)} ---")
@@ -512,7 +514,7 @@ def command_grep(args: argparse.Namespace, ctx: RedactedContext, redactor: Redac
         return _grep_regex(args, ctx, redactor, budget)
     for path in iter_target_files(ctx, args.paths, args.glob, budget=budget, text_only=not use_prefilter):
         budget.check_deadline()
-        if use_prefilter:
+        if use_prefilter and not ctx.is_document(path):
             path = ctx.validate_path(path, expected="file")
             raw_bytes = read_file_bytes_verified(path, budget=budget)
             if args.query.isascii():
@@ -535,7 +537,7 @@ def command_grep(args: argparse.Namespace, ctx: RedactedContext, redactor: Redac
                     continue
         else:
             path = ctx.validate_path(path, expected="text")
-            raw = read_text_file(path, budget=budget)
+            raw = ctx.read_text(path, budget=budget)
         redacted_lines = redactor.redact(raw, preserve_line_count=True).splitlines()
         matches: list[int] = []
         for index, line in enumerate(redacted_lines):
@@ -647,7 +649,7 @@ def _grep_regex(
     for path in iter_target_files(ctx, args.paths, args.glob, budget=budget, text_only=True):
         budget.check_deadline()
         path = ctx.validate_path(path, expected="text")
-        raw = read_text_file(path, budget=budget)
+        raw = ctx.read_text(path, budget=budget)
         redacted_lines = redactor.redact(raw, preserve_line_count=True).splitlines()
         files.append((rel_posix(path, ctx.root), redacted_lines))
 
@@ -699,6 +701,13 @@ def command_stat(args: argparse.Namespace, ctx: RedactedContext, redactor: Redac
         print(f"lines: {count_text_lines(path)}")
     return 0
 
+def command_retrieve(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
+    print(retrieve(
+        ctx, redactor, args.query, paths=args.paths, globs=args.glob,
+        budget=operation_budget_from_args(args), max_results=args.max_results, max_chars=args.max_chars,
+    ), end="")
+    return 0
+
 
 def count_text_lines(path: Path) -> int:
     lines = 0
@@ -725,7 +734,7 @@ def command_bundle(args: argparse.Namespace, ctx: RedactedContext, redactor: Red
         if count >= args.max_files or total_chars >= args.max_total_chars:
             print("[TRUNCATED: file or total character limit reached]")
             return 0
-        raw = read_text_file(ctx.validate_path(path, expected="text"), budget=budget)
+        raw = ctx.read_text(path, budget=budget)
         redacted = redactor.redact(raw)
         redacted = truncate_redacted(redacted, args.max_chars_per_file)
         rel = rel_posix(path, ctx.root)
@@ -764,8 +773,8 @@ def build_rehydration_map(
             ref = ctx.display_ref(rel)
             redactor.raw_aliases.setdefault(ref, rel)
             redactor.raw_aliases.setdefault(f"redctx://{ctx.path_id(rel)}", rel)
-            if path.is_file() and is_probably_text(path):
-                redactor.redact(read_text_file(ctx.validate_path(path, expected="text"), budget=budget))
+            if path.is_file() and ctx.is_readable(path):
+                redactor.redact(ctx.read_text(path, budget=budget))
         return dict(redactor.raw_aliases)
     finally:
         redactor.raw_aliases = original_aliases
@@ -1103,14 +1112,14 @@ def command_benchmark(args: argparse.Namespace, ctx: RedactedContext, redactor: 
             continue
         files += 1
         visible_bytes += path.stat().st_size
-        if is_probably_text(path):
+        if ctx.is_readable(path):
             text_files.append(path)
     walk_seconds = time.perf_counter() - start
 
     text_characters = 0
     start = time.perf_counter()
     for path in text_files:
-        text_characters += len(read_text_file(ctx.validate_path(path, expected="text"), budget=budget))
+        text_characters += len(ctx.read_text(path, budget=budget))
     read_seconds = time.perf_counter() - start
 
     query = args.query.casefold() if args.ignore_case else args.query
@@ -1120,7 +1129,7 @@ def command_benchmark(args: argparse.Namespace, ctx: RedactedContext, redactor: 
     search_seconds = 0.0
     redaction_read_bytes = 0
     for path in text_files:
-        text = read_text_file(ctx.validate_path(path, expected="text"))
+        text = ctx.read_text(path)
         redaction_read_bytes += path.stat().st_size
         start = time.perf_counter()
         redacted = chunk_redactor.redact(text)
@@ -1370,6 +1379,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="include normally excluded private/cache paths",
     )
+    parser.add_argument("--documents", action="store_true", help="enable local document extraction; requires the documents extra")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -1421,6 +1431,15 @@ def build_parser() -> argparse.ArgumentParser:
     grep_parser.add_argument("--max-results", type=int, default=DEFAULT_MAX_SEARCH_RESULTS)
     add_budget_arguments(grep_parser)
     grep_parser.set_defaults(func=command_grep)
+
+    retrieve_parser = subparsers.add_parser("retrieve", help="rank redacted passages by keyword relevance")
+    retrieve_parser.add_argument("query")
+    retrieve_parser.add_argument("paths", nargs="*")
+    retrieve_parser.add_argument("--glob", action="append", default=[])
+    retrieve_parser.add_argument("--max-results", type=int, default=8)
+    retrieve_parser.add_argument("--max-chars", type=int, default=12_000)
+    add_budget_arguments(retrieve_parser)
+    retrieve_parser.set_defaults(func=command_retrieve, max_files=DEFAULT_MAX_FILES, max_seconds=DEFAULT_MCP_SEARCH_SECONDS)
 
     stat_parser = subparsers.add_parser("stat", help="show redacted path metadata")
     stat_parser.add_argument("path")
@@ -1651,7 +1670,7 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config(root, args.config.expanduser().resolve() if args.config else None)
     if args.detector_profile:
         config = replace(config, detector_profile=args.detector_profile)
-    ctx = RedactedContext(root, config, include_private=args.include_private)
+    ctx = RedactedContext(root, config, include_private=args.include_private, documents=args.documents)
     redactor = Redactor(config, mode=args.mode)
     return args.func(args, ctx, redactor)
 
