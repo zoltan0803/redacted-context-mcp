@@ -52,7 +52,7 @@ def write_pdf(path: Path, text: str = TEXT) -> None:
 class DocumentBoundaryTest(unittest.TestCase):
     def test_plain_text_path_never_imports_optional_library(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             file = root / "notes.txt"
             file.write_text("ordinary text", encoding="utf-8")
             with patch.object(documents.importlib.util, "find_spec", side_effect=AssertionError("optional library loaded")):
