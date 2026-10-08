@@ -128,9 +128,6 @@ from .models import (
 from .paths import display_ref, path_id, rel_posix, resolve_under_root
 from .redaction import Redactor, compile_literal_pattern, normalize_alias
 from .rendering import (
-    format_github_issue_detail,
-    format_github_issue_summary,
-    format_github_labels,
     github_issue_detail_text,
     github_issue_list_text,
     github_issue_search_text,

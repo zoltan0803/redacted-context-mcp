@@ -27,10 +27,12 @@ claim of hard OS isolation.
 
 - Configured private values must not appear in CLI output, MCP tool content,
   MCP resources, errors, paths, metadata, or logs.
-- Source adapters return raw content plus opaque references and never redact
-  themselves; every source's content is redacted by the CLI/MCP boundary
-  before output. Source references never contain raw paths, logins, or
-  upstream repository names.
+- Source adapters return raw content plus opaque references and do not import
+  the redaction layer. Every content field they yield (file text and paths,
+  issue titles, bodies, labels, states, and timestamps) is redacted by the
+  CLI/MCP boundary before output; upstream issue numbers and counts are printed
+  only as validated non-negative integers. Source references never contain raw
+  paths, logins, or upstream repository names.
 - Multi-line secrets are redacted before search results are split into lines.
 - Dynamic upstream errors are summarized without relaying raw response text.
 - Bare 256-bit-plus hex strings (the persisted vault-salt shape), salt-keyed
@@ -129,6 +131,8 @@ claim of hard OS isolation.
   enforcement boundary.
 - MCP stdio request lines are size-capped so a client cannot exhaust server
   memory with an unbounded line, including unterminated final lines.
+- GitHub API responses are read up to a fixed byte cap (8 MiB); a larger
+  response fails closed with an input-free error.
 - MCP resources are cached only after redaction, bounded by bytes, and
   invalidated by file metadata changes, redaction mode/config changes, submit
   writes, or explicit index refresh.

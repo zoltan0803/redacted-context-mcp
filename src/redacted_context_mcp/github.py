@@ -29,12 +29,15 @@ from .models import (
     UNKNOWN_REFERENCE_MESSAGE,
     GitHubRepoConfig,
     RedactionConfig,
-    SourceCapabilities,
     SourceDocument,
 )
 
 ISSUE_NUMBER_RE = re.compile(r"[1-9][0-9]{0,9}")
 UNKNOWN_REPO_ALIAS_MESSAGE = "Unknown GitHub repo alias."
+# Upper bound on one upstream response body. Larger responses fail closed
+# with an input-free message instead of being buffered without limit.
+GITHUB_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+GITHUB_RESPONSE_TOO_LARGE_MESSAGE = "GitHub response too large."
 
 
 @dataclass(frozen=True)
@@ -52,36 +55,54 @@ class GitHubIssue:
 
     ``repo_alias`` is the operator-chosen neutral alias, never owner/repo.
     ``title``, ``body``, ``state``, timestamps, and ``labels`` are raw
-    upstream text and must be redacted before output.
+    upstream text and must be redacted before output. ``number`` and the
+    counts are validated non-negative integers, so they are safe to print;
+    ``number`` is ``None`` when upstream sent no valid issue number.
     """
 
     repo_alias: str
-    number: str
+    number: int | None
     state: str
     title: str
     created_at: str
     updated_at: str
     body: str
     labels: tuple[str, ...]
-    comment_count: str
+    comment_count: int
     assignee_count: int
 
     @property
+    def display_number(self) -> str:
+        return "?" if self.number is None else str(self.number)
+
+    @property
     def ref(self) -> str:
-        return f"{self.repo_alias}#{self.number}"
+        return f"{self.repo_alias}#{self.display_number}"
+
+
+def nonnegative_int(value: object) -> int | None:
+    """Return ``value`` only if it is a real non-negative integer.
+
+    Upstream numeric fields are printed without redaction, so anything else
+    (strings, floats, booleans, nested values) is discarded rather than
+    stringified into output.
+    """
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
 
 
 def github_issue_from_api(repo_alias: str, issue: dict[str, object]) -> GitHubIssue:
     return GitHubIssue(
         repo_alias=repo_alias,
-        number=str(issue.get("number", "?")),
+        number=nonnegative_int(issue.get("number")),
         state=str(issue.get("state", "")),
         title=str(issue.get("title", "")),
         created_at=str(issue.get("created_at", "")),
         updated_at=str(issue.get("updated_at", "")),
         body=str(issue.get("body") or ""),
         labels=github_label_names(issue),
-        comment_count=str(issue.get("comments", 0)),
+        comment_count=nonnegative_int(issue.get("comments")) or 0,
         assignee_count=count_github_assignees(issue),
     )
 
@@ -102,7 +123,7 @@ class GitHubSource:
     # Issue text is fetched on demand per tool call. Bulk document iteration
     # is deliberately not offered: no tool needs it, and it would turn ranked
     # retrieval into an upstream crawl over untrusted text.
-    capabilities = SourceCapabilities(listing=True, reading=True, searching=True, documents=False)
+    supports_document_iteration = False
 
     def __init__(self, config: RedactionConfig) -> None:
         self.config = config
@@ -143,9 +164,6 @@ class GitHubSource:
     ) -> Iterator[SourceDocument]:
         raise SystemExit(DOCUMENTS_UNSUPPORTED_MESSAGE)
 
-    def author_alias(self, user: object, repo_alias: str) -> str:
-        return opaque_github_user(user, self.config, repo_alias)
-
     def list_issues(self, repo_alias: str, *, state: str, labels: list[str], limit: int) -> list[GitHubIssue]:
         issues = github_list_issues(self.config, repo_alias=repo_alias, state=state, labels=labels, limit=limit)
         return [github_issue_from_api(repo_alias, issue) for issue in issues]
@@ -160,6 +178,25 @@ class GitHubSource:
     def read_comments(self, repo_alias: str, number: int, *, limit: int) -> list[GitHubComment]:
         comments = github_read_issue_comments(self.config, repo_alias=repo_alias, number=number, limit=limit)
         return [github_comment_from_api(comment, self.config, repo_alias) for comment in comments]
+
+    def issue_detail(
+        self,
+        repo_alias: str,
+        number: int,
+        *,
+        comments: bool,
+        max_comments: int,
+    ) -> tuple[GitHubIssue, list[GitHubComment]]:
+        """Fetch one issue and, when requested, up to ``max_comments`` comments.
+
+        Callers validate limits before calling; this performs the upstream
+        requests only.
+        """
+        issue = self.read_issue(repo_alias, number)
+        comment_records: list[GitHubComment] = []
+        if comments and max_comments > 0:
+            comment_records = self.read_comments(repo_alias, number, limit=max_comments)
+        return issue, comment_records
 
 
 def get_github_repo_config(config: RedactionConfig, alias: str) -> GitHubRepoConfig:
@@ -208,15 +245,18 @@ def github_api_request(repo_alias: str, repo_config: GitHubRepoConfig, path: str
     request = urllib.request.Request(url, headers=headers, method="GET")
     try:
         with urllib.request.urlopen(request, timeout=30, context=github_ssl_context()) as response:
-            body = response.read().decode("utf-8", errors="replace")
+            raw_body = response.read(GITHUB_MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
-        exc.read()
+        exc.read(GITHUB_MAX_RESPONSE_BYTES + 1)
         raise SystemExit(
             f"GitHub request failed for repo alias '{repo_alias}' ({exc.code}). "
             f"Check that the repo alias is configured and {repo_config.token_env} has access."
         ) from exc
     except urllib.error.URLError as exc:
         raise SystemExit(format_github_url_error(exc)) from exc
+    if len(raw_body) > GITHUB_MAX_RESPONSE_BYTES:
+        raise SystemExit(GITHUB_RESPONSE_TOO_LARGE_MESSAGE)
+    body = raw_body.decode("utf-8", errors="replace")
 
     try:
         return json.loads(body)

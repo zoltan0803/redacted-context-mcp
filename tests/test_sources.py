@@ -10,7 +10,6 @@ from __future__ import annotations
 import ast
 import hashlib
 import hmac
-import json
 import os
 import tempfile
 import time
@@ -19,15 +18,14 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from redacted_context_mcp import core, retrieval, server
+from redacted_context_mcp import core, rendering, retrieval, server
 from redacted_context_mcp.filesystem import RedactedContext
-from redacted_context_mcp.github import GitHubSource
+from redacted_context_mcp.github import GitHubSource, opaque_github_user
 from redacted_context_mcp.limits import OperationBudget, OperationLimitError
 from redacted_context_mcp.models import (
     DOCUMENTS_UNSUPPORTED_MESSAGE,
     UNKNOWN_REFERENCE_MESSAGE,
     RedactionConfig,
-    SourceCapabilities,
 )
 from redacted_context_mcp.redaction import Redactor
 from redacted_context_mcp.sources import ContextSource, SourceRegistry, build_sources
@@ -36,25 +34,23 @@ from tests.fixtures import (
     CONTEXT_REL_PATH,
     ORGANIZATION_NAME,
     PERSON_ONE,
+    FakeHttpResponse,
     InMemorySource,
+    load_snapshot,
     write_knowledgebase,
     write_redaction_config,
 )
-from tests.test_github import FakeHttpResponse
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "redacted_context_mcp"
 
-# Pinned agent-visible MCP surface: SHA-256 of ``json.dumps(result,
-# sort_keys=True)`` for tools/list (without and with --enable-writes) and
-# resources/templates/list. Changing the surface must be deliberate: recompute
-# these and keep examples/mcp-inspector.json validation in mind.
-TOOLS_READ_ONLY_SHA256 = "1dff26d1a7da7b807ade9d582bae73bb82a3e7e21d8e11e4fc52df49ddf03b96"
-TOOLS_WITH_WRITES_SHA256 = "cb0aa5c0a607968efec175832bf4f80231f0acf7908aa1a952c4f95a2ac5c39a"
-RESOURCE_TEMPLATES_SHA256 = "ce822b37338d3a866809982b4b84b516b203f77467e2220e7b86fd53d5fb7cc7"
-
-
-def surface_digest(value: object) -> str:
-    return hashlib.sha256(json.dumps(value, sort_keys=True).encode("utf-8")).hexdigest()
+# The agent-visible MCP surface is pinned by JSON snapshots in tests/snapshots
+# (tools/list without and with --enable-writes, resources/templates/list).
+# Changing the surface must be deliberate: regenerate them with
+# ``json.dumps(value, sort_keys=True, indent=2)`` plus a trailing newline and
+# keep examples/mcp-inspector.json validation in mind.
+TOOLS_READ_ONLY_SNAPSHOT = "tools_list_read_only.json"
+TOOLS_WITH_WRITES_SNAPSHOT = "tools_list_with_writes.json"
+RESOURCE_TEMPLATES_SNAPSHOT = "resource_templates.json"
 
 # Candidate references that are malformed for every source, or belong to a
 # different source's namespace. Each source must refuse the ones it does not
@@ -94,7 +90,7 @@ class SourceConformance:
 
     expected_name: str
     expected_untrusted: bool
-    expected_capabilities: SourceCapabilities
+    expected_supports_document_iteration: bool
 
     # Subclass hooks -------------------------------------------------------
 
@@ -130,7 +126,9 @@ class SourceConformance:
         self.assertIsInstance(source, ContextSource)  # type: ignore[attr-defined]
         self.assertEqual(source.name, self.expected_name)  # type: ignore[attr-defined]
         self.assertIs(source.untrusted_content, self.expected_untrusted)  # type: ignore[attr-defined]
-        self.assertEqual(source.capabilities, self.expected_capabilities)  # type: ignore[attr-defined]
+        self.assertIs(  # type: ignore[attr-defined]
+            source.supports_document_iteration, self.expected_supports_document_iteration
+        )
 
     def test_resolves_its_own_references(self) -> None:
         source = self.make_source()
@@ -165,7 +163,7 @@ class SourceConformance:
 
     def test_document_iteration_honors_budget(self) -> None:
         source = self.make_source()
-        if not source.capabilities.documents:
+        if not source.supports_document_iteration:
             budget = OperationBudget(max_files=5)
             with patch("urllib.request.urlopen", side_effect=AssertionError("network used")):
                 with self.assertRaises(SystemExit) as caught:  # type: ignore[attr-defined]
@@ -222,7 +220,7 @@ class TempRootMixin:
 class FilesystemSourceConformanceTest(TempRootMixin, SourceConformance, unittest.TestCase):
     expected_name = "filesystem"
     expected_untrusted = False
-    expected_capabilities = SourceCapabilities(listing=True, reading=True, searching=True, documents=True)
+    expected_supports_document_iteration = True
 
     def setUp(self) -> None:
         super().setUp()
@@ -271,11 +269,39 @@ class FilesystemSourceConformanceTest(TempRootMixin, SourceConformance, unittest
         with self.assertRaises(OperationLimitError):
             list(self.make_source().iter_documents(OperationBudget(max_entries=1)))
 
+    def test_resource_uris_resolve_through_the_source(self) -> None:
+        mcp = server.RedactedContextMcp(root=self.root, config_path=None, mode="strict", include_private=False)
+        ref_id = mcp.ctx.path_id(CONTEXT_REL_PATH)
+        uri = server.resource_uri(ref_id)
+        with patch.object(mcp.ctx, "resolve_reference", wraps=mcp.ctx.resolve_reference) as resolve:
+            contents = mcp.read_resource({"uri": uri})["contents"]
+        self.assertEqual(resolve.call_args.args, (uri,))
+        self.assertEqual(contents[0]["uri"], uri)
+        refused = (
+            "redctx://",
+            "redctx://p_",
+            "redctx://p_xyz",
+            f"redctx://@{ref_id}",
+            f"redctx://{ref_id}0",
+            f"redctx://redctx://{ref_id}",
+            f"@{ref_id}",
+            ref_id,
+            "file:///etc/passwd",
+            "redctx://p_000000000000",
+            server.resource_uri(mcp.ctx.path_id("personal/secret.md")),
+            server.resource_uri(mcp.ctx.path_id(".agent-context-redactor.toml")),
+        )
+        for candidate in refused:
+            with self.subTest(uri=candidate):
+                with self.assertRaises(server.ProtocolError) as caught:
+                    mcp.read_resource({"uri": candidate})
+                self.assertEqual(str(caught.exception), "Resource not found.")
+
 
 class GitHubSourceConformanceTest(TempRootMixin, SourceConformance, unittest.TestCase):
     expected_name = "github"
     expected_untrusted = True
-    expected_capabilities = SourceCapabilities(listing=True, reading=True, searching=True, documents=False)
+    expected_supports_document_iteration = False
 
     def setUp(self) -> None:
         super().setUp()
@@ -334,15 +360,57 @@ class GitHubSourceConformanceTest(TempRootMixin, SourceConformance, unittest.Tes
         self.assertIn(PERSON_ONE, read.body)
 
     def test_author_alias_derivation_is_unchanged(self) -> None:
-        source = self.make_source()
         expected = hmac.new(
             self.config.salt.encode("utf-8"),
             b"github-user:context:person-one",
             hashlib.sha256,
         ).hexdigest()[:16]
-        self.assertEqual(source.author_alias({"login": "person-one"}, "context"), f"user_{expected}")
-        self.assertEqual(source.author_alias({"login": ""}, "context"), "user_unknown")
-        self.assertEqual(source.author_alias(None, "context"), "user_unknown")
+        self.assertEqual(opaque_github_user({"login": "person-one"}, self.config, "context"), f"user_{expected}")
+        self.assertEqual(opaque_github_user({"login": ""}, self.config, "context"), "user_unknown")
+        self.assertEqual(opaque_github_user(None, self.config, "context"), "user_unknown")
+        comments = [{"created_at": "2026-06-11T12:00:00Z", "body": "ok", "user": {"login": "person-one"}}]
+        with patch("redacted_context_mcp.github.urllib.request.urlopen", return_value=FakeHttpResponse(comments)):
+            read_comments = self.make_source().read_comments("context", 7, limit=5)
+        self.assertEqual([comment.author for comment in read_comments], [f"user_{expected}"])
+
+    def test_issue_detail_fetches_comments_only_when_requested(self) -> None:
+        issue = {"number": 7, "state": "open", "title": "t", "comments": 1}
+        comments = [{"created_at": "2026-06-11T12:00:00Z", "body": "ok", "user": None}]
+        source = self.make_source()
+        urlopen = "redacted_context_mcp.github.urllib.request.urlopen"
+        with patch(urlopen, side_effect=[FakeHttpResponse(issue), FakeHttpResponse(comments)]) as called:
+            record, records = source.issue_detail("context", 7, comments=True, max_comments=5)
+        self.assertEqual((record.ref, len(records), called.call_count), ("context#7", 1, 2))
+        for flag, limit in ((False, 5), (True, 0)):
+            with self.subTest(comments=flag, max_comments=limit):
+                with patch(urlopen, side_effect=[FakeHttpResponse(issue)]) as called:
+                    _record, records = source.issue_detail("context", 7, comments=flag, max_comments=limit)
+                self.assertEqual((records, called.call_count), ([], 1))
+
+    def test_limits_and_state_are_validated_before_any_request(self) -> None:
+        source = self.make_source()
+        redactor = Redactor(self.config)
+        detail = dict(repo_alias="context", number=7, comments=True, max_comments=5, max_body_chars=100)
+        cases = (
+            (rendering.github_issue_detail_text, dict(detail, max_comments=-1), "--max-comments must be at least 0."),
+            (rendering.github_issue_detail_text, dict(detail, max_body_chars=0), "--max-body-chars must be at least 1."),
+            (
+                rendering.github_issue_list_text,
+                dict(repo_alias="context", state="draft", labels=[], limit=5),
+                "GitHub state must be open, closed, or all.",
+            ),
+            (
+                rendering.github_issue_search_text,
+                dict(repo_alias="context", query="q", state="open", limit=0),
+                "--limit must be at least 1.",
+            ),
+        )
+        for function, kwargs, message in cases:
+            with self.subTest(function=function.__name__, message=message):
+                with patch("urllib.request.urlopen", side_effect=AssertionError("network used")):
+                    with self.assertRaises(SystemExit) as caught:
+                        function(source, redactor, **kwargs)
+                self.assertEqual(str(caught.exception), message)
 
     def test_retrieval_refuses_sources_without_documents(self) -> None:
         redactor = Redactor(self.config)
@@ -359,7 +427,7 @@ class InMemorySourceConformanceTest(SourceConformance, unittest.TestCase):
 
     expected_name = "memory"
     expected_untrusted = True
-    expected_capabilities = SourceCapabilities(documents=True)
+    expected_supports_document_iteration = True
 
     DOCUMENTS = {
         f"inbox/{CLIENT_NAME} kickoff": f"{PERSON_ONE} wrote about the backup plan.\n",
@@ -395,14 +463,6 @@ class SourceRegistryTest(TempRootMixin, unittest.TestCase):
         self.assertEqual(both.names(), ("filesystem", "github"))
         self.assertIsInstance(both.github, GitHubSource)
         self.assertIs(both.get("filesystem"), both.filesystem)
-
-    def test_owner_of_routes_references_to_exactly_one_source(self) -> None:
-        write_redaction_config(self.root, github=True)
-        registry = build_sources(self.root, core.load_config(self.root, None))
-        self.assertIs(registry.owner_of("@p_000000000000"), registry.filesystem)
-        self.assertIs(registry.owner_of("context#7"), registry.github)
-        for ref in ("notes.txt", "unconfigured#7", "user_0123456789abcdef", ""):
-            self.assertIsNone(registry.owner_of(ref))
 
     def test_registry_requires_unique_names_and_a_filesystem_source(self) -> None:
         ctx = RedactedContext(self.root, RedactionConfig(salt="registry"))
@@ -443,15 +503,16 @@ class McpSurfaceTest(TempRootMixin, unittest.TestCase):
     """The agent-visible MCP surface does not depend on which sources are registered."""
 
     def test_tools_and_resource_templates_are_unchanged(self) -> None:
+        templates = load_snapshot(RESOURCE_TEMPLATES_SNAPSHOT)
         for github in (False, True):
             write_redaction_config(self.root, github=github)
-            for writes, expected in ((False, TOOLS_READ_ONLY_SHA256), (True, TOOLS_WITH_WRITES_SHA256)):
+            for writes, snapshot in ((False, TOOLS_READ_ONLY_SNAPSHOT), (True, TOOLS_WITH_WRITES_SNAPSHOT)):
                 with self.subTest(github=github, enable_writes=writes):
                     mcp = server.RedactedContextMcp(
                         root=self.root, config_path=None, mode="strict", include_private=False, enable_writes=writes
                     )
-                    self.assertEqual(surface_digest(mcp.list_tools()), expected)
-                    self.assertEqual(surface_digest(mcp.list_resource_templates()), RESOURCE_TEMPLATES_SHA256)
+                    self.assertEqual(mcp.list_tools(), load_snapshot(snapshot))
+                    self.assertEqual(mcp.list_resource_templates(), templates)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,10 @@ Sources return raw text and opaque references; this module turns structured
 records into output text and redacts every content field on the way out. It
 is shared by the ``redctx`` CLI and the MCP server so both surfaces render
 identical, already-redacted text.
+
+The ``*_text`` entry points validate every argument before any upstream
+request, make one ``GitHubSource`` call, and format the returned records.
+The ``render_*`` functions only format.
 """
 
 from __future__ import annotations
@@ -13,9 +17,6 @@ from .github import (
     GitHubComment,
     GitHubIssue,
     GitHubSource,
-    github_comment_from_api,
-    github_issue_from_api,
-    github_label_names,
     validate_github_state,
     validate_nonnegative_limit,
     validate_positive_limit,
@@ -56,7 +57,7 @@ def render_github_issue_detail(
     body = truncate_text(redactor.redact(issue.body), max_body_chars)
     lines = [
         f"repo: {issue.repo_alias}",
-        f"issue: #{issue.number}",
+        f"issue: #{issue.display_number}",
         f"state: {redactor.redact(issue.state)}",
         f"title: {title}",
         f"created_at: {redactor.redact(issue.created_at)}",
@@ -138,43 +139,9 @@ def github_issue_detail_text(
     max_comments: int,
     max_body_chars: int,
 ) -> str:
-    github = require_github_source(source)
-    issue = github.read_issue(repo_alias, number)
-    comment_records: list[GitHubComment] = []
     max_comments = validate_nonnegative_limit(max_comments, "--max-comments")
-    if comments and max_comments > 0:
-        comment_records = github.read_comments(repo_alias, number, limit=max_comments)
-    return render_github_issue_detail(
-        issue,
-        comment_records,
-        redactor,
-        max_body_chars=validate_positive_limit(max_body_chars, "--max-body-chars"),
+    max_body_chars = validate_positive_limit(max_body_chars, "--max-body-chars")
+    issue, comment_records = require_github_source(source).issue_detail(
+        repo_alias, number, comments=comments, max_comments=max_comments
     )
-
-
-# Compatibility wrappers for the historical dict-based formatting API that
-# ``core`` re-exports. New code should fetch records through ``GitHubSource``.
-
-
-def format_github_issue_summary(repo_alias: str, issue: dict[str, object], redactor: Redactor) -> str:
-    return render_github_issue_summary(github_issue_from_api(repo_alias, issue), redactor)
-
-
-def format_github_issue_detail(
-    repo_alias: str,
-    issue: dict[str, object],
-    comments: list[dict[str, object]],
-    redactor: Redactor,
-    *,
-    max_body_chars: int,
-) -> str:
-    return render_github_issue_detail(
-        github_issue_from_api(repo_alias, issue),
-        [github_comment_from_api(comment, redactor.config, repo_alias) for comment in comments],
-        redactor,
-        max_body_chars=max_body_chars,
-    )
-
-
-def format_github_labels(issue: dict[str, object], redactor: Redactor) -> str:
-    return render_github_labels(github_label_names(issue), redactor)
+    return render_github_issue_detail(issue, comment_records, redactor, max_body_chars=max_body_chars)

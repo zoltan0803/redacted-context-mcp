@@ -169,6 +169,10 @@ class SourceRetrievalTest(unittest.TestCase):
             self.assertEqual(run("database backup recovery"), GOLDEN_RETRIEVE_ALL)
             self.assertEqual(run("database", paths=[ctx.display_ref("docs")], globs=["*.md"]), GOLDEN_RETRIEVE_DOCS_MD)
             self.assertEqual(run("database", max_results=2, max_chars=400), GOLDEN_RETRIEVE_LIMITED)
+            # The filesystem is operator-controlled, so its passages carry no
+            # untrusted marker.
+            self.assertFalse(ctx.untrusted_content)
+            self.assertNotIn("untrusted_external", GOLDEN_RETRIEVE_ALL)
 
     def test_retrieve_ranks_documents_from_a_non_filesystem_source(self) -> None:
         config = RedactionConfig(salt="memory-retrieval", people=("Taylor Reed",))
@@ -185,6 +189,13 @@ class SourceRetrievalTest(unittest.TestCase):
         # Highest coverage first; the raw locator is rendered through path redaction.
         self.assertTrue(lines[0].startswith(f"--- {source.reference_for('inbox/kickoff')} "))
         self.assertIn("/kickoff lines 1-2 score=", lines[0])
+        # The fake source declares untrusted content: every passage header
+        # ends with the marker as its last field.
+        self.assertTrue(source.untrusted_content)
+        headers = [line for line in lines if line.startswith("--- @m_")]
+        self.assertEqual(len(headers), 2)
+        for header in headers:
+            self.assertRegex(header, r" score=[0-9.]+ untrusted_external ---$")
         self.assertIn(source.reference_for("inbox/lunch"), result)
         self.assertNotIn(source.reference_for("archive/old"), result)
         self.assertNotIn("Taylor", result)

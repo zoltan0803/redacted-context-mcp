@@ -169,6 +169,39 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertEqual(removed["content"][0]["text"], "Unknown GitHub repo alias.")
         self.assertNotIn("example-owner", json.dumps(removed))
 
+    def test_source_build_failure_blocks_and_recovers(self) -> None:
+        self.assertIn("quokkaproject", self.read())
+        old_sources = self.mcp.sources
+        old_redactor = self.mcp.redactor
+        self.assertEqual(self.mcp.cache.stats()["entries"], 1)
+        real_build_sources = server.rc.build_sources
+        calls: list[int] = []
+
+        def build_sources_failing_once(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError(f"quokkaproject {self.root}")
+            return real_build_sources(*args, **kwargs)
+
+        self.write_config('terms = ["quokkaproject"]\n')
+        with patch.object(server.rc, "build_sources", build_sources_failing_once):
+            with self.assertRaisesRegex(server.ProtocolError, "Context access is blocked") as caught:
+                self.read()
+            self.assertNotIn("quokkaproject", str(caught.exception))
+            self.assertNotIn(str(self.root), str(caught.exception))
+            # The old sources and redactor stay published; cached content is gone.
+            self.assertIs(self.mcp.sources, old_sources)
+            self.assertIs(self.mcp.redactor, old_redactor)
+            self.assertEqual(self.mcp.cache.stats()["entries"], 0)
+
+            recovered = self.read()
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("quokkaproject", recovered)
+        self.assertIn("[SENSITIVE_", recovered)
+        self.assertIsNot(self.mcp.sources, old_sources)
+        self.assertIsNot(self.mcp.redactor, old_redactor)
+        self.assertIs(self.mcp.redactor.config, self.mcp.ctx.config)
+
     def test_removed_config_blocks_instead_of_falling_back(self) -> None:
         self.config.unlink()
         with self.assertRaisesRegex(server.ProtocolError, "Context access is blocked"):

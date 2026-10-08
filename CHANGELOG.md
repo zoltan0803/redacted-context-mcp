@@ -11,11 +11,17 @@
   renderer, and the MCP GitHub tools call the GitHub source directly instead
   of routing through CLI command plumbing. Tool names, schemas, output text,
   error messages, placeholders, path ids, and author aliases are unchanged.
+- GitHub issue numbers and comment counts are printed only when upstream sends
+  non-negative integers (otherwise `?` and `0`), so crafted upstream values
+  cannot bypass redaction. GitHub responses larger than 8 MiB now fail with
+  `GitHub response too large.`, and GitHub limit arguments are validated
+  before any upstream request.
 - Ranked retrieval now ranks documents yielded by a source rather than walking
   the filesystem itself, with identical ranking, citations, and limits.
-- Live policy reload rebuilds the registered sources together with the
-  redaction rules, so adding or removing `[github.repos.<alias>]` takes effect
-  on the next request without a restart.
+- Live policy reload rebuilds the whole source registry (filesystem and
+  GitHub) together with the redaction rules from the same validated policy. A
+  failed rebuild blocks context access and keeps the previous sources, like any
+  other invalid policy.
 - Adds source conformance tests and pins the advertised MCP tool surface.
 
 ## 0.8.0 — 2026-09-12

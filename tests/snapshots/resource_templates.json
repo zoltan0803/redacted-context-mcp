@@ -1,0 +1,11 @@
+{
+  "resourceTemplates": [
+    {
+      "description": "Read a redacted text file by opaque p_<id> path id.",
+      "mimeType": "text/plain",
+      "name": "redacted_context_file",
+      "title": "Redacted Context File",
+      "uriTemplate": "redctx://{path_id}"
+    }
+  ]
+}

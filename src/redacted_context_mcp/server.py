@@ -415,11 +415,9 @@ class RedactedContextMcp:
     def path_for_resource_uri(self, uri: str) -> Path:
         if not uri.startswith(RESOURCE_URI_PREFIX):
             raise ProtocolError(-32002, "Resource not found.")
-        ref_id = uri[len(RESOURCE_URI_PREFIX) :]
-        if not isinstance(ref_id, str) or not ref_id.startswith("p_"):
-            raise ProtocolError(-32002, "Resource not found.")
         try:
-            return self.ctx.resolve_id(ref_id, budget=self.traversal_budget())
+            # The filesystem source is the single resolver for opaque refs.
+            return self.ctx.resolve_reference(uri, budget=self.traversal_budget())
         except SystemExit as exc:
             raise ProtocolError(-32002, "Resource not found.") from exc
 
@@ -653,6 +651,7 @@ def safe_error_message(exc: SystemExit, redactor: rc.Redactor) -> str:
         "Unknown GitHub repo alias.",
         "GitHub issue was not found.",
         "Could not reach GitHub API.",
+        "GitHub response too large.",
         "GitHub state must be open, closed, or all.",
         "Invalid regex.",
         rc.UNSAFE_REGEX_MESSAGE,

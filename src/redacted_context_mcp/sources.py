@@ -15,12 +15,12 @@ a source yields is raw and must pass through the CLI/MCP redaction boundary
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, Iterator, Protocol, Sequence, runtime_checkable
+from typing import Iterable, Iterator, Protocol, Sequence, cast, runtime_checkable
 
 from .filesystem import RedactedContext
 from .github import GitHubSource
 from .limits import OperationBudget
-from .models import RedactionConfig, SourceCapabilities, SourceDocument
+from .models import RedactionConfig, SourceDocument
 
 
 @runtime_checkable
@@ -30,8 +30,8 @@ class ContextSource(Protocol):
     - ``name``: stable registry key such as ``"filesystem"`` or ``"github"``.
     - ``untrusted_content``: true when text comes from outside the operator's
       control (for example upstream issue bodies); outputs must label it.
-    - ``capabilities``: which tool families the source backs and whether
-      ``iter_documents`` is supported.
+    - ``supports_document_iteration``: whether ``iter_documents`` yields
+      documents for source-agnostic scans such as ranked retrieval.
     - ``owns_reference(ref)``: whether ``ref`` is in this source's opaque
       reference namespace. Purely syntactic plus configuration; no I/O.
     - ``resolve_reference(ref)``: map an owned opaque reference to the
@@ -41,13 +41,13 @@ class ContextSource(Protocol):
     - ``iter_documents(budget, scope=..., patterns=...)``: yield raw
       ``SourceDocument`` items under ``budget``. Exceeding a limit raises
       ``OperationLimitError`` rather than truncating silently. Sources that
-      do not declare ``capabilities.documents`` raise ``SystemExit`` before
-      any I/O or budget consumption.
+      do not declare ``supports_document_iteration`` raise ``SystemExit``
+      before any I/O or budget consumption.
     """
 
     name: str
     untrusted_content: bool
-    capabilities: SourceCapabilities
+    supports_document_iteration: bool
 
     def owns_reference(self, ref: str) -> bool: ...
 
@@ -88,19 +88,13 @@ class SourceRegistry:
 
     @property
     def filesystem(self) -> RedactedContext:
-        source = self._sources["filesystem"]
-        assert isinstance(source, RedactedContext)
-        return source
+        # The constructor guarantees this entry is a ``RedactedContext``.
+        return cast(RedactedContext, self._sources["filesystem"])
 
     @property
     def github(self) -> GitHubSource | None:
         source = self._sources.get("github")
         return source if isinstance(source, GitHubSource) else None
-
-    def owner_of(self, ref: str) -> ContextSource | None:
-        """Return the single source whose namespace contains ``ref``, if any."""
-        owners = [source for source in self._sources.values() if source.owns_reference(ref)]
-        return owners[0] if len(owners) == 1 else None
 
 
 def build_sources(

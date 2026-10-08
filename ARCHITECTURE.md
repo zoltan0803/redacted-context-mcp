@@ -19,12 +19,12 @@ agent workspace
 ```
 
 The agent should start from a neutral workspace that does not contain the raw
-private context files. The MCP server receives tool calls and dispatches them
-to a registered source. The filesystem source resolves paths inside the
-configured root and reads allowed text files; the GitHub source fetches issues
-for configured aliases. Sources return raw text plus opaque references, and the
-server or CLI redacts every content field before returning only the redacted
-result. If controlled writes are enabled, generated redacted text
+private context files. The MCP server receives tool calls: file tools use the
+filesystem source directly, which resolves paths inside the configured root and
+reads allowed text files, and GitHub tools call the GitHub source, which
+fetches issues for configured aliases. Sources return raw text plus opaque
+references, and the server or CLI redacts every content field before returning
+only the redacted result. If controlled writes are enabled, generated redacted text
 can be rehydrated locally and written under a configured private-root
 subdirectory.
 
@@ -71,18 +71,23 @@ The protocol surface is deliberately small:
 
 - `name`: stable registry key (`"filesystem"`, `"github"`).
 - `untrusted_content`: true for text outside the operator's control, such as
-  GitHub issues; its output is labelled (`untrusted_title=`,
+  GitHub issues. Ranked retrieval appends `untrusted_external` to the passage
+  header of every passage from such a source. GitHub rendering does not read
+  the flag; it labels issue text with fixed field names (`untrusted_title=`,
   `body_untrusted_external:`, `comment_untrusted_external:`).
-- `capabilities`: `SourceCapabilities(listing, reading, searching, documents)`.
+- `supports_document_iteration`: whether `iter_documents` yields documents for
+  source-agnostic scans such as ranked retrieval. (This is unrelated to
+  `RedactedContext.documents`, which enables Office/PDF extraction.)
 - `owns_reference(ref)` and `resolve_reference(ref)`: syntactic ownership and
   resolution of the source's own opaque references. Raw paths, foreign
   references, and malformed or unknown references are refused with messages
-  that never echo raw identifiers.
+  that never echo raw identifiers. MCP `redctx://p_<id>` resource URIs are
+  resolved through the filesystem source's `resolve_reference`.
 - `iter_documents(budget, scope=..., patterns=...)`: yield raw
   `SourceDocument(ref, locator, text)` items while charging traversal, file,
   byte, and deadline limits to the shared `OperationBudget`. Exceeding a limit
   fails closed with `OperationLimitError`. Sources that do not declare
-  `capabilities.documents` refuse before any I/O.
+  `supports_document_iteration` refuse before any I/O.
 
 `RedactedContext` is the filesystem source. `GitHubSource` serves GitHub
 issues as structured `GitHubIssue` / `GitHubComment` records whose authors are
@@ -99,8 +104,9 @@ write-subdirectory pruning, and operator-only raw output.
 
 ### Adding a Source
 
-1. Implement `ContextSource` (`name`, `untrusted_content`, `capabilities`,
-   `owns_reference`, `resolve_reference`, `iter_documents`) in its own module.
+1. Implement `ContextSource` (`name`, `untrusted_content`,
+   `supports_document_iteration`, `owns_reference`, `resolve_reference`,
+   `iter_documents`) in its own module.
    Do not import `redaction` or `rendering` from it.
 2. Return raw text plus opaque references only. Derive references with the
    vault salt (HMAC) or neutral operator-chosen aliases, and never place raw
@@ -110,6 +116,11 @@ write-subdirectory pruning, and operator-only raw output.
 4. Charge every entry, document, byte, and deadline check to the supplied
    `OperationBudget` (`consume_entry`, `consume_file`, `consume_document`,
    `check_deadline`) and fail closed when a limit is exceeded.
+   `consume_document` is the hook for documents that are not standalone files
+   (the in-memory test source uses it); the filesystem source uses
+   `consume_file`. GitHub does not iterate documents: its fetches are bounded
+   by the response-size cap and per-request page and result limits rather than
+   `OperationBudget`.
 5. Register it in `build_sources` so live policy reload rebuilds it with the
    redactor, and render its output through the redaction boundary.
 6. Add it to `tests/test_sources.py` by subclassing `SourceConformance`, and
@@ -240,7 +251,10 @@ The GitHub source is read-only and uses the token environment variable
 named in local config. It returns structured issue records with raw,
 untrusted text and opaque author aliases; `rendering.py` redacts titles,
 bodies, labels, states, and timestamps when formatting them for the CLI and
-MCP tools, which share the same code path.
+MCP tools, which share the same code path. Issue numbers and comment counts
+are kept only when upstream sends non-negative integers (otherwise they print
+as `?` and `0`). Each upstream response body is capped at 8 MiB; larger
+responses fail with an input-free error.
 
 ## Security Posture
 

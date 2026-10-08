@@ -11,21 +11,6 @@ DOCUMENTS_UNSUPPORTED_MESSAGE = "Source does not support document iteration."
 
 
 @dataclass(frozen=True)
-class SourceCapabilities:
-    """What a context source can back.
-
-    ``listing``, ``reading``, and ``searching`` describe which tool families
-    the source serves. ``documents`` means ``iter_documents`` yields raw
-    documents for source-agnostic scans such as ranked retrieval.
-    """
-
-    listing: bool = False
-    reading: bool = False
-    searching: bool = False
-    documents: bool = False
-
-
-@dataclass(frozen=True)
 class SourceDocument:
     """One raw document yielded by a context source.
 

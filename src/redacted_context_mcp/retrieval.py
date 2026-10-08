@@ -83,7 +83,9 @@ def retrieve(
     """Rank redacted passages from ``source``'s documents.
 
     ``paths`` and ``globs`` are passed to the source as its document scope and
-    patterns. The source charges traversal and reads to ``budget``.
+    patterns. The source charges traversal and reads to ``budget``. Passages
+    from a source with ``untrusted_content`` carry an ``untrusted_external``
+    marker as the last header field.
     """
     if not 1 <= max_results <= 50 or not 256 <= max_chars <= 100_000:
         raise SystemExit("Retrieval requires max_results between 1 and 50 and max_chars between 256 and 100000.")
@@ -92,7 +94,7 @@ def retrieve(
     terms = set(tokens(query)) - STOP_WORDS
     if not terms or len(terms) > 64:
         raise SystemExit("Retrieval requires 1 to 64 searchable query terms.")
-    if not source.capabilities.documents:
+    if not source.supports_document_iteration:
         raise SystemExit(DOCUMENTS_UNSUPPORTED_MESSAGE)
     candidates: list[tuple[Passage, Counter[str], int]] = []
     frequency: Counter[str] = Counter()
@@ -127,10 +129,11 @@ def retrieve(
     output = ""
     selected = 0
     marker = "[TRUNCATED: more matching passages; narrow the query or increase limits]\n"
+    untrusted = " untrusted_external" if source.untrusted_content else ""
     for passage, _matches, _length in candidates[:max_results]:
         entry = (
             f"--- {passage.ref} {passage.path} lines {passage.start_line}-{passage.end_line} "
-            f"score={passage.score:.3f} ---\n{passage.text}\n\n"
+            f"score={passage.score:.3f}{untrusted} ---\n{passage.text}\n\n"
         )
         if len(output) + len(entry) + len(marker) > max_chars:
             # Return complete cited passages; do not mislabel truncated text

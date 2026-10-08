@@ -18,7 +18,7 @@ from .defaults import (
     TEXT_EXTENSIONS,
 )
 from .limits import OperationBudget, OperationLimitError
-from .models import RedactionConfig, SourceCapabilities, SourceDocument, UNKNOWN_REFERENCE_MESSAGE
+from .models import RedactionConfig, SourceDocument, UNKNOWN_REFERENCE_MESSAGE
 from .documents import (
     DOCUMENT_EXTENSIONS, LEGACY_OFFICE_EXTENSIONS, MAX_DOCUMENT_BYTES, EXTRACTION_SECONDS,
     DISABLED_MESSAGE, LEGACY_MESSAGE, extract_document, require_document_support,
@@ -39,7 +39,7 @@ class RedactedContext:
 
     name = "filesystem"
     untrusted_content = False
-    capabilities = SourceCapabilities(listing=True, reading=True, searching=True, documents=True)
+    supports_document_iteration = True
 
     def __init__(self, root: Path, config: RedactionConfig, *, include_private: bool = False, documents: bool = False):
         self.root = root.resolve()
