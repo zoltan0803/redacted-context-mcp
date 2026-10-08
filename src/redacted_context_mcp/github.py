@@ -1,4 +1,11 @@
-"""Read-only GitHub issue access through neutral repo aliases."""
+"""Read-only GitHub issue source through neutral repo aliases.
+
+This module is the ``github`` source adapter. It owns GitHub identity and
+reference opaqueness: repo aliases instead of owner/repo, ``<alias>#<number>``
+issue references, and salted ``user_<hex>`` author aliases. It returns raw,
+untrusted issue text in structured records and never redacts content itself;
+``rendering`` is the redaction boundary that formats those records for output.
+"""
 
 from __future__ import annotations
 
@@ -6,20 +13,159 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator, Sequence
 
 from .defaults import SYSTEM_CA_CANDIDATES
-from .models import GitHubRepoConfig, RedactionConfig
-from .redaction import Redactor
+from .limits import OperationBudget
+from .models import (
+    DOCUMENTS_UNSUPPORTED_MESSAGE,
+    UNKNOWN_REFERENCE_MESSAGE,
+    GitHubRepoConfig,
+    RedactionConfig,
+    SourceCapabilities,
+    SourceDocument,
+)
+
+ISSUE_NUMBER_RE = re.compile(r"[1-9][0-9]{0,9}")
+UNKNOWN_REPO_ALIAS_MESSAGE = "Unknown GitHub repo alias."
+
+
+@dataclass(frozen=True)
+class GitHubComment:
+    """One issue comment. ``author`` is an opaque alias; ``body`` is raw untrusted text."""
+
+    created_at: str
+    author: str
+    body: str
+
+
+@dataclass(frozen=True)
+class GitHubIssue:
+    """One issue as raw untrusted fields plus neutral identifiers.
+
+    ``repo_alias`` is the operator-chosen neutral alias, never owner/repo.
+    ``title``, ``body``, ``state``, timestamps, and ``labels`` are raw
+    upstream text and must be redacted before output.
+    """
+
+    repo_alias: str
+    number: str
+    state: str
+    title: str
+    created_at: str
+    updated_at: str
+    body: str
+    labels: tuple[str, ...]
+    comment_count: str
+    assignee_count: int
+
+    @property
+    def ref(self) -> str:
+        return f"{self.repo_alias}#{self.number}"
+
+
+def github_issue_from_api(repo_alias: str, issue: dict[str, object]) -> GitHubIssue:
+    return GitHubIssue(
+        repo_alias=repo_alias,
+        number=str(issue.get("number", "?")),
+        state=str(issue.get("state", "")),
+        title=str(issue.get("title", "")),
+        created_at=str(issue.get("created_at", "")),
+        updated_at=str(issue.get("updated_at", "")),
+        body=str(issue.get("body") or ""),
+        labels=github_label_names(issue),
+        comment_count=str(issue.get("comments", 0)),
+        assignee_count=count_github_assignees(issue),
+    )
+
+
+def github_comment_from_api(comment: dict[str, object], config: RedactionConfig, repo_alias: str) -> GitHubComment:
+    return GitHubComment(
+        created_at=str(comment.get("created_at", "")),
+        author=opaque_github_user(comment.get("user"), config, repo_alias),
+        body=str(comment.get("body") or ""),
+    )
+
+
+class GitHubSource:
+    """Read-only GitHub issue source for the configured ``[github.repos.*]`` aliases."""
+
+    name = "github"
+    untrusted_content = True
+    # Issue text is fetched on demand per tool call. Bulk document iteration
+    # is deliberately not offered: no tool needs it, and it would turn ranked
+    # retrieval into an upstream crawl over untrusted text.
+    capabilities = SourceCapabilities(listing=True, reading=True, searching=True, documents=False)
+
+    def __init__(self, config: RedactionConfig) -> None:
+        self.config = config
+
+    @classmethod
+    def from_config(cls, config: RedactionConfig) -> "GitHubSource | None":
+        return cls(config) if config.github_repos else None
+
+    def repo_aliases(self) -> list[str]:
+        return sorted(self.config.github_repos)
+
+    def owns_reference(self, ref: str) -> bool:
+        if not isinstance(ref, str):
+            return False
+        alias, separator, number = ref.rpartition("#")
+        return (
+            bool(separator)
+            and alias in self.config.github_repos
+            and ISSUE_NUMBER_RE.fullmatch(number) is not None
+        )
+
+    def resolve_reference(self, ref: str) -> tuple[str, int]:
+        """Resolve ``<repo_alias>#<number>`` to its alias and issue number."""
+        if not isinstance(ref, str):
+            raise SystemExit(UNKNOWN_REFERENCE_MESSAGE)
+        alias, separator, number = ref.rpartition("#")
+        if not separator or ISSUE_NUMBER_RE.fullmatch(number) is None:
+            raise SystemExit(UNKNOWN_REFERENCE_MESSAGE)
+        get_github_repo_config(self.config, alias)
+        return alias, int(number)
+
+    def iter_documents(
+        self,
+        budget: OperationBudget,
+        *,
+        scope: Sequence[str] = (),
+        patterns: Sequence[str] = (),
+    ) -> Iterator[SourceDocument]:
+        raise SystemExit(DOCUMENTS_UNSUPPORTED_MESSAGE)
+
+    def author_alias(self, user: object, repo_alias: str) -> str:
+        return opaque_github_user(user, self.config, repo_alias)
+
+    def list_issues(self, repo_alias: str, *, state: str, labels: list[str], limit: int) -> list[GitHubIssue]:
+        issues = github_list_issues(self.config, repo_alias=repo_alias, state=state, labels=labels, limit=limit)
+        return [github_issue_from_api(repo_alias, issue) for issue in issues]
+
+    def search_issues(self, repo_alias: str, *, query: str, state: str, limit: int) -> list[GitHubIssue]:
+        issues = github_search_issues(self.config, repo_alias=repo_alias, query=query, state=state, limit=limit)
+        return [github_issue_from_api(repo_alias, issue) for issue in issues]
+
+    def read_issue(self, repo_alias: str, number: int) -> GitHubIssue:
+        return github_issue_from_api(repo_alias, github_read_issue(self.config, repo_alias=repo_alias, number=number))
+
+    def read_comments(self, repo_alias: str, number: int, *, limit: int) -> list[GitHubComment]:
+        comments = github_read_issue_comments(self.config, repo_alias=repo_alias, number=number, limit=limit)
+        return [github_comment_from_api(comment, self.config, repo_alias) for comment in comments]
+
 
 def get_github_repo_config(config: RedactionConfig, alias: str) -> GitHubRepoConfig:
     repo_config = config.github_repos.get(alias)
     if repo_config is None:
-        raise SystemExit("Unknown GitHub repo alias.")
+        raise SystemExit(UNKNOWN_REPO_ALIAS_MESSAGE)
     return repo_config
 
 
@@ -218,56 +364,7 @@ def github_read_issue_comments(
     return [item for item in data[:limit] if isinstance(item, dict)]
 
 
-def format_github_issue_summary(repo_alias: str, issue: dict[str, object], redactor: Redactor) -> str:
-    number = str(issue.get("number", "?"))
-    state = redactor.redact(str(issue.get("state", "")))
-    updated = redactor.redact(str(issue.get("updated_at", "")))
-    title = redactor.redact(str(issue.get("title", "")))
-    labels = format_github_labels(issue, redactor)
-    comments = str(issue.get("comments", 0))
-    return f"{repo_alias}#{number}\tstate={state}\tupdated={updated}\tcomments={comments}\tlabels={labels}\tuntrusted_title={title}"
-
-
-def format_github_issue_detail(
-    repo_alias: str,
-    issue: dict[str, object],
-    comments: list[dict[str, object]],
-    redactor: Redactor,
-    *,
-    max_body_chars: int,
-) -> str:
-    number = str(issue.get("number", "?"))
-    title = redactor.redact(str(issue.get("title", "")))
-    body = truncate_text(redactor.redact(str(issue.get("body") or "")), max_body_chars)
-    lines = [
-        f"repo: {repo_alias}",
-        f"issue: #{number}",
-        f"state: {redactor.redact(str(issue.get('state', '')))}",
-        f"title: {title}",
-        f"created_at: {redactor.redact(str(issue.get('created_at', '')))}",
-        f"updated_at: {redactor.redact(str(issue.get('updated_at', '')))}",
-        f"labels: {format_github_labels(issue, redactor)}",
-        f"assignees: {count_github_assignees(issue)}",
-        "",
-        "body_untrusted_external:",
-        body,
-    ]
-    for index, comment in enumerate(comments, start=1):
-        comment_body = truncate_text(redactor.redact(str(comment.get("body") or "")), max_body_chars)
-        lines.extend(
-            [
-                "",
-                f"comment {index}:",
-                f"created_at: {redactor.redact(str(comment.get('created_at', '')))}",
-                f"author: {opaque_github_user(comment.get('user'), redactor.config, repo_alias)}",
-                "comment_untrusted_external:",
-                comment_body,
-            ]
-        )
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def format_github_labels(issue: dict[str, object], redactor: Redactor) -> str:
+def github_label_names(issue: dict[str, object]) -> tuple[str, ...]:
     raw_labels = issue.get("labels", [])
     labels: list[str] = []
     if isinstance(raw_labels, list):
@@ -277,8 +374,8 @@ def format_github_labels(issue: dict[str, object], redactor: Redactor) -> str:
             else:
                 name = str(label).strip()
             if name:
-                labels.append(redactor.redact(name))
-    return ", ".join(labels) if labels else "-"
+                labels.append(name)
+    return tuple(labels)
 
 
 def count_github_assignees(issue: dict[str, object]) -> int:
@@ -298,9 +395,3 @@ def opaque_github_user(user: object, config: RedactionConfig, repo_alias: str) -
         hashlib.sha256,
     ).hexdigest()[:16]
     return f"user_{digest}"
-
-
-def truncate_text(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    return text[:max_chars] + "\n[TRUNCATED]\n"

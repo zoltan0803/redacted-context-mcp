@@ -98,12 +98,10 @@ from .filesystem import (
 )
 from .limits import OperationBudget, OperationLimitError
 from .github import (
+    GitHubSource,
     count_github_assignees,
     default_ssl_paths_have_certs,
     extract_github_error,
-    format_github_issue_detail,
-    format_github_issue_summary,
-    format_github_labels,
     format_github_url_error,
     get_github_repo_config,
     github_api_request,
@@ -113,12 +111,13 @@ from .github import (
     github_search_issues,
     github_ssl_context,
     opaque_github_user,
-    truncate_text,
     validate_github_state,
     validate_nonnegative_limit,
     validate_positive_limit,
 )
 from .models import (
+    DOCUMENTS_UNSUPPORTED_MESSAGE,
+    UNKNOWN_REFERENCE_MESSAGE,
     DiscoveryDocument,
     DiscoveryParseError,
     DiscoveryResult,
@@ -128,7 +127,18 @@ from .models import (
 )
 from .paths import display_ref, path_id, rel_posix, resolve_under_root
 from .redaction import Redactor, compile_literal_pattern, normalize_alias
+from .rendering import (
+    format_github_issue_detail,
+    format_github_issue_summary,
+    format_github_labels,
+    github_issue_detail_text,
+    github_issue_list_text,
+    github_issue_search_text,
+    github_repos_text,
+    truncate_text,
+)
 from .retrieval import retrieve
+from .sources import SourceRegistry, build_sources
 from .documents import DOCUMENT_EXTENSIONS
 
 
@@ -1297,63 +1307,48 @@ def command_discover_update(
 
 
 def command_github_repos(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
-    for alias in sorted(redactor.config.github_repos):
-        print(alias)
+    print(github_repos_text(GitHubSource.from_config(redactor.config)), end="")
     return 0
 
 
 def command_github_issues(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
-    issues = github_list_issues(
-        redactor.config,
+    text = github_issue_list_text(
+        GitHubSource.from_config(redactor.config),
+        redactor,
         repo_alias=args.repo_alias,
-        state=validate_github_state(args.state),
+        state=args.state,
         labels=args.label,
-        limit=validate_positive_limit(args.limit, "--limit"),
+        limit=args.limit,
     )
-    for issue in issues:
-        print(format_github_issue_summary(args.repo_alias, issue, redactor))
-    return 0 if issues else 1
+    print(text, end="")
+    return 0 if text else 1
 
 
 def command_github_issue(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
-    issue = github_read_issue(
-        redactor.config,
+    text = github_issue_detail_text(
+        GitHubSource.from_config(redactor.config),
+        redactor,
         repo_alias=args.repo_alias,
         number=args.number,
+        comments=args.comments,
+        max_comments=args.max_comments,
+        max_body_chars=args.max_body_chars,
     )
-    comments: list[dict[str, object]] = []
-    max_comments = validate_nonnegative_limit(args.max_comments, "--max-comments")
-    if args.comments and max_comments > 0:
-        comments = github_read_issue_comments(
-            redactor.config,
-            repo_alias=args.repo_alias,
-            number=args.number,
-            limit=max_comments,
-        )
-    print(
-        format_github_issue_detail(
-            args.repo_alias,
-            issue,
-            comments,
-            redactor,
-            max_body_chars=validate_positive_limit(args.max_body_chars, "--max-body-chars"),
-        ),
-        end="",
-    )
+    print(text, end="")
     return 0
 
 
 def command_github_search(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
-    issues = github_search_issues(
-        redactor.config,
+    text = github_issue_search_text(
+        GitHubSource.from_config(redactor.config),
+        redactor,
         repo_alias=args.repo_alias,
         query=args.query,
-        state=validate_github_state(args.state),
-        limit=validate_positive_limit(args.limit, "--limit"),
+        state=args.state,
+        limit=args.limit,
     )
-    for issue in issues:
-        print(format_github_issue_summary(args.repo_alias, issue, redactor))
-    return 0 if issues else 1
+    print(text, end="")
+    return 0 if text else 1
 
 
 def build_parser() -> argparse.ArgumentParser:

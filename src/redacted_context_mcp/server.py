@@ -153,7 +153,10 @@ class RedactedContextMcp:
             config = self.live_config.load()
         except ConfigReloadError as exc:
             raise SystemExit(str(exc)) from exc
-        self.ctx = rc.RedactedContext(self.root, config, include_private=include_private, documents=documents)
+        self.include_private = include_private
+        self.documents = documents
+        # Every source enabled by the policy; rebuilt with the redactor on reload.
+        self.sources = self.build_sources(config)
         self.redactor = rc.Redactor(config, mode=mode)
         self.config_fingerprint = redaction_config_fingerprint(config)
         self.mode = mode
@@ -166,14 +169,28 @@ class RedactedContextMcp:
         self.max_total_raw_bytes = max_total_raw_bytes
         self.cache = RedactedContentCache(cache_bytes)
 
+    @property
+    def ctx(self) -> rc.RedactedContext:
+        """The filesystem source rooted at ``--root`` (always registered)."""
+        return self.sources.filesystem
+
+    def build_sources(self, config: rc.RedactionConfig) -> rc.SourceRegistry:
+        return rc.build_sources(
+            self.root,
+            config,
+            include_private=self.include_private,
+            documents=self.documents,
+        )
+
     def ensure_current_config(self) -> None:
         try:
             config = self.live_config.load()
             if config == self.ctx.config:
                 return
             # Build the replacement completely before publishing it. This also
-            # discards old raw rehydration mappings and the opaque path index.
-            ctx = rc.RedactedContext(self.root, config, include_private=self.ctx.include_private, documents=self.ctx.documents)
+            # discards old raw rehydration mappings, the opaque path index,
+            # and sources the new policy no longer enables.
+            sources = self.build_sources(config)
             redactor = rc.Redactor(config, mode=self.mode)
             fingerprint = redaction_config_fingerprint(config)
         except (Exception, SystemExit) as exc:
@@ -183,7 +200,7 @@ class RedactedContextMcp:
                 "config, then retry. Context access is blocked."
             )
             raise ToolExecutionError(message) from exc
-        self.ctx = ctx
+        self.sources = sources
         self.redactor = redactor
         self.config_fingerprint = fingerprint
         self.cache.clear()
@@ -247,7 +264,7 @@ class RedactedContextMcp:
             "context request. If a policy reload fails, ask the operator to repair "
             "the local configuration before retrying."
             " Use redctx_retrieve for ranked multi-word passage lookup with line citations."
-            + (" Document extraction is enabled; document line citations refer to extracted Markdown." if self.ctx.documents else "")
+            + (" Document extraction is enabled; document line citations refer to extracted Markdown." if self.documents else "")
             + (
                 " redctx_submit_doc is enabled for controlled writes into "
                 "the configured private-root write subdirectory."
@@ -366,6 +383,21 @@ class RedactedContextMcp:
         if status == 1 and not output.strip():
             return "No matches.\n"
         return output or "OK\n"
+
+    def run_source_operation(self, operation: Callable[[], str], *, empty: str) -> str:
+        """Run a source-backed operation that returns already-redacted text.
+
+        Errors are sanitized exactly like CLI-command errors: only known safe
+        messages pass through, so raw identifiers and upstream response text
+        never reach the client.
+        """
+        try:
+            output = operation()
+        except SystemExit as exc:
+            raise ToolExecutionError(safe_error_message(exc, self.redactor)) from exc
+        except Exception as exc:
+            raise ToolExecutionError("Tool execution failed.") from exc
+        return output or empty
 
     def resource_for_path(self, path: Path) -> dict[str, Any]:
         rel = rc.rel_posix(path, self.ctx.root)
@@ -637,6 +669,8 @@ def safe_error_message(exc: SystemExit, redactor: rc.Redactor) -> str:
         "Retrieval query exceeds the 2000 character limit.",
         "Retrieval requires 1 to 64 searchable query terms.",
         "Retrieval passage limit exceeded. Narrow the paths or glob.",
+        rc.UNKNOWN_REFERENCE_MESSAGE,
+        rc.DOCUMENTS_UNSUPPORTED_MESSAGE,
         *DOCUMENT_ERROR_MESSAGES,
     }
     if (
@@ -902,21 +936,27 @@ def redctx_refresh_index(server: RedactedContextMcp, arguments: dict[str, Any]) 
 
 
 def redctx_github_repos(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
-    return server.run_cli_command(
-        rc.command_github_repos,
-        Namespace(),
+    return server.run_source_operation(
+        lambda: rc.github_repos_text(server.sources.github),
+        empty="OK\n",
     )
 
 
 def redctx_github_list_issues(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
-    return server.run_cli_command(
-        rc.command_github_issues,
-        Namespace(
-            repo_alias=string_arg(arguments, "repo_alias", "context"),
-            state=string_arg(arguments, "state", "open"),
-            label=string_list_arg(arguments, "labels"),
-            limit=int_arg(arguments, "limit", 30) or 30,
+    repo_alias = string_arg(arguments, "repo_alias", "context")
+    state = string_arg(arguments, "state", "open")
+    labels = string_list_arg(arguments, "labels")
+    limit = int_arg(arguments, "limit", 30) or 30
+    return server.run_source_operation(
+        lambda: rc.github_issue_list_text(
+            server.sources.github,
+            server.redactor,
+            repo_alias=repo_alias,
+            state=state,
+            labels=labels,
+            limit=limit,
         ),
+        empty="No matches.\n",
     )
 
 
@@ -924,27 +964,39 @@ def redctx_github_read_issue(server: RedactedContextMcp, arguments: dict[str, An
     number = int_arg(arguments, "number", None)
     if number is None:
         raise ToolExecutionError("number must be an integer.")
-    return server.run_cli_command(
-        rc.command_github_issue,
-        Namespace(
-            repo_alias=string_arg(arguments, "repo_alias", "context"),
+    repo_alias = string_arg(arguments, "repo_alias", "context")
+    comments = bool_arg(arguments, "comments", False)
+    max_comments = int_arg(arguments, "max_comments", 20)
+    max_body_chars = int_arg(arguments, "max_body_chars", 30_000)
+    return server.run_source_operation(
+        lambda: rc.github_issue_detail_text(
+            server.sources.github,
+            server.redactor,
+            repo_alias=repo_alias,
             number=number,
-            comments=bool_arg(arguments, "comments", False),
-            max_comments=int_arg(arguments, "max_comments", 20),
-            max_body_chars=int_arg(arguments, "max_body_chars", 30_000),
+            comments=comments,
+            max_comments=max_comments,
+            max_body_chars=max_body_chars,
         ),
+        empty="OK\n",
     )
 
 
 def redctx_github_search_issues(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
-    return server.run_cli_command(
-        rc.command_github_search,
-        Namespace(
-            repo_alias=string_arg(arguments, "repo_alias", "context"),
-            query=string_arg(arguments, "query", ""),
-            state=string_arg(arguments, "state", "open"),
-            limit=int_arg(arguments, "limit", 30) or 30,
+    repo_alias = string_arg(arguments, "repo_alias", "context")
+    query = string_arg(arguments, "query", "")
+    state = string_arg(arguments, "state", "open")
+    limit = int_arg(arguments, "limit", 30) or 30
+    return server.run_source_operation(
+        lambda: rc.github_issue_search_text(
+            server.sources.github,
+            server.redactor,
+            repo_alias=repo_alias,
+            query=query,
+            state=state,
+            limit=limit,
         ),
+        empty="No matches.\n",
     )
 
 

@@ -8,7 +8,7 @@ import re
 import stat
 import time
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator, Sequence
 
 from .defaults import (
     DEFAULT_EXCLUDE_DIRS,
@@ -18,7 +18,7 @@ from .defaults import (
     TEXT_EXTENSIONS,
 )
 from .limits import OperationBudget, OperationLimitError
-from .models import RedactionConfig
+from .models import RedactionConfig, SourceCapabilities, SourceDocument, UNKNOWN_REFERENCE_MESSAGE
 from .documents import (
     DOCUMENT_EXTENSIONS, LEGACY_OFFICE_EXTENSIONS, MAX_DOCUMENT_BYTES, EXTRACTION_SECONDS,
     DISABLED_MESSAGE, LEGACY_MESSAGE, extract_document, require_document_support,
@@ -26,9 +26,21 @@ from .documents import (
 from .paths import path_id, rel_posix
 
 TEXT_DETECTION_PREFIX_BYTES = 4096
+OPAQUE_PATH_REFERENCE_RE = re.compile(r"(?:@|redctx://)?(p_[0-9a-f]{12})")
 
 
 class RedactedContext:
+    """Filesystem context source rooted at one validated directory.
+
+    This is the ``filesystem`` source adapter (see ``sources.ContextSource``):
+    it owns root containment, policy exclusions, and opaque path ids, and it
+    returns raw text. Callers redact content and paths before output.
+    """
+
+    name = "filesystem"
+    untrusted_content = False
+    capabilities = SourceCapabilities(listing=True, reading=True, searching=True, documents=True)
+
     def __init__(self, root: Path, config: RedactionConfig, *, include_private: bool = False, documents: bool = False):
         self.root = root.resolve()
         self.config = config
@@ -48,6 +60,39 @@ class RedactedContext:
         self.protected_rel_paths = {p.casefold() for p in config.term_files}
         self.protected_rel_paths.update(p.casefold() for p in config.protected_paths)
         self._path_index: dict[str, str] | None = None
+
+    def owns_reference(self, ref: str) -> bool:
+        return isinstance(ref, str) and OPAQUE_PATH_REFERENCE_RE.fullmatch(ref) is not None
+
+    def resolve_reference(self, ref: str, *, budget: OperationBudget | None = None) -> Path:
+        """Resolve an opaque ``@p_<id>``, ``p_<id>``, or ``redctx://p_<id>`` reference.
+
+        Unlike ``resolve_ref``, raw paths are refused: protocol references
+        are opaque only. The result is revalidated and policy-checked.
+        """
+        match = OPAQUE_PATH_REFERENCE_RE.fullmatch(ref) if isinstance(ref, str) else None
+        if match is None:
+            raise SystemExit(UNKNOWN_REFERENCE_MESSAGE)
+        return self.resolve_id(match.group(1), budget=budget)
+
+    def iter_documents(
+        self,
+        budget: OperationBudget,
+        *,
+        scope: Sequence[str] = (),
+        patterns: Sequence[str] = (),
+    ) -> Iterator[SourceDocument]:
+        """Yield readable files under ``scope`` as raw documents.
+
+        ``scope`` holds paths or opaque references (default: the whole root);
+        ``patterns`` are glob filters over root-relative paths. Traversal and
+        reads are charged to ``budget``; exceeding it raises
+        ``OperationLimitError`` instead of yielding a partial corpus silently.
+        """
+        for path in iter_target_files(self, list(scope), list(patterns), budget=budget):
+            text = self.read_text(path, budget=budget)
+            rel = rel_posix(path, self.root)
+            yield SourceDocument(ref=self.display_ref(rel), locator=rel, text=text)
 
     def resolve_ref(self, value: str, *, expected: str | None = None) -> Path:
         if value.startswith("@"):

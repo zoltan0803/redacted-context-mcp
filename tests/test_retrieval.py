@@ -12,6 +12,20 @@ from redacted_context_mcp.filesystem import RedactedContext
 from redacted_context_mcp.limits import OperationBudget, OperationLimitError
 from redacted_context_mcp.models import RedactionConfig
 from redacted_context_mcp.redaction import Redactor
+from tests.fixtures import InMemorySource
+
+# Output of ranked retrieval over GOLDEN_FILES before the source-adapter
+# refactor. Ranking, scores, tie-breaking, citations, and formatting must stay
+# byte-for-byte identical for a fixed salt.
+GOLDEN_FILES = {
+    "docs/backup.md": "# Backup runbook\n\nThe quokkaproject database backup runs nightly.\nRecovery drills happen monthly.\n",
+    "docs/recovery.txt": "database recovery\n\nbackup procedures for PostgreSQL\nContact taylor@example.invalid\n",
+    "notes/misc.txt": "unrelated text\n" * 30 + "backup once\n",
+    "notes/quokkaproject plan.md": "database database database\n",
+}
+GOLDEN_RETRIEVE_ALL = "--- @p_edc1e3a0cbb2 docs/[ENTITY_744724cb502cf2065928c6b96d0b5fd1].[ENTITY_83eab1868e9d09be426db8f133f41030] lines 1-4 score=2.493 ---\ndatabase recovery\n\nbackup procedures for PostgreSQL\nContact [EMAIL_0d4c962d34d08573eada0df1c5f701ed]\n\n--- @p_4d6a1e447acd docs/[ENTITY_5884b93d9b9614a4b1eaa9dd75218b07].md lines 1-4 score=2.416 ---\n# Backup runbook\n\nThe [SENSITIVE_b31768c24f00422e1ac627a60bf3f660] database backup runs nightly.\nRecovery drills happen monthly.\n\n--- @p_1ec636f068ab notes/[SENSITIVE_b31768c24f00422e1ac627a60bf3f660] [ENTITY_8da8ad8d2ed4843ab710ba6b5d46d3a2].md lines 1-1 score=1.028 ---\ndatabase database database\n\n--- @p_59b0163ec6ab notes/[ENTITY_e614f4bf1cc621bdb804c4e888cb23c3].[ENTITY_83eab1868e9d09be426db8f133f41030] lines 25-31 score=0.581 ---\nunrelated text\nunrelated text\nunrelated text\nunrelated text\nunrelated text\nunrelated text\nbackup once\n\n"
+GOLDEN_RETRIEVE_DOCS_MD = "--- @p_4d6a1e447acd docs/[ENTITY_5884b93d9b9614a4b1eaa9dd75218b07].md lines 1-4 score=0.288 ---\n# Backup runbook\n\nThe [SENSITIVE_b31768c24f00422e1ac627a60bf3f660] database backup runs nightly.\nRecovery drills happen monthly.\n\n"
+GOLDEN_RETRIEVE_LIMITED = "--- @p_1ec636f068ab notes/[SENSITIVE_b31768c24f00422e1ac627a60bf3f660] [ENTITY_8da8ad8d2ed4843ab710ba6b5d46d3a2].md lines 1-1 score=1.028 ---\ndatabase database database\n\n[TRUNCATED: more matching passages; narrow the query or increase limits]\n"
 
 
 class RetrievalTest(unittest.TestCase):
@@ -132,6 +146,57 @@ class RetrievalTest(unittest.TestCase):
         self.assertNotIn("quokkaproject", json.dumps(result))
         self.assertGreater(result["structuredContent"]["receipt"]["counts_by_category"].get("SENSITIVE", 0), 0)
         self.assertTrue(mcp.call_tool("redctx_retrieve", {"query": "database", "max_results": 51})["isError"])
+
+
+
+class SourceRetrievalTest(unittest.TestCase):
+    def test_filesystem_ranking_matches_pre_adapter_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            for name, text in GOLDEN_FILES.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(text.encode("utf-8"))
+            config = RedactionConfig(salt="golden-salt", terms=("quokkaproject",))
+            ctx = RedactedContext(root, config)
+            redactor = Redactor(config, mode="balanced")
+
+            def run(query: str, **kwargs) -> str:
+                options = dict(paths=[], globs=[], budget=OperationBudget(max_files=80))
+                options.update(kwargs)
+                return retrieval.retrieve(ctx, redactor, query, **options)
+
+            self.assertEqual(run("database backup recovery"), GOLDEN_RETRIEVE_ALL)
+            self.assertEqual(run("database", paths=[ctx.display_ref("docs")], globs=["*.md"]), GOLDEN_RETRIEVE_DOCS_MD)
+            self.assertEqual(run("database", max_results=2, max_chars=400), GOLDEN_RETRIEVE_LIMITED)
+
+    def test_retrieve_ranks_documents_from_a_non_filesystem_source(self) -> None:
+        config = RedactionConfig(salt="memory-retrieval", people=("Taylor Reed",))
+        redactor = Redactor(config, mode="balanced")
+        source = InMemorySource({
+            "inbox/kickoff": "Taylor Reed shared the database backup plan.\nRecovery is next.\n",
+            "inbox/lunch": "backup lunch options\n",
+            "archive/old": "nothing relevant here\n",
+        })
+        budget = OperationBudget(max_files=10)
+        result = retrieval.retrieve(source, redactor, "database backup recovery", paths=[], globs=[], budget=budget)
+
+        lines = result.splitlines()
+        # Highest coverage first; the raw locator is rendered through path redaction.
+        self.assertTrue(lines[0].startswith(f"--- {source.reference_for('inbox/kickoff')} "))
+        self.assertIn("/kickoff lines 1-2 score=", lines[0])
+        self.assertIn(source.reference_for("inbox/lunch"), result)
+        self.assertNotIn(source.reference_for("archive/old"), result)
+        self.assertNotIn("Taylor", result)
+        self.assertIn("[PERSON_", result)
+        self.assertEqual(budget.files_seen, 3)
+
+        scoped = retrieval.retrieve(
+            source, redactor, "backup", paths=[], globs=["inbox/l*"], budget=OperationBudget(max_files=10)
+        )
+        self.assertEqual(scoped.count("--- @m_"), 1)
+        with self.assertRaises(OperationLimitError):
+            retrieval.retrieve(source, redactor, "backup", paths=[], globs=[], budget=OperationBudget(max_files=1))
 
 
 if __name__ == "__main__":

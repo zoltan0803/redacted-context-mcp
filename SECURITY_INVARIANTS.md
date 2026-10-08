@@ -27,6 +27,10 @@ claim of hard OS isolation.
 
 - Configured private values must not appear in CLI output, MCP tool content,
   MCP resources, errors, paths, metadata, or logs.
+- Source adapters return raw content plus opaque references and never redact
+  themselves; every source's content is redacted by the CLI/MCP boundary
+  before output. Source references never contain raw paths, logins, or
+  upstream repository names.
 - Multi-line secrets are redacted before search results are split into lines.
 - Dynamic upstream errors are summarized without relaying raw response text.
 - Bare 256-bit-plus hex strings (the persisted vault-salt shape), salt-keyed
@@ -52,8 +56,9 @@ claim of hard OS isolation.
 ## Live Policy Updates
 
 - MCP tool calls and resource listing/reads check config and term-file metadata
-  before accessing context. Detected changes replace the policy and invalidate
-  cached redacted content, opaque path indexes, and old rehydration mappings.
+  before accessing context. Detected changes replace the policy and every
+  registered source together and invalidate cached redacted content, opaque
+  path indexes, and old rehydration mappings.
 - Invalid or unreadable policy inputs, or disappearance of a previously loaded
   config or still-referenced term file, block context access rather than serving
   with stale rules. Error responses contain no raw parser or filesystem details.

@@ -4,6 +4,42 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+# Safe, input-free messages shared by source adapters and the MCP/CLI error
+# sanitizer. They must never interpolate references, paths, or upstream text.
+UNKNOWN_REFERENCE_MESSAGE = "Unknown source reference."
+DOCUMENTS_UNSUPPORTED_MESSAGE = "Source does not support document iteration."
+
+
+@dataclass(frozen=True)
+class SourceCapabilities:
+    """What a context source can back.
+
+    ``listing``, ``reading``, and ``searching`` describe which tool families
+    the source serves. ``documents`` means ``iter_documents`` yields raw
+    documents for source-agnostic scans such as ranked retrieval.
+    """
+
+    listing: bool = False
+    reading: bool = False
+    searching: bool = False
+    documents: bool = False
+
+
+@dataclass(frozen=True)
+class SourceDocument:
+    """One raw document yielded by a context source.
+
+    ``ref`` is the source's opaque reference and is safe to emit as-is.
+    ``locator`` (for files, the root-relative path) and ``text`` are raw
+    private data: callers must pass both through the redaction boundary
+    before anything leaves the process.
+    """
+
+    ref: str
+    locator: str
+    text: str
+
+
 @dataclass(frozen=True)
 class GitHubRepoConfig:
     owner: str

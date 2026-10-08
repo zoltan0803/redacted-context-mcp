@@ -133,6 +133,42 @@ class ConfigReloadTest(unittest.TestCase):
             self.assertTrue(self.mcp.call_tool("redctx_github_repos", {})["isError"])
         self.assertFalse((self.root / "incoming").exists())
 
+    def test_reload_rebuilds_source_registry(self) -> None:
+        github = '[github.repos.context]\nowner = "example-owner"\nrepo = "example-repo"\n'
+        self.assertEqual(self.mcp.sources.names(), ("filesystem",))
+        self.assertEqual(self.mcp.call_tool("redctx_github_repos", {})["content"][0]["text"], "OK\n")
+
+        self.read()
+        self.assertEqual(self.mcp.cache.stats()["entries"], 1)
+        self.write_config(github)
+        result = self.mcp.call_tool("redctx_github_repos", {})
+        self.assertFalse(result["isError"])
+        self.assertEqual(result["content"][0]["text"], "context\n")
+        self.assertEqual(self.mcp.sources.names(), ("filesystem", "github"))
+        self.assertIs(self.mcp.sources.github.config, self.mcp.ctx.config)
+        self.assertIs(self.mcp.redactor.config, self.mcp.ctx.config)
+        self.assertEqual(self.mcp.cache.stats()["entries"], 0)
+
+        # An invalid policy blocks every source and clears the cache; the
+        # candidate registry is never published.
+        self.read()
+        self.config.write_text("broken = [", encoding="utf-8")
+        blocked = self.mcp.call_tool("redctx_github_repos", {})
+        self.assertTrue(blocked["isError"])
+        self.assertIn("Context access is blocked", blocked["content"][0]["text"])
+        self.assertEqual(self.mcp.cache.stats()["entries"], 0)
+
+        # Repairing the policy without the GitHub section removes the source.
+        self.write_config()
+        self.read()
+        self.assertEqual(self.mcp.sources.names(), ("filesystem",))
+        self.assertIsNone(self.mcp.sources.github)
+        self.assertEqual(self.mcp.call_tool("redctx_github_repos", {})["content"][0]["text"], "OK\n")
+        removed = self.mcp.call_tool("redctx_github_list_issues", {"repo_alias": "context"})
+        self.assertTrue(removed["isError"])
+        self.assertEqual(removed["content"][0]["text"], "Unknown GitHub repo alias.")
+        self.assertNotIn("example-owner", json.dumps(removed))
+
     def test_removed_config_blocks_instead_of_falling_back(self) -> None:
         self.config.unlink()
         with self.assertRaisesRegex(server.ProtocolError, "Context access is blocked"):

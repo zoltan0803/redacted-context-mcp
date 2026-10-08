@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- Introduces an internal source adapter interface so private data sources
+  plug into one redaction boundary. Sources own opaque references (path ids,
+  issue references, author aliases); the CLI and MCP layer redacts all content
+  before it leaves the process.
+- Ports the filesystem root and GitHub issues onto that interface. GitHub
+  issues are now fetched as structured records and redacted by a shared
+  renderer, and the MCP GitHub tools call the GitHub source directly instead
+  of routing through CLI command plumbing. Tool names, schemas, output text,
+  error messages, placeholders, path ids, and author aliases are unchanged.
+- Ranked retrieval now ranks documents yielded by a source rather than walking
+  the filesystem itself, with identical ranking, citations, and limits.
+- Live policy reload rebuilds the registered sources together with the
+  redaction rules, so adding or removing `[github.repos.<alias>]` takes effect
+  on the next request without a restart.
+- Adds source conformance tests and pins the advertised MCP tool surface.
+
 ## 0.8.0 — 2026-09-12
 
 - Adds dependency-free `redctx retrieve` / `redctx_retrieve` for ranked,

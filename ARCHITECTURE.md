@@ -11,15 +11,20 @@ index, and keeps all sensitive configuration local.
 ```text
 agent workspace
   -> MCP client or redctx CLI
-    -> redaction layer
-      -> private source root
-        -> redacted text plus opaque path references
+    -> redaction boundary (Redactor + rendering)
+      -> source registry
+        -> filesystem source (private root)    -> raw text + @p_<id> refs
+        -> GitHub source (configured aliases)  -> raw issue records + alias#N refs
+  <- redacted text plus opaque references
 ```
 
 The agent should start from a neutral workspace that does not contain the raw
-private context files. The MCP server receives tool calls, resolves paths inside
-the configured root, reads allowed text files, redacts output, and returns only
-the redacted result. If controlled writes are enabled, generated redacted text
+private context files. The MCP server receives tool calls and dispatches them
+to a registered source. The filesystem source resolves paths inside the
+configured root and reads allowed text files; the GitHub source fetches issues
+for configured aliases. Sources return raw text plus opaque references, and the
+server or CLI redacts every content field before returning only the redacted
+result. If controlled writes are enabled, generated redacted text
 can be rehydrated locally and written under a configured private-root
 subdirectory.
 
@@ -47,10 +52,77 @@ subdirectory.
 - Redaction happens before file content, file paths, search results, bundles,
   and GitHub issue text are returned.
 
+## Source Adapters
+
+Every private data source implements the small `ContextSource` protocol in
+`sources.py`. The layering rule is:
+
+- **Sources own identity and reference opaqueness.** A source decides how its
+  private identifiers become neutral references (`@p_<id>` / `redctx://p_<id>`
+  path ids, `<alias>#<number>` issue refs, `user_<hex>` author aliases) and
+  enforces its own containment, exclusion, and never-serve policy.
+- **The redaction boundary owns content redaction.** Sources never redact.
+  Everything a source yields (file text, file paths used as locators, issue
+  titles, bodies, labels, timestamps) is raw and is redacted by the CLI/MCP
+  layer (`Redactor`, `rendering.py`, the command functions in `core.py`)
+  before it leaves the process.
+
+The protocol surface is deliberately small:
+
+- `name`: stable registry key (`"filesystem"`, `"github"`).
+- `untrusted_content`: true for text outside the operator's control, such as
+  GitHub issues; its output is labelled (`untrusted_title=`,
+  `body_untrusted_external:`, `comment_untrusted_external:`).
+- `capabilities`: `SourceCapabilities(listing, reading, searching, documents)`.
+- `owns_reference(ref)` and `resolve_reference(ref)`: syntactic ownership and
+  resolution of the source's own opaque references. Raw paths, foreign
+  references, and malformed or unknown references are refused with messages
+  that never echo raw identifiers.
+- `iter_documents(budget, scope=..., patterns=...)`: yield raw
+  `SourceDocument(ref, locator, text)` items while charging traversal, file,
+  byte, and deadline limits to the shared `OperationBudget`. Exceeding a limit
+  fails closed with `OperationLimitError`. Sources that do not declare
+  `capabilities.documents` refuse before any I/O.
+
+`RedactedContext` is the filesystem source. `GitHubSource` serves GitHub
+issues as structured `GitHubIssue` / `GitHubComment` records whose authors are
+already opaque aliases; it does not offer document iteration, so it cannot be
+crawled by ranked retrieval. `build_sources` assembles a `SourceRegistry`:
+the filesystem source is always present and GitHub appears only when the
+config defines `[github.repos.<alias>]`. The MCP server rebuilds the registry
+together with the `Redactor` on every accepted policy reload.
+
+Ranked retrieval consumes `iter_documents` from any source, so it does not
+walk the filesystem itself. The controlled-write rehydration scan and Ollama
+discovery remain filesystem-specific because they need directory entries,
+write-subdirectory pruning, and operator-only raw output.
+
+### Adding a Source
+
+1. Implement `ContextSource` (`name`, `untrusted_content`, `capabilities`,
+   `owns_reference`, `resolve_reference`, `iter_documents`) in its own module.
+   Do not import `redaction` or `rendering` from it.
+2. Return raw text plus opaque references only. Derive references with the
+   vault salt (HMAC) or neutral operator-chosen aliases, and never place raw
+   identifiers such as paths, addresses, logins, or upstream names in them.
+3. Declare `untrusted_content = True` for anything the operator does not
+   control, and label that content in rendered output.
+4. Charge every entry, document, byte, and deadline check to the supplied
+   `OperationBudget` (`consume_entry`, `consume_file`, `consume_document`,
+   `check_deadline`) and fail closed when a limit is exceeded.
+5. Register it in `build_sources` so live policy reload rebuilds it with the
+   redactor, and render its output through the redaction boundary.
+6. Add it to `tests/test_sources.py` by subclassing `SourceConformance`, and
+   keep error messages on the server's safe-message list.
+
 ## Module Layout
 
 - `core.py`: CLI commands, parser setup, and compatibility re-exports.
 - `server.py`: minimal stdio MCP JSON-RPC server.
+- `sources.py`: `ContextSource` protocol, `SourceRegistry`, and
+  `build_sources`.
+- `rendering.py`: redaction boundary for structured source records (GitHub
+  issue summaries and details), shared by the CLI and MCP server.
 - `defaults.py`: default limits, allow lists, exclude lists, and compiled
   patterns.
 - `models.py`: shared dataclasses.
@@ -59,12 +131,15 @@ subdirectory.
 - `config_reload.py`: request-boundary policy change detection, stable reloads,
   and fail-closed handling of invalid or missing policy inputs.
 - `paths.py`: root-constrained path resolution and opaque path ids.
-- `filesystem.py`: read-only filesystem traversal and text-file detection.
+- `filesystem.py`: filesystem source (`RedactedContext`): read-only
+  traversal, text-file detection, and document iteration.
 - `documents.py`: optional local MarkItDown extraction through explicitly
   selected format converters and a bounded worker process.
-- `retrieval.py`: transient passage tokenization and ranking over redacted text.
+- `retrieval.py`: transient passage tokenization and ranking over redacted
+  text from any source that supports document iteration.
 - `discovery.py`: local Ollama discovery workflow and post-processing.
-- `github.py`: read-only GitHub issue access through neutral aliases.
+- `github.py`: GitHub source (`GitHubSource`): read-only issue fetching
+  through neutral aliases, structured records, and author aliases.
 
 ## Retrieval and Documents
 
@@ -77,8 +152,8 @@ output or resource caching. Source bytes, expanded OOXML size, extracted text,
 and worker duration are bounded. No raw extraction cache or persistent index is
 created. Plain-text reads do not import MarkItDown.
 
-`redctx_retrieve` scans readable files under existing traversal/read budgets,
-redacts whole documents while preserving line counts, and splits the result
+`redctx_retrieve` scans the filesystem source's documents under existing
+traversal/read budgets, redacts whole documents while preserving line counts, and splits the result
 into bounded passages. It orders matches by query-term coverage, then BM25,
 with deterministic opaque-reference/line tie-breaking. Only matching redacted
 passages and query statistics are retained for the request. Result count and
@@ -140,8 +215,10 @@ contains raw sensitive terms.
 The MCP server probes config and term-file metadata before tool execution and
 resource listing/reads. Unchanged requests keep the existing policy and cache.
 Changed inputs are loaded twice around dependency snapshots, including newly
-referenced term files. A validated policy replaces the context and redactor
-together and clears cached content, path indexes, and rehydration state.
+referenced term files. A validated policy replaces the source registry and
+redactor together and clears cached content, path indexes, and rehydration
+state. Adding or removing `[github.repos.<alias>]` tables therefore adds or
+removes the GitHub source on the next request.
 Invalid, unreadable, unstable, or removed previously loaded inputs block
 context requests and clear the content cache; the next request retries. Public
 protocol discovery and tool schemas remain available during recovery.
@@ -159,8 +236,11 @@ and author logins are not printed in tool output. Author aliases are HMACs over
 the local vault salt, repo alias, and login so they are not linkable across
 vaults or repo aliases.
 
-The GitHub integration is read-only and uses the token environment variable
-named in local config.
+The GitHub source is read-only and uses the token environment variable
+named in local config. It returns structured issue records with raw,
+untrusted text and opaque author aliases; `rendering.py` redacts titles,
+bodies, labels, states, and timestamps when formatting them for the CLI and
+MCP tools, which share the same code path.
 
 ## Security Posture
 
