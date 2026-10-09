@@ -713,6 +713,7 @@ def safe_error_message(exc: SystemExit, redactor: rc.Redactor) -> str:
         "Not a file.",
         "Refusing to print non-text file. Use stat/list to inspect metadata.",
         "--end-line must be greater than or equal to --start-line.",
+        "--start-line is beyond the end of the file.",
         "Unknown GitHub repo alias.",
         "GitHub issue was not found.",
         "Could not reach GitHub API.",

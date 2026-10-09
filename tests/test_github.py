@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import tempfile
 import unittest
 from argparse import Namespace
@@ -11,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from redacted_context_mcp import core, github, server
+from redacted_context_mcp.defaults import PLACEHOLDER_CATEGORY_PATTERN, PLACEHOLDER_RE
 from redacted_context_mcp.github import opaque_github_user
 from redacted_context_mcp.models import RedactionConfig
 from tests.fixtures import (
@@ -124,6 +126,46 @@ class GitHubIssueTest(unittest.TestCase):
             "private-context",
         ]:
             self.assertNotIn(raw, output)
+
+    def test_github_body_truncation_does_not_split_placeholders(self) -> None:
+        body = f"asked by {PERSON_ONE} about the rollout."
+        comment_body = f"asked by {PERSON_TWO} in a comment."
+        redacted_body = self.redactor.redact(body)
+        redacted_comment = self.redactor.redact(comment_body)
+        match = PLACEHOLDER_RE.search(redacted_body)
+        comment_match = PLACEHOLDER_RE.search(redacted_comment)
+        assert match is not None and comment_match is not None
+        self.assertTrue(match.group().startswith("[PERSON_"))
+        # One max_body_chars applies to both bodies, so both placeholders must share a span.
+        self.assertEqual(match.span(), comment_match.span())
+        prefix = redacted_body[: match.start()]
+        self.assertEqual(prefix, "asked by ")
+        self.assertEqual(redacted_comment[: comment_match.start()], prefix)
+        category_start = re.compile(rf"\[(?:{PLACEHOLDER_CATEGORY_PATTERN})_")
+        issue = {"number": 9, "state": "open", "title": "t", "body": body, "user": {"login": "person-one"}}
+        comments = [{"created_at": "2026-06-11T12:00:00Z", "body": comment_body, "user": {"login": "person-two"}}]
+
+        for offset in range(1, len(match.group())):
+            with self.subTest(offset=offset):
+                with patch(
+                    "redacted_context_mcp.github.urllib.request.urlopen",
+                    side_effect=[FakeHttpResponse(issue), FakeHttpResponse(comments)],
+                ):
+                    output = self.run_command(
+                        core.command_github_issue,
+                        Namespace(
+                            repo_alias="context",
+                            number=9,
+                            comments=True,
+                            max_comments=10,
+                            max_body_chars=match.start() + offset,
+                        ),
+                    )
+
+                self.assertIn(f"body_untrusted_external:\n{prefix}\n[TRUNCATED]\n", output)
+                self.assertIn(f"comment_untrusted_external:\n{prefix}\n[TRUNCATED]\n", output)
+                for fragment in category_start.finditer(output):
+                    self.assertIsNotNone(PLACEHOLDER_RE.match(output, fragment.start()))
 
     def test_github_user_alias_is_salt_and_repo_scoped(self) -> None:
         user = {"login": "same-user"}

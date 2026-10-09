@@ -127,6 +127,14 @@
   linear 4x and quadratic 16x) instead of 6x, and a suspicious rule is
   re-timed with interleaved runs up to five times instead of three. The
   2-second wall-time limit per input is unchanged.
+- GitHub issue and comment bodies truncated by `max_body_chars` no longer
+  split a redaction placeholder; the cut moves back to the start of the
+  placeholder, as file reads already do. The `[TRUNCATED]` marker is
+  unchanged.
+- Reading a file with a start line past its end and no end line now fails
+  with `--start-line is beyond the end of the file.` instead of the misleading
+  `--end-line must be greater than or equal to --start-line.`, on both the CLI
+  and the MCP `redctx_read` tool.
 
 ## 0.8.0 — 2026-09-12
 

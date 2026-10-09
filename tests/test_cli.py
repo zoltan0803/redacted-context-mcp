@@ -62,6 +62,20 @@ class RedactedContextCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("private-canary", result.stdout)
 
+    def test_cat_start_line_beyond_end_reports_accurate_error(self) -> None:
+        (self.root / "short-canary.txt").write_text("first line canary\nsecond line\nthird line\n", encoding="utf-8")
+        result = self.run_cli("cat", "short-canary.txt", "--start-line", "5")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--start-line is beyond the end of the file.", result.stderr)
+        self.assertNotIn("--end-line must be greater than or equal to --start-line.", result.stderr)
+        # Both the file name and its content carry the canary.
+        self.assertNotIn("canary", result.stderr + result.stdout)
+
+        inverted = self.run_cli("cat", "short-canary.txt", "--start-line", "3", "--end-line", "2")
+        self.assertNotEqual(inverted.returncode, 0)
+        self.assertIn("--end-line must be greater than or equal to --start-line.", inverted.stderr)
+
     def test_ls_redacts_paths_and_returns_opaque_id(self) -> None:
         result = self.run_cli("ls", "context")
 
