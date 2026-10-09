@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import hashlib
 import hmac
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Iterator, Sequence
 
+from redacted_context_mcp.detectors import Span
 from redacted_context_mcp.limits import OperationBudget
 from redacted_context_mcp.models import (
     UNKNOWN_REFERENCE_MESSAGE,
@@ -147,3 +150,85 @@ class InMemorySource:
             budget.consume_document(len(text.encode("utf-8")))
             yield SourceDocument(ref=self.reference_for(locator), locator=locator, text=text)
 
+
+class FakeDetector:
+    """Configurable plugged detector for tests.
+
+    ``values`` maps literal strings to canonical categories; every exact,
+    case-sensitive occurrence becomes a span. ``spans`` are returned verbatim
+    (useful for invalid spans). ``error`` is raised from ``detect``. When
+    ``require`` is set, nothing is detected unless the text contains it, which
+    simulates a detector that stops finding a value in a different context.
+    ``call_count`` records invocations without retaining any text.
+    """
+
+    def __init__(
+        self,
+        values: dict[str, str] | None = None,
+        *,
+        spans: Sequence[object] = (),
+        error: BaseException | None = None,
+        require: str | None = None,
+        name: str = "fake",
+        version: str = "0.1",
+    ) -> None:
+        self.name = name
+        self.version = version
+        self.values = dict(values or {})
+        self.spans = tuple(spans)
+        self.error = error
+        self.require = require
+        self.call_count = 0
+
+    def detect(self, text: str) -> list[object]:
+        self.call_count += 1
+        if self.error is not None:
+            raise self.error
+        if self.require is not None and self.require not in text:
+            return []
+        found: list[object] = list(self.spans)
+        for value, category in self.values.items():
+            start = text.find(value)
+            while start != -1:
+                found.append(Span(start, start + len(value), category))
+                start = text.find(value, start + len(value))
+        return found
+
+
+def fake_detector_factory(argument: str | None) -> FakeDetector:
+    """Entry-point style factory: ``VALUE:CATEGORY`` pairs separated by commas."""
+    values: dict[str, str] = {}
+    for item in (argument or "").split(","):
+        if item.strip():
+            value, _, category = item.rpartition(":")
+            values[value] = category
+    return FakeDetector(values, name="fake-entry-point")
+
+
+@contextlib.contextmanager
+def blocked_modules(*names: str) -> Iterator[None]:
+    """Make ``import name`` raise ImportError, restoring only those entries.
+
+    Used to simulate an optional detector library being absent.
+    ``patch.dict(sys.modules, ...)`` would also drop every module imported
+    meanwhile (spaCy, torch), and native extensions cannot be imported twice.
+    """
+
+    missing = object()
+    saved = {name: sys.modules.get(name, missing) for name in names}
+    for name in names:
+        sys.modules[name] = None  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        for name, module in saved.items():
+            if module is missing:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module  # type: ignore[assignment]
+
+
+def spans_as_values(text: str, spans: Sequence[Span]) -> list[tuple[str, str]]:
+    """Slice detector spans out of ``text`` as ``(value, category)`` pairs."""
+
+    return [(text[span.start : span.end], span.category) for span in spans]

@@ -18,7 +18,7 @@ import re
 import sys
 from argparse import Namespace
 from collections import OrderedDict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +51,7 @@ DISCOVERY_TTL_MS = 300_000
 PUBLIC_LIST_TTL_MS = 300_000
 RESOURCE_PAGE_SIZE = 200
 RESOURCE_URI_PREFIX = "redctx://"
+WRITE_TARGET_COLON_MESSAGE = "target_path must not contain ':'."
 READ_ONLY_ANNOTATIONS = {
     "readOnlyHint": True,
     "destructiveHint": False,
@@ -66,6 +67,20 @@ TEXT_OUTPUT_SCHEMA = {
             "properties": {
                 "detector_profile": {"type": "string"},
                 "counts_by_category": {"type": "object"},
+                # Present only when plugged detectors are active.
+                "detectors": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "version": {"type": "string"},
+                            "nominated": {"type": "integer"},
+                            "positional": {"type": "integer"},
+                        },
+                        "required": ["name", "version", "nominated", "positional"],
+                    },
+                },
             },
         },
     },
@@ -140,14 +155,19 @@ class RedactedContextMcp:
         max_raw_bytes_per_file: int = rc.DEFAULT_MAX_RAW_BYTES_PER_FILE,
         max_total_raw_bytes: int = rc.DEFAULT_MAX_TOTAL_RAW_BYTES,
         cache_bytes: int = 2_000_000,
+        detectors: Sequence[rc.Detector] = (),
     ) -> None:
         self.root = root.expanduser().resolve()
         if not self.root.exists() or not self.root.is_dir():
             raise SystemExit("Root must be an existing directory.")
         self.config_path = config_path.expanduser().resolve() if config_path is not None else None
+        # Plugged detectors are loaded once at launch. Policy reloads rebuild
+        # the redactor with these same instances and never reload models.
+        self.detectors: tuple[rc.Detector, ...] = tuple(detectors)
         self.live_config = LiveConfig(
             self.root,
             self.config_path,
+            protected_paths=rc.detector_protected_paths(self.detectors),
         )
         try:
             config = self.live_config.load()
@@ -157,7 +177,7 @@ class RedactedContextMcp:
         self.documents = documents
         # Every source enabled by the policy; rebuilt with the redactor on reload.
         self.sources = self.build_sources(config)
-        self.redactor = rc.Redactor(config, mode=mode)
+        self.redactor = rc.Redactor(config, mode=mode, detectors=self.detectors)
         self.config_fingerprint = redaction_config_fingerprint(config)
         self.mode = mode
         self.enable_writes = enable_writes
@@ -191,7 +211,7 @@ class RedactedContextMcp:
             # discards old raw rehydration mappings, the opaque path index,
             # and sources the new policy no longer enables.
             sources = self.build_sources(config)
-            redactor = rc.Redactor(config, mode=self.mode)
+            redactor = rc.Redactor(config, mode=self.mode, detectors=self.detectors)
             fingerprint = redaction_config_fingerprint(config)
         except (Exception, SystemExit) as exc:
             self.cache.clear()
@@ -266,6 +286,11 @@ class RedactedContextMcp:
             " Use redctx_retrieve for ranked multi-word passage lookup with line citations."
             + (" Document extraction is enabled; document line citations refer to extracted Markdown." if self.documents else "")
             + (
+                " Additional local detectors are active; their findings use the same placeholder format."
+                if self.detectors
+                else ""
+            )
+            + (
                 " redctx_submit_doc is enabled for controlled writes into "
                 "the configured private-root write subdirectory."
                 if self.enable_writes
@@ -318,8 +343,12 @@ class RedactedContextMcp:
             raise ProtocolError(-32002, "Resource not found.")
         try:
             text = self.redacted_file_text(path)
-        except (SystemExit, ToolExecutionError) as exc:
+        except ToolExecutionError as exc:
+            # Raised by this server with fixed, input-free messages.
             raise ProtocolError(-32002, str(exc) or "Resource not found.") from exc
+        except SystemExit as exc:
+            # Sanitized exactly like tool calls: only known safe messages pass.
+            raise ProtocolError(-32002, safe_error_message(exc, self.redactor)) from exc
         rel = rc.rel_posix(path, self.ctx.root)
         return {
             "contents": [
@@ -463,11 +492,15 @@ class RedactedContextMcp:
             )
         except rc.OperationLimitError as exc:
             raise ToolExecutionError(str(exc) or "Rehydration map limit exceeded.") from exc
+        except rc.DetectorError as exc:
+            raise ToolExecutionError(safe_error_message(exc, self.redactor)) from exc
         restored_target, target_replacements = rc.rehydrate_text_with_count(target_path, replacements)
         unresolved_target = rc.unresolved_rehydration_tokens(restored_target)
         if unresolved_target:
             raise ToolExecutionError(format_unresolved_tokens("target_path", unresolved_target))
-        output_path = resolve_submit_target(self.write_root, restored_target)
+        output_path = resolve_submit_target(
+            self.write_root, restored_target, ctx=self.ctx, config_path=self.live_config.path
+        )
 
         restored_text, text_replacements = rc.rehydrate_text_with_count(text, replacements)
         unresolved_text = rc.unresolved_rehydration_tokens(restored_text)
@@ -475,12 +508,15 @@ class RedactedContextMcp:
             raise ToolExecutionError(format_unresolved_tokens("text", unresolved_text))
         text_placeholder_values, text_path_values = rc.applied_rehydration_values(text, replacements)
         target_placeholder_values, target_path_values = rc.applied_rehydration_values(target_path, replacements)
-        self.verify_round_trip_redaction(
-            restored_target,
-            restored_text,
-            text_placeholder_values + target_placeholder_values,
-            text_path_values + target_path_values,
-        )
+        try:
+            self.verify_round_trip_redaction(
+                restored_target,
+                restored_text,
+                text_placeholder_values + target_placeholder_values,
+                text_path_values + target_path_values,
+            )
+        except rc.DetectorError as exc:
+            raise ToolExecutionError(safe_error_message(exc, self.redactor)) from exc
         if output_path.exists():
             if output_path.is_dir():
                 raise ToolExecutionError("Target already exists as a directory.")
@@ -524,10 +560,14 @@ class RedactedContextMcp:
         result, and each distinctive word token of a sensitive value must not
         survive either. Relative-path values are only checked whole because
         their generic path tokens are expected to remain visible.
+
+        Plugged detectors take part in both modes, consistent with read-back.
+        If a detector no longer finds a restored value, the write fails closed;
+        add such values to the configured terms.
         """
         redactors = [self.redactor]
         if self.mode != "balanced":
-            redactors.append(rc.Redactor(self.redactor.config, mode="balanced"))
+            redactors.append(rc.Redactor(self.redactor.config, mode="balanced", detectors=self.redactor.detectors))
         haystacks: list[str] = []
         for redactor in redactors:
             haystacks.append(rc.PLACEHOLDER_RE.sub("", redactor.redact(restored_text)).casefold())
@@ -595,10 +635,28 @@ def resolve_write_root(root: Path, write_subdir: str) -> Path:
     return write_root
 
 
-def resolve_submit_target(write_root: Path, target_path: str) -> Path:
+def resolve_submit_target(
+    write_root: Path,
+    target_path: str,
+    *,
+    ctx: rc.RedactedContext | None = None,
+    config_path: Path | None = None,
+) -> Path:
+    """Resolve a controlled-write target inside the write subdirectory.
+
+    With ``ctx``, targets that must never be served are refused too: the
+    config file (``config_path``), configured term files, detector protected
+    paths (including anything under a protected directory), and the
+    never-serve globs (``.env*``, ``*.key``, ``*.pem``, ``*.crt``), all
+    case-folded, with or without ``overwrite``.
+    """
     value = target_path.strip()
     if not value:
         raise ToolExecutionError("target_path must not be empty.")
+    if ":" in value:
+        # Drive letters and NTFS alternate data streams (``name:stream``)
+        # would slip past the protected-path checks; refused everywhere.
+        raise ToolExecutionError(WRITE_TARGET_COLON_MESSAGE)
     path = Path(value)
     if path.is_absolute() or any(part in {"..", ""} for part in path.parts) or path == Path("."):
         raise ToolExecutionError("target_path must be a relative file path inside the write subdirectory.")
@@ -613,6 +671,11 @@ def resolve_submit_target(write_root: Path, target_path: str) -> Path:
         output_path.relative_to(write_root)
     except ValueError as exc:
         raise ToolExecutionError("target_path must stay inside the write subdirectory.") from exc
+    if ctx is not None:
+        folded = str(output_path).casefold()
+        is_config = config_path is not None and folded == str(config_path.expanduser().resolve(strict=False)).casefold()
+        if is_config or ctx.is_protected(output_path):
+            raise ToolExecutionError(rc.WRITE_TARGET_PROTECTED_MESSAGE)
     return output_path
 
 
@@ -638,7 +701,9 @@ def redaction_config_fingerprint(config: rc.RedactionConfig) -> str:
 
 
 def safe_error_message(exc: SystemExit, redactor: rc.Redactor) -> str:
-    value = str(exc)
+    # str() may return a str subclass whose __eq__, __hash__, or startswith
+    # lie; compare and return an exact str copy of its text instead.
+    value = str.__str__(str(exc))
     if not value:
         return "Tool execution failed."
     safe_messages = {
@@ -670,6 +735,11 @@ def safe_error_message(exc: SystemExit, redactor: rc.Redactor) -> str:
         "Retrieval passage limit exceeded. Narrow the paths or glob.",
         rc.UNKNOWN_REFERENCE_MESSAGE,
         rc.DOCUMENTS_UNSUPPORTED_MESSAGE,
+        rc.DETECTOR_FAILED_MESSAGE,
+        rc.DETECTOR_CATEGORY_MESSAGE,
+        rc.DETECTOR_SPAN_MESSAGE,
+        rc.DETECTOR_LIMIT_MESSAGE,
+        rc.WRITE_TARGET_PROTECTED_MESSAGE,
         *DOCUMENT_ERROR_MESSAGES,
     }
     if (
@@ -1550,12 +1620,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=2_000_000,
         help="maximum in-memory bytes for redacted MCP content cache",
     )
+    rc.add_detector_argument(parser)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     rc.configure_stdio_utf8()
     args = build_parser().parse_args(argv)
+    # Load detectors once; startup errors go to the operator's terminal.
+    detectors = rc.load_detectors(args.detector or [])
     server = RedactedContextMcp(
         root=args.root,
         config_path=args.config,
@@ -1570,6 +1643,7 @@ def main(argv: list[str] | None = None) -> int:
         max_raw_bytes_per_file=args.max_raw_bytes_per_file,
         max_total_raw_bytes=args.max_total_raw_bytes,
         cache_bytes=args.cache_bytes,
+        detectors=detectors,
     )
     return serve(server)
 

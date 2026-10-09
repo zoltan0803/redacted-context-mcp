@@ -56,7 +56,8 @@ class RedactedContext:
         # Loaded term files and the explicit config file contain raw sensitive
         # terms and must never be served, regardless of --include-private.
         # Matching is case-folded because the served filesystem may be
-        # case-insensitive (macOS, Windows) even when fnmatch is not.
+        # case-insensitive (macOS, Windows) even when fnmatch is not. A
+        # protected directory protects its whole subtree (is_protected_rel).
         self.protected_rel_paths = {p.casefold() for p in config.term_files}
         self.protected_rel_paths.update(p.casefold() for p in config.protected_paths)
         self._path_index: dict[str, str] | None = None
@@ -254,20 +255,49 @@ class RedactedContext:
             self._path_index = index
         return index
 
+    def is_protected_rel(self, rel_folded: str) -> bool:
+        """Whether a case-folded root-relative POSIX path is protected.
+
+        A path is protected when it, or any ancestor directory, is in the
+        protected set, so a protected directory (for example a detector's
+        rules directory) protects everything below it. Exact files keep
+        their existing behaviour.
+        """
+        protected = self.protected_rel_paths
+        if not protected:
+            return False
+        if rel_folded in protected:
+            return True
+        separator = rel_folded.find("/")
+        while separator != -1:
+            if rel_folded[:separator] in protected:
+                return True
+            separator = rel_folded.find("/", separator + 1)
+        return False
+
+    def is_protected(self, path: Path) -> bool:
+        """Whether ``path`` (under the root) must never be served or written.
+
+        Covers protected files and directories (term files, the explicit
+        config, detector inputs) and the never-serve globs, all case-folded,
+        regardless of ``--include-private``.
+        """
+        rel_folded = rel_posix(path, self.root).casefold()
+        name_folded = path.name.casefold()
+        if self.is_protected_rel(rel_folded):
+            return True
+        return any(
+            fnmatch.fnmatchcase(rel_folded, pattern) or fnmatch.fnmatchcase(name_folded, pattern)
+            for pattern in NEVER_SERVE_GLOBS_FOLDED
+        )
+
     def is_excluded(self, path: Path) -> bool:
         rel = rel_posix(path, self.root)
         try:
             parts = path.relative_to(self.root).parts
         except ValueError:
             return True
-        rel_folded = rel.casefold()
-        name_folded = path.name.casefold()
-        if rel_folded in self.protected_rel_paths:
-            return True
-        if any(
-            fnmatch.fnmatchcase(rel_folded, pattern) or fnmatch.fnmatchcase(name_folded, pattern)
-            for pattern in NEVER_SERVE_GLOBS_FOLDED
-        ):
+        if self.is_protected(path):
             return True
         if self.include_private:
             return False

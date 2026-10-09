@@ -8,6 +8,18 @@ from dataclasses import dataclass, field
 # sanitizer. They must never interpolate references, paths, or upstream text.
 UNKNOWN_REFERENCE_MESSAGE = "Unknown source reference."
 DOCUMENTS_UNSUPPORTED_MESSAGE = "Source does not support document iteration."
+# Detector failures at request time. They never relay detector, library, or
+# model text, and never include the input that was being analyzed.
+DETECTOR_FAILED_MESSAGE = "Detector failed."
+DETECTOR_CATEGORY_MESSAGE = "Detector returned an unsupported category."
+DETECTOR_SPAN_MESSAGE = "Detector returned an invalid span."
+DETECTOR_LIMIT_MESSAGE = "Detector nomination limit exceeded."
+# Controlled writes never replace the config, term files, detector inputs, or
+# never-serve files, even when they lie under the write subdirectory.
+WRITE_TARGET_PROTECTED_MESSAGE = "Write target is protected."
+
+# Startup-only, operator-facing message (never produced at request time).
+UNKNOWN_DETECTOR_MESSAGE = "Unknown detector."
 
 
 @dataclass(frozen=True)

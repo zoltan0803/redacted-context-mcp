@@ -41,6 +41,71 @@ claim of hard OS isolation.
   redacted as secrets in the default detector profile, so an echoed vault salt
   cannot be served back to an agent.
 
+## Detectors
+
+- The built-in detection baseline always runs. Plugged detectors enabled with
+  `--detector` are additive: they can add redaction but cannot replace or
+  disable any part of the baseline.
+- Detector nominations go through the same deterministic placeholder,
+  collision-detection, and rehydration machinery as configured terms.
+- Every nominated span is redacted at its own position, except characters
+  inside allow-listed phrases or existing placeholder tokens (and ASCII
+  whitespace or ASCII punctuation left at the edge of a remnant, such as the
+  `-` between two placeholders). This holds when the span overlaps other
+  nominations or allow-listed words, when the baseline already redacted part
+  of it, when it sits inside a longer word, and when it exceeds a size limit.
+  Spans whose whole value is blank, allow-listed, or a reserved placeholder
+  word are ignored.
+- Other occurrences of each nominated value are redacted too, with the same
+  exceptions, as long as the value is within the per-value limits (256
+  characters, 16 whitespace-separated tokens) and the alternation budget
+  (32,768 characters of values per text, longest values leave first) and its
+  span does not overlap an existing placeholder token. Other occurrences
+  match through the regex engine's simple case folding, and only where the
+  neighbouring characters are not ASCII letters or digits (strictly ASCII:
+  `İ`, `ı`, `ſ`, or the Kelvin sign next to a value do not block a match).
+  Configured terms use the same boundaries, except that their guard is
+  case-insensitive and so also treats those four letters as word
+  characters. Case variants that simple case folding does not equate
+  (`Weiß` and `WEISS`) are redacted only when each is nominated. Beyond
+  those limits only the nominated spans themselves are redacted.
+- Detectors run only on original text: they never see or produce placeholders
+  or internal markers, and detectors never run on path strings.
+- Nominations are applied after every baseline stage, so a plugged detector
+  can never prevent or split a baseline redaction: every character the
+  baseline redacts without detectors is still redacted, with the same
+  placeholder, when detectors are active.
+- Nomination volume is bounded per text (20,000 spans per detector, 2,000
+  distinct values in total); exceeding a bound fails closed with
+  `Detector nomination limit exceeded.`. Over-size spans and values beyond the
+  alternation budget do not fail; they are redacted by position only.
+- Receipts record, per detector, the number of distinct values it nominated
+  into the alternation (`nominated`) and the number of its spans redacted by
+  position only because of the size limits or the budget (`positional`).
+- Spans are validated (bounds and canonical category) and invalid output fails
+  closed. Detector failures fail closed with input-free messages such as
+  `Detector failed.`; library, model, and input text is never relayed.
+- Detectors must run locally and be deterministic for identical input. This is
+  a contract for adapter authors that the engine cannot verify; a non-local or
+  non-deterministic detector weakens these guarantees.
+- Controlled-write rehydration and round-trip verification use the active
+  detectors; a value that is no longer detected makes the write fail closed.
+- Detector rule files under the served root (such as `patterns` files), and
+  everything under a directory a detector declares as protected, are never
+  served, listed, readable, or writable through controlled writes, even with
+  `--include-private`.
+- `patterns` rules are operator-trusted configuration that runs in-process;
+  the static screen and launch-time stress test reduce, but do not remove,
+  the risk that a pathological rule stalls the operator's own server.
+- Receipts and `redctx doctor` record active detectors by name and version,
+  never their arguments, except that the bundled adapters name their public
+  model package: `presidio` records the spaCy model package and its version,
+  and `gliner` names only its default model (`custom` for anything else).
+- The bundled `presidio` and `gliner` adapters make no network calls at
+  request time and write nothing to disk. Without `offline=true`, `gliner`
+  contacts the Hugging Face Hub at startup, and only with a validated Hub id;
+  local-looking model values must be absolute paths to existing directories.
+
 ## Retrieval and Document Extraction
 
 - Ranked retrieval tokenizes and scores redacted text, never raw content or raw
@@ -99,6 +164,10 @@ claim of hard OS isolation.
 
 - MCP writes are disabled unless explicitly enabled.
 - Enabled writes stay under the configured write subdirectory.
+- Controlled writes never replace the config file, configured term files,
+  detector protected paths (or anything under a protected directory), or
+  never-serve names (`.env*`, `*.key`, `*.pem`, `*.crt`), compared
+  case-folded, even with `overwrite`.
 - Symlink write destinations are rejected.
 - Rehydration maps for controlled writes are derived solely from the scanned
   source corpus: the write subdirectory is never scanned, and aliases created

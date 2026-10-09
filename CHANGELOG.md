@@ -23,6 +23,104 @@
   failed rebuild blocks context access and keeps the previous sources, like any
   other invalid policy.
 - Adds source conformance tests and pins the advertised MCP tool surface.
+- Adds pluggable detectors. The built-in detectors remain the always-on,
+  dependency-free baseline; additional local detectors enabled with the
+  repeatable `--detector NAME[=ARGUMENT]` option on `redctx` and `redctx-mcp`
+  can only add redaction. Detectors nominate spans with canonical placeholder
+  categories, and the engine redacts every occurrence through the existing
+  deterministic placeholder, collision, and rehydration machinery. The allow
+  list wins over plugged detectors, detectors never run on paths, and detector
+  failures fail closed with `Detector failed.`. Output without detectors is
+  byte-identical, and the MCP tool surface is unchanged.
+- Adds the built-in `patterns` detector (`--detector patterns=rules.toml`) for
+  operator regex rules. Rules are screened for catastrophic backtracking and
+  stress-tested once at startup in a killable process over inputs built from
+  each rule's own character classes and literal prefix (including inputs that
+  alternate word and non-word characters, which reject `\b`-anchored rules
+  such as the common unbounded email regex), at 10,000 and 40,000
+  characters (about 2.5 s for 256 simple rules); a rule is rejected by number
+  as too slow (over 2 s on one input) or superlinear (more than 6x slower on
+  the larger input). Its rules file is never served or overwritten when it
+  lies under the root.
+- Detector nominations are applied after every built-in stage, so detectors
+  never weaken the baseline. Every nominated span is redacted at its own
+  position, except characters of allow-listed phrases and existing
+  placeholder tokens, even when nominations overlap each other or an allowed
+  word, when the baseline already redacted part of it, or when it sits inside
+  a longer word; remnants keep only ASCII whitespace and ASCII punctuation at
+  their edges. Other occurrences of each value are redacted too, with
+  strictly ASCII word boundaries; overlapping occurrences of one value merge
+  into one range, so output stays proportional to the text. Nominated case
+  variants that `casefold()` and the regex engine treat differently are all
+  matched, and the longest value wins across categories.
+- Nominations are bounded per text (20,000 spans per detector, 2,000 distinct
+  values) and fail closed with `Detector nomination limit exceeded.`. Spans
+  over 256 characters or 16 words, and the longest values once a text's values
+  exceed 32,768 characters, are redacted only where they were nominated and
+  counted as `positional`.
+- A directory declared in a detector's `protected_paths` protects everything
+  below it.
+- `redctx_submit_doc` refuses any `target_path` containing `:`, so an NTFS
+  alternate data stream such as `terms.txt:notes` can no longer slip past the
+  protected-path checks, and a failed publication removes its temporary file
+  and reports `Could not publish output atomically.`.
+- `resources/read` errors go through the same safe-message filter as tool
+  errors.
+- `redctx_submit_doc` refuses to write the config file, term files, detector
+  protected paths, and never-serve names (`.env*`, `*.key`, `*.pem`, `*.crt`)
+  with `Write target is protected.`, even with `overwrite`.
+- Ships `redacted_context_mcp.testing.DetectorConformance` so third-party
+  detectors can run the engine's contract tests.
+- Third-party detector factories can register under the
+  `redacted_context_mcp.detectors` entry-point group.
+- Controlled-write rehydration and round-trip verification use the active
+  detectors, and live policy reload keeps the same detector instances.
+- Receipts gain a `detectors` list (name, version, nominated values,
+  positional-only spans) when detectors are active, and the tool output schema
+  declares this optional `receipt.detectors` property; `redctx doctor` and
+  `redctx audit` report active detectors without their arguments.
+- `redctx discover` and `discover-update` accept their own `--detector` to
+  draft terms with a local detector instead of an Ollama model. The global
+  `--detector` does not switch discovery away from Ollama, and `--model` or
+  `--endpoint` together with the subcommand `--detector` is an error.
+- Adds the optional `presidio` detector (`pip install
+  "redacted-context-mcp[presidio]"`, `--detector presidio[=OPTIONS]`), a
+  Microsoft Presidio adapter with options `model`, `language`, `threshold`,
+  `entities`, `include_dates`, and `map`. Presidio entity types map to
+  canonical categories; unmapped types and dates are skipped by default.
+  Missing spaCy models are reported at startup and never downloaded
+  implicitly. The adapter makes no network calls and writes nothing at request
+  time (its email recognizer uses the Public Suffix List bundled with
+  `tldextract` instead of downloading and caching one), keeps spaCy on the CPU
+  (`PRESIDIO_DEVICE=cpu` unless set), rejects `map` entity types Presidio does
+  not report, and records its version as
+  `<presidio-analyzer version>/<spaCy model package>-<model version>`.
+- Adds the optional `gliner` detector (`pip install
+  "redacted-context-mcp[gliner]"`, `--detector gliner[=OPTIONS]`), a GLiNER
+  zero-shot NER adapter with options `model`, `revision`, `threshold`,
+  `labels`, `offline`, `window`, `overlap`, and `max_tokens`. Long text is
+  analyzed in overlapping windows of at most 300 words and 512 subword tokens
+  (label prompt included, counted with the model's tokenizer), so token-heavy
+  text cannot hide a later name; runs longer than 64 characters without a
+  break are split for windowing, and windows made only of them are skipped.
+  `model` must be a Hub id or an absolute path to an existing directory, so a
+  relative or mistyped path is never sent to the Hub. Without `offline=true`
+  the Hub is contacted at every startup; pin `revision` for reproducible
+  detections. Models with a non-whitespace word splitter are rejected.
+  Receipts record `<gliner version>/urchade/gliner_small-v2.1` for the default
+  model and `<gliner version>/custom` for any other model id or local
+  directory.
+- Adapter spans of one category nested inside another span of the same
+  category collapse into it; nested spans of a different category are kept so
+  their other occurrences are redacted. Span ends are extended over trailing
+  combining marks, so decomposed accents are never cut off.
+- Both adapters are lazy built-ins; importing the package never imports the
+  optional libraries, and `dependencies` stays empty. Built-in detectors are
+  no longer also registered as entry points, which they could never be
+  resolved through. A CI job runs the Presidio adapter against the real
+  library.
+- Moves the regex backtracking screen into `regex_safety.py`; `core` keeps
+  re-exporting it.
 
 ## 0.8.0 — 2026-09-12
 

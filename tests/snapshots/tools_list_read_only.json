@@ -35,6 +35,32 @@
               },
               "detector_profile": {
                 "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
               }
             },
             "type": "object"
@@ -89,6 +115,32 @@
               },
               "detector_profile": {
                 "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
               }
             },
             "type": "object"
@@ -154,6 +206,32 @@
               },
               "detector_profile": {
                 "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
               }
             },
             "type": "object"
@@ -234,6 +312,32 @@
               },
               "detector_profile": {
                 "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
               }
             },
             "type": "object"
@@ -308,6 +412,32 @@
               },
               "detector_profile": {
                 "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
               }
             },
             "type": "object"
@@ -355,6 +485,32 @@
               },
               "detector_profile": {
                 "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
               }
             },
             "type": "object"
@@ -425,6 +581,32 @@
               },
               "detector_profile": {
                 "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
               }
             },
             "type": "object"
@@ -465,6 +647,32 @@
               },
               "detector_profile": {
                 "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
               }
             },
             "type": "object"
@@ -514,6 +722,32 @@
               },
               "detector_profile": {
                 "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
               }
             },
             "type": "object"
@@ -554,6 +788,32 @@
               },
               "detector_profile": {
                 "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
               }
             },
             "type": "object"
@@ -594,6 +854,32 @@
               },
               "detector_profile": {
                 "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
               }
             },
             "type": "object"
@@ -661,6 +947,32 @@
               },
               "detector_profile": {
                 "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
               }
             },
             "type": "object"
@@ -728,6 +1040,32 @@
               },
               "detector_profile": {
                 "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
               }
             },
             "type": "object"
@@ -794,6 +1132,32 @@
               },
               "detector_profile": {
                 "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
               }
             },
             "type": "object"

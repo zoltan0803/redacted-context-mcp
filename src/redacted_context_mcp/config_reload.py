@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import stat
+from collections.abc import Iterable
 from pathlib import Path
 
-from .config import load_config
+from .config import load_config, with_protected_paths
 from .defaults import LOCAL_CONFIG
 from .models import RedactionConfig
 
@@ -36,9 +37,18 @@ class LiveConfig:
     filesystem layer, this is not an adversarial concurrent-mutation sandbox.
     """
 
-    def __init__(self, root: Path, config_path: Path | None) -> None:
+    def __init__(
+        self,
+        root: Path,
+        config_path: Path | None,
+        *,
+        protected_paths: Iterable[Path] = (),
+    ) -> None:
         self.root = root
         self.path = config_path if config_path is not None else root / LOCAL_CONFIG
+        # Launch-time private files (detector rule files) that every loaded
+        # policy must keep in its never-serve set.
+        self.protected_paths = tuple(protected_paths)
         self.config: RedactionConfig | None = None
         self.stamps: dict[Path, Stamp] = {}
 
@@ -57,7 +67,7 @@ class LiveConfig:
             # built-in detectors or create a new vault salt.
             if self.stamps.get(self.path) is not None and before[self.path] is None:
                 raise ValueError("Loaded config disappeared.")
-            candidate = load_config(self.root, self.path)
+            candidate = self.load_candidate()
             middle = self.snapshot(candidate)
             if any(middle[path] != stamp for path, stamp in before.items() if path in middle):
                 raise ValueError("Policy changed while loading.")
@@ -68,7 +78,7 @@ class LiveConfig:
                 for path, stamp in self.stamps.items() if path in middle
             ):
                 raise ValueError("Loaded term file disappeared.")
-            verified = load_config(self.root, self.path)
+            verified = self.load_candidate()
             after = self.snapshot(verified)
             if candidate != verified or middle != after:
                 raise ValueError("Policy changed while loading.")
@@ -88,3 +98,9 @@ class LiveConfig:
         self.config = candidate
         self.stamps = after
         return candidate
+
+    def load_candidate(self) -> RedactionConfig:
+        config = load_config(self.root, self.path)
+        if self.protected_paths:
+            config = with_protected_paths(config, self.root, self.protected_paths)
+        return config

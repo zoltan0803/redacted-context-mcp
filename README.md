@@ -333,8 +333,13 @@ redctx-mcp --root ../source-private --enable-writes --write-subdir incoming
 This adds `redctx_submit_doc`. The tool accepts a relative `target_path`,
 redacted `text`, and optional `overwrite`. The server rehydrates known
 placeholders locally, rejects unresolved redaction tokens, and writes only under
-the configured write subdirectory. Tool responses use redacted paths and opaque
-ids; they do not return the raw restored path.
+the configured write subdirectory. It refuses with `Write target is protected.`
+to write the config file, configured term files, detector rule files (or
+anything under a protected detector directory), and files named like `.env*`,
+`*.key`, `*.pem`, or `*.crt`, even with `overwrite`, and it refuses any
+`target_path` containing `:` (drive letters and NTFS alternate data streams).
+Tool responses use redacted paths and opaque ids; they do not return the raw
+restored path.
 
 ## CLI Fallback
 
@@ -499,6 +504,265 @@ launch environment, server flags, or external vault-salt state also require a
 restart. Reload checks use file metadata at request boundaries; they do not
 retract previously returned content or provide protection against adversarial
 concurrent filesystem changes.
+
+## Pluggable Detectors
+
+The built-in detectors (configured terms, emails, URLs, phone numbers,
+secrets, IP addresses, and the name heuristics) always run and need no extra
+dependencies. You can add local detectors on top of that baseline with the
+repeatable `--detector SPEC` option on both `redctx` and `redctx-mcp`, where
+`SPEC` is `NAME` or `NAME=ARGUMENT`:
+
+```sh
+redctx-mcp --root ../source-private --detector patterns=~/redctx/patterns.toml
+redctx --root ../source-private --detector patterns=~/redctx/patterns.toml read @p_1a2b3c4d5e6f
+```
+
+The built-in `patterns` detector reads a TOML file of regex rules. Each rule
+names a placeholder category (`PERSON`, `ORG`, `CLIENT`, `SENSITIVE`, `ID`,
+`EMAIL`, `SECRET`, and the other built-in categories) and a regex:
+
+```toml
+[[patterns]]
+category = "ID"
+regex = 'TICKET-\d{4,}'
+
+[[patterns]]
+category = "SENSITIVE"
+regex = 'project\s+lantern'
+ignore_case = true
+```
+
+Rules are operator-trusted configuration, like the term list, and they run
+in-process on every request. At startup each regex is screened statically for
+catastrophic backtracking and then stress-tested in a separate process: every
+rule is timed over synthetic inputs built from its own character classes and
+literal prefix (for example a long run of capital letters for `[A-Z]+\d`), at
+10,000 and 40,000 characters. A rule is rejected with its rule number (never
+its text) as too slow when one run takes more than 2 seconds, or as
+superlinear when the larger input takes more than six times as long as the
+smaller one. This adds about 2.5 seconds to startup for 256 simple anchored
+rules (0.2 seconds for one rule, most of it starting the process). The checks
+catch common mistakes, not every slow pattern: a pathological rule can still
+stall your own server, so anchor rules with literal text (`TICKET-\d{4,}`
+rather than `\w+-\d+`) and keep them simple. Rules that are unanchored or
+anchored only with `\b`, and whose unbounded classes mix `.` or `-` with
+word characters, are quadratic on text such as `a.a.a.…` (every position is
+a word boundary and starts a new attempt) and are rejected. The common email
+rule `\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b` is one of them;
+bound the repeated part instead, for example
+`\b[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b`.
+
+If the rules file lies under the served root it is treated like a term file:
+it is never listed, read, served, or overwritten by controlled writes, even
+with `--include-private`. A third-party detector that declares a directory as
+protected protects everything below it.
+
+Detectors can only add redaction. A detector nominates text spans; the server
+always redacts each nominated span itself and also every other occurrence of
+the nominated value, with the usual deterministic placeholders, so read-back,
+rehydration, and controlled writes behave exactly as they do for configured
+terms. Nominations are applied after the built-in baseline: anything the
+baseline redacts keeps the baseline's placeholder, and when the baseline has
+already redacted part of a nominated value (for example strict mode redacting
+`TICKET` in `TICKET-12345`), the remaining raw part is redacted separately.
+Only ASCII whitespace and ASCII punctuation at the edge of such a remainder
+(the `-` here) stay visible. Allow-listed words are never redacted by plugged
+detectors, but the rest of a nomination around them is: with `Data` allowed,
+a nominated `Contoso Data Services` becomes `[ORG_…] Data [ORG_…]`. Values
+that are themselves allow-listed are ignored. Detectors never run on file
+paths: an identifier that `patterns` finds in file content can still appear in
+a file name, where only the built-in path redaction applies.
+
+Each detector may return at most 20,000 spans per text, and all detectors
+together at most 2,000 distinct values per text; beyond that the request fails
+with `Detector nomination limit exceeded.`. A nominated span longer than 256
+characters or 16 words (a long token, say) is still redacted where it was
+nominated, but its other occurrences are not searched for; such spans are
+counted as `positional` in the receipt. The same happens to the longest values
+once the nominated values of one text add up to more than 32,768 characters:
+beyond that budget only the nominated spans themselves are redacted.
+A nominated span is redacted even inside a longer word (`123456` in
+`ID123456`). Other occurrences match only where the neighbouring characters
+are not ASCII letters or digits, so a value is also redacted inside a longer
+word that continues with accented or non-Latin letters (`Ádám` inside
+`éÁdám`, or `李明` inside `李明华`), and next to `İ`, `ı`, `ſ`, or the Kelvin
+sign. Configured terms use the same boundaries, except that their check is
+case-insensitive and so treats those four letters as ASCII letters: a
+configured `Ali` is not redacted in `Aliİ`. Like configured terms,
+placeholders treat values that differ only in ASCII whitespace or case as one
+value; the same name written with a non-breaking space, or with case variants
+that fold differently (`İstanbul` and `ISTANBUL`), gets a separate
+placeholder. A nominated value matches other occurrences only through the
+regex engine's simple case folding, so variants such as `Weiß` and `WEISS`,
+or `ﬁnn` and `finn`, are redacted only when each is nominated or when a
+detector returns them.
+
+Detectors must run locally and be deterministic for identical input. Treat a
+detector like any code that sees your raw private text. Detectors load once at
+startup; policy reloads keep the same detector instances. A detector error
+fails the request with `Detector failed.` and never relays library output. If a
+controlled write fails because a detector no longer finds a restored value, add
+that value to the configured terms. `redctx doctor` and tool receipts list the
+active detectors by name and version.
+
+`redctx discover --detector SPEC` and `redctx discover-update --detector SPEC`
+draft redaction terms with a local detector instead of an Ollama model; no
+model call is made. Only the `--detector` given after the subcommand does
+this: a global `--detector` before `discover` configures redaction and leaves
+discovery on Ollama. `--model` and `--endpoint` apply only to Ollama and are
+rejected together with the subcommand's `--detector`.
+
+Third-party packages can register detector factories under the
+`redacted_context_mcp.detectors` entry-point group, and can check their
+detector against the engine's contract by mixing
+`redacted_context_mcp.testing.DetectorConformance` into a
+`unittest.TestCase`. The built-in names (`patterns`, `presidio`, `gliner`) are
+resolved first and cannot be taken over by an entry point.
+
+Two optional NER adapters ship with the package. Their libraries are optional
+extras, imported only when the detector is enabled; without them the package
+stays dependency-free. Options are a comma-separated `key=value` list after the
+detector name. Each adapter only adds redaction: the built-in baseline always
+runs alongside it.
+
+When an adapter reports one value inside another, a nested value of the same
+category collapses into the containing one, but a nested value of a different
+category is kept: a person named inside an organization span, or the domain
+inside an email address, is nominated on its own so its other occurrences are
+redacted too.
+
+Detectors run on every file a request redacts. `redctx_search`,
+`redctx_retrieve`, and `redctx_bundle` over the whole root therefore run them
+on every file they scan, so the cost of a slow detector multiplies with the
+size of the root; narrow those calls with `paths` or `glob`.
+
+### Presidio Detector
+
+[Microsoft Presidio](https://microsoft.github.io/presidio/) combines spaCy NER
+with pattern recognizers for structured identifiers.
+
+```sh
+pip install "redacted-context-mcp[presidio]"
+python -m spacy download en_core_web_lg
+
+redctx-mcp --root ../source-private --detector presidio
+redctx-mcp --root ../source-private --detector "presidio=model=en_core_web_sm,threshold=0.6"
+redctx --root ../source-private --detector "presidio=entities=PERSON|ORGANIZATION|US_SSN,map=ORGANIZATION:CLIENT" read @p_1a2b3c4d5e6f
+```
+
+Install the spaCy model into the same environment as `redacted-context-mcp`
+(with pipx, use that environment's Python). Missing models are never
+downloaded automatically; startup fails with the `python -m spacy download`
+command to run. Presidio makes no network calls and writes nothing at request
+time: its email recognizer normally downloads the Public Suffix List on first
+use and caches it in your home directory, so the adapter switches it to the
+copy bundled with `tldextract`. spaCy runs on the CPU (`PRESIDIO_DEVICE=cpu`
+unless you set that variable yourself), so results stay deterministic even
+when a CUDA build of torch is installed. With `en_core_web_sm`, a typical
+document takes well under a second.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `model` | `en_core_web_lg` | Installed spaCy model package (Presidio's default model). |
+| `language` | `en` | Analysis language; the model must support it. |
+| `threshold` | `0.5` | Minimum Presidio score from 0 to 1. Presidio scores phone numbers 0.4 and URLs 0.5; the baseline already covers both. |
+| `entities` | all mapped types | `\|`-separated allowlist of Presidio entity types. |
+| `include_dates` | `false` | Also redact `DATE_TIME` results (as `SENSITIVE` unless mapped). |
+| `map` | none | `\|`-separated `ENTITY_TYPE:CATEGORY` overrides with canonical categories. Each entity type must be one Presidio reports for the language (startup fails on a typo such as `ORGANISATION`). |
+
+| Presidio entity type | Category |
+|---|---|
+| `PERSON` | `PERSON` |
+| `ORGANIZATION` | `ORG` |
+| `EMAIL_ADDRESS` | `EMAIL` |
+| `PHONE_NUMBER` | `PHONE` |
+| `US_SSN` | `SSN` |
+| `IP_ADDRESS` | `IP` |
+| `URL` | `URL` |
+| `CREDIT_CARD` | `CARD` |
+| `IBAN_CODE` | `IBAN` |
+| `US_DRIVER_LICENSE` | `DRIVER_ID` |
+| `US_PASSPORT` | `PASSPORT` |
+| `LOCATION`, `NRP` | `SENSITIVE` |
+| `MEDICAL_LICENSE`, `US_BANK_NUMBER`, `US_ITIN`, `UK_NHS` | `ID` |
+| `CRYPTO` | `SECRET` |
+| `DATE_TIME` | skipped; `SENSITIVE` with `include_dates=true` |
+| anything else | skipped unless added with `map` |
+
+Text longer than about 100,000 characters is analyzed in overlapping chunks
+cut at paragraph or line breaks, with offsets mapped back to the original
+text. Presidio often reports the domain of an email address as a separate
+`URL`; it is nominated as its own value, as described above. Presidio and
+spaCy run locally and are deterministic for identical input. Receipts and
+`redctx doctor` show the version as
+`<presidio-analyzer version>/<spaCy model package>-<model version>`, for
+example `2.2.364/en_core_web_sm-3.8.0`.
+
+### GLiNER Detector
+
+[GLiNER](https://github.com/urchade/GLiNER) is a zero-shot NER model that
+finds entities for labels you name. It is better at names and organizations
+than at structured identifiers, which the baseline regexes already cover.
+
+```sh
+pip install "redacted-context-mcp[gliner]"
+
+redctx-mcp --root ../source-private --detector gliner
+redctx-mcp --root ../source-private --detector "gliner=offline=true,threshold=0.6"
+redctx-mcp --root ../source-private --detector "gliner=labels=person:PERSON|company:ORG|project code name:SENSITIVE"
+```
+
+On Linux, the `gliner` extra pulls the default CUDA build of torch, a
+download of several gigabytes. The adapter runs on the CPU only, so install
+the CPU wheel first:
+
+```sh
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install "redacted-context-mcp[gliner]"
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `model` | `urchade/gliner_small-v2.1` | Hugging Face model id (`namespace/name`) or an absolute path to a local model directory. A value that looks like a path (a backslash, a leading `.`, `~`, `/`, or drive letter, or an existing directory) must be absolute and exist; anything else must be a Hub id. Invalid values fail at startup and are never sent to the Hub. Receipts name only the default model; any other value shows as `custom`. |
+| `revision` | latest | Hub branch, tag, or commit to load. Pin a commit to keep detections reproducible across restarts. |
+| `threshold` | `0.5` | Minimum GLiNER score from 0 to 1. |
+| `labels` | `person:PERSON\|organization:ORG` | `\|`-separated `label:CATEGORY` pairs that replace the defaults. Labels are passed to the model exactly as written. |
+| `offline` | `false` | `true` loads only from the local Hugging Face cache and never touches the network. |
+| `window` | `300` | Words per analysis window (at most the model's limit, 384 for the default model). |
+| `overlap` | `50` | Words shared by consecutive windows; must be smaller than half of `window`. |
+| `max_tokens` | `512` | Subword tokens per window, including the label prompt (at most the encoder's maximum sequence length, 512 for the default model). |
+
+Without `offline=true`, the adapter contacts the Hugging Face Hub at every
+startup, even when the weights (about 600 MB for the default model) are
+already in the Hugging Face cache (`HF_HOME`): the first start downloads them,
+and later starts check for a newer revision of the model and download it if
+there is one. Pin `revision` to a commit to keep detections reproducible
+across restarts. The detector never contacts the network at request time. For
+air-gapped use, start once online (or run
+`hf download urchade/gliner_small-v2.1`), then use `offline=true` with the
+same `HF_HOME`. Only models that split words on whitespace (GLiNER's default
+`words_splitter_type`) are accepted.
+
+GLiNER only attends to a limited amount of input, so the adapter analyzes long
+text in overlapping windows taken directly from the original text and maps
+offsets back; values that cross a window edge are found in the overlap. A
+window ends at `window` words or at `max_tokens` subword tokens, counted with
+the model's own tokenizer, whichever comes first, so long identifiers, base64,
+or hex strings cannot push a later name out of view. Runs of letters and
+digits longer than 64 characters (hashes, encoded blobs) are split into
+64-character pieces for windowing; GLiNER labels whole words and cannot find a
+name inside such a run, so windows that contain nothing else are skipped.
+Receipts and `redctx doctor` show the version as
+`<gliner version>/urchade/gliner_small-v2.1` for the default model and
+`<gliner version>/custom` for any other model id or local directory, so a
+private model name never reaches the agent. The model runs on the CPU, where
+inference is deterministic for identical input; GPU inference may not be
+bit-for-bit deterministic and is not used.
+
+GLiNER is slow on a CPU: about 25 seconds per 20,000 words of prose with the
+default model. Enable it on small roots, or narrow whole-root search,
+retrieval, and bundle calls with `paths` or `glob`.
 
 ## Redacted GitHub Issues
 

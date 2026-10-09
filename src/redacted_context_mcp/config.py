@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import BinaryIO, Iterable
 
@@ -127,6 +128,24 @@ def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
         term_files=tuple(dedupe(term_files)),
         protected_paths=tuple(dedupe(protected_paths)),
     )
+
+
+def with_protected_paths(config: RedactionConfig, root: Path, paths: Iterable[Path]) -> RedactionConfig:
+    """Add launch-time private files, such as detector rule files, to the never-serve set.
+
+    Paths outside the served root need no protection and are ignored. With no
+    paths under the root the config is returned unchanged.
+    """
+    root = root.expanduser().resolve()
+    extra: list[str] = []
+    for path in paths:
+        resolved = Path(path).expanduser().resolve()
+        if is_relative_to(resolved, root) and resolved != root:
+            extra.append(rel_posix(resolved, root))
+    if not extra:
+        return config
+    combined = tuple(dict.fromkeys([*config.protected_paths, *extra]))
+    return replace(config, protected_paths=combined)
 
 
 def read_toml(path: Path) -> dict:

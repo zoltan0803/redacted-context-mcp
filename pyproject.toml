@@ -38,6 +38,12 @@ dependencies = []
 
 [project.optional-dependencies]
 documents = ["markitdown[docx,pptx,pdf,xlsx,xls]>=0.1.7,<0.2"]
+# Optional local NER detectors (--detector presidio / --detector gliner).
+# Presidio also needs a spaCy model: python -m spacy download en_core_web_lg.
+presidio = ["presidio-analyzer>=2.2,<3"]
+# gliner does not declare protobuf, which its DeBERTa tokenizer needs. On Linux
+# this pulls the default CUDA build of torch; see the README for the CPU wheel.
+gliner = ["gliner>=0.2.29,<1", "protobuf>=5.29.5,<8"]
 dev = [
   "build>=1.2",
   "twine>=5"
@@ -54,6 +60,14 @@ Security = "https://github.com/zoltan0803/redacted-context-mcp/blob/main/SECURIT
 [project.scripts]
 redctx = "redacted_context_mcp.core:main"
 redctx-mcp = "redacted_context_mcp.server:main"
+
+# Detector factories are enabled with --detector NAME[=ARGUMENT]. The built-in
+# patterns, presidio, and gliner detectors are resolved before entry points and
+# cannot be shadowed, so they are not registered here. Third-party packages
+# register factory(argument: str | None) -> Detector in their own pyproject:
+#
+#   [project.entry-points."redacted_context_mcp.detectors"]
+#   mydetector = "my_package.detector:factory"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/redacted_context_mcp"]
