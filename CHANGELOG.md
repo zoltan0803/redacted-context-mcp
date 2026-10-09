@@ -127,6 +127,20 @@
   linear 4x and quadratic 16x) instead of 6x, and a suspicious rule is
   re-timed with interleaved runs up to five times instead of three. The
   2-second wall-time limit per input is unchanged.
+- Rewrites the MCP tool descriptions so each one states what the tool returns
+  and the shape of its output, when to use it instead of a sibling
+  (`redctx_search` versus `redctx_retrieve`, `redctx_tree` versus
+  `redctx_list`, `redctx_read` versus `redctx_bundle`, the GitHub list and
+  search tools, `redctx_doctor` versus `redctx_audit`), and the limits,
+  truncation markers, untrusted-content labels, and network use an agent
+  needs to know. Every tool parameter now has a description with its format,
+  default, and bounds, and the shared output schema documents `text` and the
+  redaction receipt fields. Tool names, parameter names, types, constraints,
+  annotations, and behaviour are unchanged. The MCP server instructions now
+  name `redctx_search` for exact or regex line matches, and the README lists
+  every MCP tool, including the GitHub tools and `redctx_submit_doc`.
+- Marks `redctx_github_repos` as closed-world (`openWorldHint: false`): it
+  only reads the local repo aliases and never contacts GitHub.
 
 ## 0.8.0 — 2026-09-12
 
