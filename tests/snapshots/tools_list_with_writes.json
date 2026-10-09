@@ -1,0 +1,1262 @@
+{
+  "tools": [
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Show a redacted file tree with opaque @p_<id> path references.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_depth": {
+            "default": 3,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "default": ".",
+            "description": "Path or @p_<id> reference.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "redctx_tree",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt": {
+            "properties": {
+              "counts_by_category": {
+                "type": "object"
+              },
+              "detector_profile": {
+                "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "receipt"
+        ],
+        "type": "object"
+      },
+      "title": "Tree"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "List redacted files/directories with opaque @p_<id> path references.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_depth": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "default": ".",
+            "description": "Path or @p_<id> reference.",
+            "type": "string"
+          },
+          "recursive": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "name": "redctx_list",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt": {
+            "properties": {
+              "counts_by_category": {
+                "type": "object"
+              },
+              "detector_profile": {
+                "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "receipt"
+        ],
+        "type": "object"
+      },
+      "title": "List"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Read a redacted text file by path or opaque @p_<id> reference.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "end_line": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "line_numbers": {
+            "default": false,
+            "type": "boolean"
+          },
+          "max_chars": {
+            "default": 120000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "description": "Path or @p_<id> reference.",
+            "type": "string"
+          },
+          "start_line": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "redctx_read",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt": {
+            "properties": {
+              "counts_by_category": {
+                "type": "object"
+              },
+              "detector_profile": {
+                "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "receipt"
+        ],
+        "type": "object"
+      },
+      "title": "Read"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Search redacted text. The query is evaluated against redacted output.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "glob": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "ignore_case": {
+            "default": true,
+            "type": "boolean"
+          },
+          "max_results": {
+            "default": 200,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "paths": {
+            "default": [],
+            "description": "Paths or @p_<id> references to search. Empty searches the root.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "query": {
+            "type": "string"
+          },
+          "regex": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "redctx_search",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt": {
+            "properties": {
+              "counts_by_category": {
+                "type": "object"
+              },
+              "detector_profile": {
+                "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "receipt"
+        ],
+        "type": "object"
+      },
+      "title": "Search"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Rank redacted passages by multi-word keyword relevance. Returns opaque references and line citations (extracted Markdown lines for documents). No embeddings or persistent index.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "glob": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "max_chars": {
+            "default": 12000,
+            "maximum": 100000,
+            "minimum": 256,
+            "type": "integer"
+          },
+          "max_results": {
+            "default": 8,
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "paths": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "query": {
+            "maxLength": 2000,
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "redctx_retrieve",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt": {
+            "properties": {
+              "counts_by_category": {
+                "type": "object"
+              },
+              "detector_profile": {
+                "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "receipt"
+        ],
+        "type": "object"
+      },
+      "title": "Retrieve"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Show redacted metadata for a path or opaque @p_<id> reference.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "redctx_stat",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt": {
+            "properties": {
+              "counts_by_category": {
+                "type": "object"
+              },
+              "detector_profile": {
+                "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "receipt"
+        ],
+        "type": "object"
+      },
+      "title": "Stat"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Concatenate redacted text files for compact agent context.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "glob": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "max_chars_per_file": {
+            "default": 30000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_files": {
+            "default": 80,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_total_chars": {
+            "default": 300000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "paths": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "name": "redctx_bundle",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt": {
+            "properties": {
+              "counts_by_category": {
+                "type": "object"
+              },
+              "detector_profile": {
+                "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "receipt"
+        ],
+        "type": "object"
+      },
+      "title": "Bundle"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Submit a generated redacted document for controlled local rehydration and writing under the configured private-root write subdirectory.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "overwrite": {
+            "default": false,
+            "description": "Replace an existing file at target_path.",
+            "type": "boolean"
+          },
+          "target_path": {
+            "description": "Relative file path under the configured write subdirectory.",
+            "type": "string"
+          },
+          "text": {
+            "description": "Generated document text containing only redacted placeholders.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_path",
+          "text"
+        ],
+        "type": "object"
+      },
+      "name": "redctx_submit_doc",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt": {
+            "properties": {
+              "counts_by_category": {
+                "type": "object"
+              },
+              "detector_profile": {
+                "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "receipt"
+        ],
+        "type": "object"
+      },
+      "title": "Submit Doc"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Show redaction setup counts without printing sensitive terms.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "redctx_doctor",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt": {
+            "properties": {
+              "counts_by_category": {
+                "type": "object"
+              },
+              "detector_profile": {
+                "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "receipt"
+        ],
+        "type": "object"
+      },
+      "title": "Doctor"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Run safe local redaction and containment checks without printing sensitive terms.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "default": "text",
+            "enum": [
+              "text",
+              "json"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "redctx_audit",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt": {
+            "properties": {
+              "counts_by_category": {
+                "type": "object"
+              },
+              "detector_profile": {
+                "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "receipt"
+        ],
+        "type": "object"
+      },
+      "title": "Audit"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Refresh the in-memory opaque path index for the configured local root.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "redctx_refresh_index",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt": {
+            "properties": {
+              "counts_by_category": {
+                "type": "object"
+              },
+              "detector_profile": {
+                "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "receipt"
+        ],
+        "type": "object"
+      },
+      "title": "Refresh Index"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "List configured GitHub repo aliases. Aliases should be neutral names such as context.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "redctx_github_repos",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt": {
+            "properties": {
+              "counts_by_category": {
+                "type": "object"
+              },
+              "detector_profile": {
+                "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "receipt"
+        ],
+        "type": "object"
+      },
+      "title": "Github Repos"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "List redacted GitHub issues from a configured repo alias.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "labels": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "default": 30,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "repo_alias": {
+            "default": "context",
+            "description": "Configured neutral repo alias, not owner/repo.",
+            "type": "string"
+          },
+          "state": {
+            "default": "open",
+            "enum": [
+              "open",
+              "closed",
+              "all"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "redctx_github_list_issues",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt": {
+            "properties": {
+              "counts_by_category": {
+                "type": "object"
+              },
+              "detector_profile": {
+                "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "receipt"
+        ],
+        "type": "object"
+      },
+      "title": "Github List Issues"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Read one redacted GitHub issue by configured repo alias and issue number.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "comments": {
+            "default": false,
+            "type": "boolean"
+          },
+          "max_body_chars": {
+            "default": 30000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_comments": {
+            "default": 20,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "number": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "repo_alias": {
+            "default": "context",
+            "description": "Configured neutral repo alias, not owner/repo.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "number"
+        ],
+        "type": "object"
+      },
+      "name": "redctx_github_read_issue",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt": {
+            "properties": {
+              "counts_by_category": {
+                "type": "object"
+              },
+              "detector_profile": {
+                "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "receipt"
+        ],
+        "type": "object"
+      },
+      "title": "Github Read Issue"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Search GitHub issues in a configured repo alias and return redacted summaries.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": 30,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          },
+          "repo_alias": {
+            "default": "context",
+            "description": "Configured neutral repo alias, not owner/repo.",
+            "type": "string"
+          },
+          "state": {
+            "default": "open",
+            "enum": [
+              "open",
+              "closed",
+              "all"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "redctx_github_search_issues",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt": {
+            "properties": {
+              "counts_by_category": {
+                "type": "object"
+              },
+              "detector_profile": {
+                "type": "string"
+              },
+              "detectors": {
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "nominated": {
+                      "type": "integer"
+                    },
+                    "positional": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "nominated",
+                    "positional"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "receipt"
+        ],
+        "type": "object"
+      },
+      "title": "Github Search Issues"
+    }
+  ]
+}

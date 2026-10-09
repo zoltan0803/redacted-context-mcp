@@ -56,16 +56,29 @@ class OperationBudget:
             raise OperationLimitError("Traversal entry limit exceeded.")
 
     def consume_file(self, path: Path) -> int:
-        self.check_deadline()
-        self.files_seen += 1
-        if self.max_files is not None and self.files_seen > self.max_files:
-            raise OperationLimitError("File limit exceeded.")
+        self._count_file()
         try:
             size = path.lstat().st_size
         except OSError as exc:
             raise OperationLimitError("Could not inspect file size.") from exc
         self.consume_raw_bytes(size)
         return size
+
+    def consume_document(self, size: int) -> None:
+        """Charge one non-filesystem document of ``size`` raw bytes.
+
+        Sources whose documents are not standalone files (for example
+        messages inside a mailbox) use this instead of ``consume_file`` so the
+        same file-count and byte limits apply.
+        """
+        self._count_file()
+        self.consume_raw_bytes(size)
+
+    def _count_file(self) -> None:
+        self.check_deadline()
+        self.files_seen += 1
+        if self.max_files is not None and self.files_seen > self.max_files:
+            raise OperationLimitError("File limit exceeded.")
 
     def consume_raw_bytes(self, size: int) -> None:
         self.check_deadline()

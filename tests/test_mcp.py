@@ -9,8 +9,13 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from tests.fixtures import PUBLIC_TECH, RAW_PRIVATE_VALUES, write_knowledgebase
+from tests.fixtures import PUBLIC_TECH, RAW_PRIVATE_VALUES, load_snapshot, write_knowledgebase
 from tests.test_documents import HAS_DOCUMENTS, write_docx
+from tests.test_sources import (
+    RESOURCE_TEMPLATES_SNAPSHOT,
+    TOOLS_READ_ONLY_SNAPSHOT,
+    TOOLS_WITH_WRITES_SNAPSHOT,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -223,6 +228,9 @@ class RedactedContextMcpTest(unittest.TestCase):
         github_tool = next(tool for tool in tools if tool["name"] == "redctx_github_list_issues")
         self.assertTrue(github_tool["annotations"]["openWorldHint"])
         self.assertNotIn("redctx_submit_doc", names)
+        self.assertEqual({"tools": tools}, load_snapshot(TOOLS_READ_ONLY_SNAPSHOT))
+        templates = self.rpc("resources/templates/list")["result"]
+        self.assertEqual(templates, load_snapshot(RESOURCE_TEMPLATES_SNAPSHOT))
 
     def test_modern_discover_reports_only_modern_versions(self) -> None:
         response = self.rpc("server/discover", self.modern_params())
@@ -521,6 +529,7 @@ class RedactedContextMcpTest(unittest.TestCase):
 
         self.restart_server("--enable-writes", "--write-subdir", "incoming")
         tools = self.rpc("tools/list")["result"]["tools"]
+        self.assertEqual({"tools": tools}, load_snapshot(TOOLS_WITH_WRITES_SNAPSHOT))
         submit_tool = next(tool for tool in tools if tool["name"] == "redctx_submit_doc")
         self.assertFalse(submit_tool["annotations"]["readOnlyHint"])
         self.assertTrue(submit_tool["annotations"]["destructiveHint"])

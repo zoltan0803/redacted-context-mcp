@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
-import multiprocessing
 import os
 import re
 import sys
@@ -34,6 +32,7 @@ from .config import (
     read_term_file,
     read_toml,
     split_env_terms,
+    with_protected_paths,
 )
 from .defaults import (
     DEFAULT_DISCOVERY_MAX_CHARS,
@@ -55,7 +54,15 @@ from .defaults import (
     PLACEHOLDER_RE,
     REPO_ROOT,
 )
+from .detectors import (
+    Detector,
+    DetectorError,
+    Span,
+    detector_protected_paths,
+    load_detectors,
+)
 from .discovery import (
+    DetectorDiscoveryClient,
     OllamaDiscoveryClient,
     build_discovery_update,
     build_discovery_prompt,
@@ -98,12 +105,10 @@ from .filesystem import (
 )
 from .limits import OperationBudget, OperationLimitError
 from .github import (
+    GitHubSource,
     count_github_assignees,
     default_ssl_paths_have_certs,
     extract_github_error,
-    format_github_issue_detail,
-    format_github_issue_summary,
-    format_github_labels,
     format_github_url_error,
     get_github_repo_config,
     github_api_request,
@@ -113,12 +118,18 @@ from .github import (
     github_search_issues,
     github_ssl_context,
     opaque_github_user,
-    truncate_text,
     validate_github_state,
     validate_nonnegative_limit,
     validate_positive_limit,
 )
 from .models import (
+    DETECTOR_CATEGORY_MESSAGE,
+    DETECTOR_FAILED_MESSAGE,
+    DETECTOR_LIMIT_MESSAGE,
+    DETECTOR_SPAN_MESSAGE,
+    DOCUMENTS_UNSUPPORTED_MESSAGE,
+    UNKNOWN_REFERENCE_MESSAGE,
+    WRITE_TARGET_PROTECTED_MESSAGE,
     DiscoveryDocument,
     DiscoveryParseError,
     DiscoveryResult,
@@ -128,7 +139,26 @@ from .models import (
 )
 from .paths import display_ref, path_id, rel_posix, resolve_under_root
 from .redaction import Redactor, compile_literal_pattern, normalize_alias
+from .regex_safety import (
+    QUANTIFIER_REPETITION_FLOOR,
+    UNSAFE_REGEX_MESSAGE,
+    _alternation_overlap,
+    _branch_first_chars,
+    _regex_quantifier_at,
+    _regex_match_worker,
+    _split_top_level_alternation,
+    match_regex_lines,
+    regex_backtracking_violation,
+)
+from .rendering import (
+    github_issue_detail_text,
+    github_issue_list_text,
+    github_issue_search_text,
+    github_repos_text,
+    truncate_text,
+)
 from .retrieval import retrieve
+from .sources import SourceRegistry, build_sources
 from .documents import DOCUMENT_EXTENSIONS
 
 
@@ -274,225 +304,6 @@ def command_tail(args: argparse.Namespace, ctx: RedactedContext, redactor: Redac
     return 0
 
 
-UNSAFE_REGEX_MESSAGE = "Unsafe regex: potentially catastrophic backtracking pattern."
-
-# A quantified group whose repetition upper bound exceeds this is treated as
-# effectively unbounded; below it, bounded backtracking is cheap enough.
-QUANTIFIER_REPETITION_FLOOR = 8
-
-
-def _regex_quantifier_at(pattern: str, index: int) -> tuple[str, int, float]:
-    """Classify the quantifier starting at pattern[index].
-
-    Returns ("none"|"bounded"|"unbounded", token_length, max_repetitions)
-    where max_repetitions is inf for unbounded quantifiers.
-    """
-    n = len(pattern)
-    if index >= n:
-        return "none", 0, 0.0
-    char = pattern[index]
-    if char in "*+":
-        if index + 1 < n and pattern[index + 1] == "+":
-            return "unbounded", 2, math.inf
-        return "unbounded", 1, math.inf
-    if char == "?":
-        if index + 1 < n and pattern[index + 1] in {"?", "+"}:
-            return "bounded", 2, 1
-        return "bounded", 1, 1
-    if char == "{":
-        end = pattern.find("}", index + 1)
-        if end == -1 or end - index > 12:
-            return "none", 0, 0.0
-        body = pattern[index + 1 : end]
-        if not re.fullmatch(r"\d*,\d*|\d+", body):
-            return "none", 0, 0.0
-        if "," in body and body.partition(",")[2] == "":
-            return "unbounded", end - index + 1, math.inf
-        parts = body.split(",")
-        maximum = max(int(part) for part in parts if part)
-        return "bounded", end - index + 1, float(maximum)
-    return "none", 0, 0.0
-
-
-def _split_top_level_alternation(body: str) -> list[str]:
-    parts: list[str] = []
-    depth = 0
-    start = 0
-    index = 0
-    n = len(body)
-    while index < n:
-        char = body[index]
-        if char == "\\":
-            index += 2
-            continue
-        if char == "[":
-            close = index + 1
-            if close < n and body[close] == "^":
-                close += 1
-            if close < n and body[close] == "]":
-                close += 1
-            while close < n and body[close] != "]":
-                if body[close] == "\\":
-                    close += 1
-                close += 1
-            index = close + 1
-            continue
-        if char == "(":
-            depth += 1
-        elif char == ")":
-            depth = max(0, depth - 1)
-        elif char == "|" and depth == 0:
-            parts.append(body[start:index])
-            start = index + 1
-        index += 1
-    parts.append(body[start:])
-    return parts
-
-
-def _branch_first_chars(branch: str) -> frozenset[str] | None:
-    """Approximate set of literal first characters a branch can start with.
-
-    Returns None when the estimate is unknown (escapes, dot, any class with
-    negation or ranges, groups); callers must treat unknown as potentially
-    overlapping.
-    """
-    branch = branch.lstrip("^")
-    if not branch:
-        return None
-    if branch[0] == "\\":
-        return None
-    if branch[0] == ".":
-        return None
-    if branch[0] == "[":
-        end = branch.find("]")
-        if end == -1:
-            return None
-        inner = branch[1:end]
-        if inner.startswith("^"):
-            # Negated classes match almost anything; they cannot be narrowed
-            # to the literal characters written inside the brackets.
-            return None
-        if inner.startswith("]"):
-            inner = inner[1:]
-        if "-" in inner or "\\" in inner:
-            return None
-        return frozenset(inner)
-    if branch[0] == "(":
-        close = branch.find(")")
-        if close == -1:
-            return None
-        inner = branch[1:close]
-        if inner.startswith("?"):
-            return None
-        branch_sets = [_branch_first_chars(part) for part in _split_top_level_alternation(inner)]
-        if any(value is None for value in branch_sets):
-            return None
-        combined: set[str] = set()
-        for value in branch_sets:
-            combined.update(value)
-        return frozenset(combined)
-    return frozenset(branch[0])
-
-
-def _alternation_overlap(body: str) -> bool:
-    branches = _split_top_level_alternation(body)
-    if len(branches) < 2:
-        return False
-    first_sets = [_branch_first_chars(branch) for branch in branches]
-    for index in range(len(first_sets)):
-        for other in range(index + 1, len(first_sets)):
-            left, right = first_sets[index], first_sets[other]
-            if left is None or right is None or left & right:
-                return True
-    return False
-
-
-def regex_backtracking_violation(pattern: str) -> str | None:
-    """Return a violating snippet when a pattern can backtrack explosively.
-
-    Conservative screen over user-supplied regexes. A group is hazardous when
-    its body contains any quantifier or an ambiguous top-level alternation;
-    hazards propagate outward through nesting. A hazardous group quantified
-    beyond QUANTIFIER_REPETITION_FLOOR repetitions (or unbounded) is rejected.
-    Unknown shapes fail closed. The screen is a fast-fail layer; process-level
-    match isolation enforces the actual wall-clock bound.
-    """
-    n = len(pattern)
-    index = 0
-    # Each stack entry: [group_open_position, has_quantifier_inside, hazard]
-    groups: list[list[object]] = []
-
-    while index < n:
-        char = pattern[index]
-        if char == "\\":
-            index += 2
-            kind, length, _maximum = _regex_quantifier_at(pattern, index)
-            if kind != "none":
-                index += length
-                if groups:
-                    groups[-1][1] = True
-            continue
-        if char == "[":
-            close = index + 1
-            if close < n and pattern[close] == "^":
-                close += 1
-            if close < n and pattern[close] == "]":
-                close += 1
-            while close < n and pattern[close] != "]":
-                if pattern[close] == "\\":
-                    close += 1
-                close += 1
-            index = close + 1
-            kind, length, _maximum = _regex_quantifier_at(pattern, index)
-            if kind != "none":
-                index += length
-                if groups:
-                    groups[-1][1] = True
-            continue
-        if char == "(":
-            groups.append([index, False, False])
-            index += 1
-            if index < n and pattern[index] == "?":
-                index += 1
-                if index < n and pattern[index] == "P":
-                    index += 1
-                    if index < n and pattern[index] == "<":
-                        gt = pattern.find(">", index)
-                        index = gt + 1 if gt != -1 else n
-            continue
-        if char == ")":
-            if not groups:
-                index += 1
-                continue
-            open_position, has_quantifier, inner_hazard = groups.pop()
-            close_position = index
-            index += 1
-            kind, length, maximum = _regex_quantifier_at(pattern, index)
-            if kind != "none":
-                index += length
-            body = pattern[open_position + 1 : close_position]
-            if body.startswith("?P") or body.startswith("?<"):
-                gt = body.find(">")
-                body = body[gt + 1 :] if gt != -1 else ""
-            elif body.startswith("?"):
-                body = body[2:]
-            group_hazard = has_quantifier or inner_hazard or _alternation_overlap(body)
-            if kind != "none" and maximum > QUANTIFIER_REPETITION_FLOOR and group_hazard:
-                return pattern[max(0, open_position - 12) : min(n, index + 4)]
-            if groups and (kind != "none" or group_hazard):
-                groups[-1][1] = groups[-1][1] or kind != "none"
-                groups[-1][2] = True if group_hazard else groups[-1][2]
-            continue
-        # Plain atom.
-        index += 1
-        kind, length, _maximum = _regex_quantifier_at(pattern, index)
-        if kind != "none":
-            index += length
-            if groups:
-                groups[-1][1] = True
-    return None
-
-
 def command_grep(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
     budget = operation_budget_from_args(args)
     flags = re.IGNORECASE if args.ignore_case else 0
@@ -570,73 +381,6 @@ def command_grep(args: argparse.Namespace, ctx: RedactedContext, redactor: Redac
                     print("[TRUNCATED]")
                     return 0
     return 0 if results else 1
-
-
-def _regex_match_worker(connection: object, pattern: str, flags: int, job: list[list[str]], seconds: float) -> None:
-    """Apply a compiled pattern to redacted lines in an isolated process.
-
-    Runs only redacted text and cannot outlive the parent's kill timeout, so
-    catastrophic-backtracking patterns cannot hang the serving process.
-    """
-    import time as time_module
-
-    try:
-        compiled = re.compile(pattern, flags)
-    except re.error:
-        connection.send(("error", None))
-        return
-    deadline = time_module.monotonic() + seconds if seconds > 0 else None
-    matched: list[list[int]] = []
-    for lines in job:
-        indices: list[int] = []
-        for index, line in enumerate(lines):
-            if deadline is not None and time_module.monotonic() > deadline:
-                connection.send(("deadline", None))
-                return
-            if compiled.search(line):
-                indices.append(index)
-        matched.append(indices)
-    connection.send(("ok", matched))
-
-
-def match_regex_lines(
-    pattern: str,
-    flags: int,
-    job: list[list[str]],
-    timeout_seconds: float,
-) -> list[list[int]]:
-    """Match redacted lines with a user regex in a killable child process."""
-    if not job:
-        return []
-    methods = multiprocessing.get_all_start_methods()
-    context = multiprocessing.get_context("fork" if "fork" in methods else None)
-    receiver, sender = context.Pipe(duplex=False)
-    process = context.Process(
-        target=_regex_match_worker,
-        args=(sender, pattern, flags, job, timeout_seconds),
-        daemon=True,
-    )
-    process.start()
-    sender.close()
-    try:
-        if not receiver.poll(timeout_seconds + 5):
-            process.terminate()
-            process.join(2)
-            raise SystemExit("Operation deadline exceeded.")
-        try:
-            status, payload = receiver.recv()
-        except (EOFError, OSError):
-            process.terminate()
-            process.join(2)
-            raise SystemExit("Operation deadline exceeded.")
-        if status == "deadline":
-            raise SystemExit("Operation deadline exceeded.")
-        if status == "error":
-            raise SystemExit("Invalid regex.")
-        return payload
-    finally:
-        process.terminate()
-        process.join(1)
 
 
 def _grep_regex(
@@ -828,10 +572,18 @@ def unresolved_rehydration_tokens(text: str) -> list[str]:
 
 
 def atomic_write_text(path: Path, text: str, *, overwrite: bool = True) -> None:
+    """Write ``text`` to ``path`` through a temporary file in the same directory.
+
+    The temporary file is removed on every failure. Its name never contains
+    ``:``, so on Windows it cannot become an alternate data stream of a
+    stray base file. A failed publication raises the input-free
+    ``Could not publish output atomically.``.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_prefix = f".{path.name.replace(':', '_')}."
     if not overwrite:
         fd, tmp_name = tempfile.mkstemp(
-            prefix=f".{path.name}.",
+            prefix=tmp_prefix,
             suffix=".tmp",
             dir=path.parent,
             text=True,
@@ -859,7 +611,7 @@ def atomic_write_text(path: Path, text: str, *, overwrite: bool = True) -> None:
         return
 
     fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
+        prefix=tmp_prefix,
         suffix=".tmp",
         dir=path.parent,
         text=True,
@@ -870,9 +622,12 @@ def atomic_write_text(path: Path, text: str, *, overwrite: bool = True) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp_path, path)
+        try:
+            os.replace(tmp_path, path)
+        except OSError as exc:
+            raise SystemExit("Could not publish output atomically.") from exc
         fsync_directory(path.parent)
-    except Exception:
+    except BaseException:
         try:
             tmp_path.unlink()
         except OSError:
@@ -958,6 +713,10 @@ def command_doctor(args: argparse.Namespace, ctx: RedactedContext, redactor: Red
     print(f"allow_terms: {len(redactor.allow_terms)}")
     print(f"excluded_dirs: {len(ctx.exclude_dirs)}")
     print(f"excluded_globs: {len(ctx.exclude_globs)}")
+    if redactor.detectors:
+        # Names and versions only: detector arguments may be private paths.
+        listed = ", ".join(f"{detector.name} {detector.version}" for detector in redactor.detectors)
+        print(f"detectors: {listed}")
     return 0
 
 
@@ -1022,13 +781,13 @@ def audit_checks(
         "10.12.30.4",
     ]
     synthetic_text = "\n".join(synthetic_values)
-    synthetic_redactor = Redactor(redactor.config, mode=redactor.mode)
+    synthetic_redactor = Redactor(redactor.config, mode=redactor.mode, detectors=redactor.detectors)
     synthetic_redacted = synthetic_redactor.redact(synthetic_text)
     leaked = [value for value in synthetic_values if value in synthetic_redacted]
 
     salt_status = "PASS" if redactor.config.salt_source == "local-state" else "WARN"
 
-    return [
+    checks: list[dict[str, object]] = [
         {
             "category": "containment",
             "name": "symlink and reparse entries",
@@ -1097,6 +856,23 @@ def audit_checks(
             "detail": "raw write path not reported",
         },
     ]
+    if redactor.detectors:
+        # Keep the configuration checks together: right after the allow-list
+        # check (or at the end if that check is ever renamed).
+        anchor = next(
+            (index + 1 for index, check in enumerate(checks) if check["name"] == "overly broad allow entries"),
+            len(checks),
+        )
+        checks.insert(
+            anchor,
+            {
+                "category": "configuration",
+                "name": "plugged detectors",
+                "status": "PASS",
+                "detail": f"{len(redactor.detectors)} active in addition to the built-in baseline",
+            },
+        )
+    return checks
 
 
 def command_benchmark(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
@@ -1124,7 +900,7 @@ def command_benchmark(args: argparse.Namespace, ctx: RedactedContext, redactor: 
 
     query = args.query.casefold() if args.ignore_case else args.query
     matches = 0
-    chunk_redactor = Redactor(redactor.config, mode=redactor.mode)
+    chunk_redactor = Redactor(redactor.config, mode=redactor.mode, detectors=redactor.detectors)
     redact_seconds = 0.0
     search_seconds = 0.0
     redaction_read_bytes = 0
@@ -1173,16 +949,51 @@ def command_benchmark(args: argparse.Namespace, ctx: RedactedContext, redactor: 
     return 0
 
 
+def discovery_detectors(args: argparse.Namespace) -> tuple[Detector, ...]:
+    """Detectors selected by the ``discover``/``discover-update`` subcommand's own ``--detector``.
+
+    The global ``--detector`` configures serving and never switches discovery
+    away from Ollama. Combining the subcommand ``--detector`` with an explicit
+    ``--model`` or ``--endpoint`` is an error, because those only apply to
+    Ollama discovery.
+    """
+    loaded = getattr(args, "loaded_discovery_detectors", None)
+    detectors = tuple(loaded) if loaded is not None else load_detectors(getattr(args, "subcommand_detector", None) or [])
+    if detectors and (getattr(args, "model", None) is not None or getattr(args, "endpoint", None) is not None):
+        raise SystemExit(
+            "--model and --endpoint apply only to Ollama discovery; "
+            "remove them when drafting terms with --detector."
+        )
+    return detectors
+
+
+def ollama_model(args: argparse.Namespace) -> str:
+    return args.model if getattr(args, "model", None) is not None else DEFAULT_DISCOVERY_MODEL
+
+
+def ollama_endpoint(args: argparse.Namespace) -> str:
+    return args.endpoint if getattr(args, "endpoint", None) is not None else DEFAULT_OLLAMA_ENDPOINT
+
+
 def command_discover(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
-    if args.provider != "ollama":
-        raise SystemExit("Only the ollama discovery provider is currently supported.")
-    client = OllamaDiscoveryClient(
-        endpoint=args.endpoint,
-        model=args.model,
-        timeout=args.timeout,
-        postprocess=not args.raw_discovery,
-        allow_remote=getattr(args, "allow_remote_endpoint", False),
-    )
+    detectors = discovery_detectors(args)
+    client: OllamaDiscoveryClient | DetectorDiscoveryClient
+    if detectors:
+        # Local detectors replace the Ollama model; no network call is made.
+        client = DetectorDiscoveryClient(*detectors, postprocess=not args.raw_discovery)
+        source_note = f"provider=detector detectors={','.join(detector.name for detector in detectors)} root=."
+    else:
+        if args.provider != "ollama":
+            raise SystemExit("Only the ollama discovery provider is currently supported.")
+        model = ollama_model(args)
+        client = OllamaDiscoveryClient(
+            endpoint=ollama_endpoint(args),
+            model=model,
+            timeout=args.timeout,
+            postprocess=not args.raw_discovery,
+            allow_remote=getattr(args, "allow_remote_endpoint", False),
+        )
+        source_note = f"provider=ollama model={model} root=."
     result = discover_entities(
         ctx,
         paths=args.paths,
@@ -1199,7 +1010,7 @@ def command_discover(args: argparse.Namespace, ctx: RedactedContext, redactor: R
     else:
         output = format_discovery_toml(
             result,
-            source_note=f"provider=ollama model={args.model} root=.",
+            source_note=source_note,
         )
     write_discovery_output(ctx, output, args.output, force=args.force)
     return 0
@@ -1211,6 +1022,7 @@ def command_discover_update(
     redactor: Redactor | None,
 ) -> int:
     del redactor
+    detectors = discovery_detectors(args)
     try:
         if args.merge_only and args.input_jsonl:
             raise ValueError("--merge-only cannot be combined with --input-jsonl.")
@@ -1248,10 +1060,17 @@ def command_discover_update(
                 f"Discovery input exceeds --max-total-chars={args.max_total_chars}."
             )
 
-        if documents:
+        if documents and detectors:
+            # Local detectors replace the Ollama model; no network call is made.
+            result = discover_documents(
+                documents,
+                client=DetectorDiscoveryClient(*detectors, postprocess=True),
+                postprocess=True,
+            )
+        elif documents:
             client = OllamaDiscoveryClient(
-                endpoint=args.endpoint,
-                model=args.model,
+                endpoint=ollama_endpoint(args),
+                model=ollama_model(args),
                 timeout=args.timeout,
                 postprocess=True,
                 allow_remote=getattr(args, "allow_remote_endpoint", False),
@@ -1290,70 +1109,59 @@ def command_discover_update(
     write_discovery_update(config_path, update)
     counts = {key: len(values) for key, values in result.as_dict().items() if key != "allow"}
     print(f"documents: {len(documents)}")
-    print(f"model: {args.model if documents else 'skipped'}")
+    if detectors:
+        print("model: skipped")
+        print(f"detectors: {','.join(detector.name for detector in detectors)}")
+    else:
+        print(f"model: {ollama_model(args) if documents else 'skipped'}")
     print(f"discovered_counts: {json.dumps(counts, sort_keys=True, separators=(',', ':'))}")
     print(f"config_changed: {str(update.changed).lower()}")
     return 0
 
 
 def command_github_repos(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
-    for alias in sorted(redactor.config.github_repos):
-        print(alias)
+    print(github_repos_text(GitHubSource.from_config(redactor.config)), end="")
     return 0
 
 
 def command_github_issues(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
-    issues = github_list_issues(
-        redactor.config,
+    text = github_issue_list_text(
+        GitHubSource.from_config(redactor.config),
+        redactor,
         repo_alias=args.repo_alias,
-        state=validate_github_state(args.state),
+        state=args.state,
         labels=args.label,
-        limit=validate_positive_limit(args.limit, "--limit"),
+        limit=args.limit,
     )
-    for issue in issues:
-        print(format_github_issue_summary(args.repo_alias, issue, redactor))
-    return 0 if issues else 1
+    print(text, end="")
+    return 0 if text else 1
 
 
 def command_github_issue(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
-    issue = github_read_issue(
-        redactor.config,
+    text = github_issue_detail_text(
+        GitHubSource.from_config(redactor.config),
+        redactor,
         repo_alias=args.repo_alias,
         number=args.number,
+        comments=args.comments,
+        max_comments=args.max_comments,
+        max_body_chars=args.max_body_chars,
     )
-    comments: list[dict[str, object]] = []
-    max_comments = validate_nonnegative_limit(args.max_comments, "--max-comments")
-    if args.comments and max_comments > 0:
-        comments = github_read_issue_comments(
-            redactor.config,
-            repo_alias=args.repo_alias,
-            number=args.number,
-            limit=max_comments,
-        )
-    print(
-        format_github_issue_detail(
-            args.repo_alias,
-            issue,
-            comments,
-            redactor,
-            max_body_chars=validate_positive_limit(args.max_body_chars, "--max-body-chars"),
-        ),
-        end="",
-    )
+    print(text, end="")
     return 0
 
 
 def command_github_search(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
-    issues = github_search_issues(
-        redactor.config,
+    text = github_issue_search_text(
+        GitHubSource.from_config(redactor.config),
+        redactor,
         repo_alias=args.repo_alias,
         query=args.query,
-        state=validate_github_state(args.state),
-        limit=validate_positive_limit(args.limit, "--limit"),
+        state=args.state,
+        limit=args.limit,
     )
-    for issue in issues:
-        print(format_github_issue_summary(args.repo_alias, issue, redactor))
-    return 0 if issues else 1
+    print(text, end="")
+    return 0 if text else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1380,6 +1188,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="include normally excluded private/cache paths",
     )
     parser.add_argument("--documents", action="store_true", help="enable local document extraction; requires the documents extra")
+    add_detector_argument(parser)
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -1494,13 +1303,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="paths to scan; empty scans the root",
     )
     discover_parser.add_argument("--provider", choices=("ollama",), default="ollama")
-    discover_parser.add_argument("--endpoint", default=DEFAULT_OLLAMA_ENDPOINT)
+    discover_parser.add_argument("--endpoint", default=None, help=OLLAMA_ENDPOINT_HELP)
     discover_parser.add_argument(
         "--allow-remote-endpoint",
         action="store_true",
         help="allow non-loopback plain-http endpoints (sends private text off-machine)",
     )
-    discover_parser.add_argument("--model", default=DEFAULT_DISCOVERY_MODEL)
+    discover_parser.add_argument("--model", default=None, help=OLLAMA_MODEL_HELP)
     discover_parser.add_argument("--timeout", type=float, default=120.0)
     discover_parser.add_argument("--glob", action="append", default=[])
     discover_parser.add_argument("--max-files", type=int, default=DEFAULT_DISCOVERY_MAX_FILES)
@@ -1522,6 +1331,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"write output under the root, for example {LOCAL_CONFIG}",
     )
     discover_parser.add_argument("--force", action="store_true", help="overwrite --output if it exists")
+    add_detector_argument(discover_parser, dest="subcommand_detector", help=DISCOVERY_DETECTOR_HELP)
     discover_parser.set_defaults(func=command_discover)
 
     discover_update_parser = subparsers.add_parser(
@@ -1532,13 +1342,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--input-jsonl",
         help="JSONL file containing path/text objects, or - for stdin",
     )
-    discover_update_parser.add_argument("--endpoint", default=DEFAULT_OLLAMA_ENDPOINT)
+    discover_update_parser.add_argument("--endpoint", default=None, help=OLLAMA_ENDPOINT_HELP)
     discover_update_parser.add_argument(
         "--allow-remote-endpoint",
         action="store_true",
         help="allow non-loopback plain-http endpoints (sends private text off-machine)",
     )
-    discover_update_parser.add_argument("--model", default=DEFAULT_DISCOVERY_MODEL)
+    discover_update_parser.add_argument("--model", default=None, help=OLLAMA_MODEL_HELP)
     discover_update_parser.add_argument("--timeout", type=float, default=120.0)
     discover_update_parser.add_argument("--max-files", type=int, default=DEFAULT_DISCOVERY_MAX_FILES)
     discover_update_parser.add_argument(
@@ -1567,6 +1377,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="merge the seed and existing config without reading documents or calling a model",
     )
+    add_detector_argument(discover_update_parser, dest="subcommand_detector", help=DISCOVERY_DETECTOR_HELP)
     discover_update_mode = discover_update_parser.add_mutually_exclusive_group()
     discover_update_mode.add_argument(
         "--dry-run",
@@ -1615,6 +1426,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+DETECTOR_HELP = (
+    "enable an additional local detector on top of the built-in baseline; "
+    "repeatable, NAME or NAME=ARGUMENT (for example patterns=rules.toml)"
+)
+DISCOVERY_DETECTOR_HELP = (
+    "draft terms with a local detector instead of the Ollama model; "
+    "repeatable, NAME or NAME=ARGUMENT; the global --detector does not apply to discovery"
+)
+OLLAMA_ENDPOINT_HELP = f"Ollama endpoint (Ollama discovery only; {DEFAULT_OLLAMA_ENDPOINT} when omitted)"
+OLLAMA_MODEL_HELP = f"Ollama model (Ollama discovery only; {DEFAULT_DISCOVERY_MODEL} when omitted)"
+
+
+def add_detector_argument(
+    parser: argparse.ArgumentParser,
+    *,
+    dest: str = "detector",
+    help: str = DETECTOR_HELP,
+) -> None:
+    parser.add_argument("--detector", dest=dest, action="append", metavar="SPEC", default=None, help=help)
+
+
 def add_budget_arguments(
     parser: argparse.ArgumentParser,
     *,
@@ -1659,6 +1491,12 @@ def main(argv: list[str] | None = None) -> int:
     root = args.root.expanduser().resolve()
     if not root.exists() or not root.is_dir():
         raise SystemExit("Root must be an existing directory.")
+    # Detectors load once per invocation; startup errors go to the operator.
+    # The global --detector serves redaction; only the discover subcommands'
+    # own --detector selects detector-based discovery.
+    detectors = load_detectors(args.detector or [])
+    discovery = load_detectors(getattr(args, "subcommand_detector", None) or [])
+    args.loaded_discovery_detectors = discovery
     if args.func is command_discover_update:
         # Hook-facing discovery updates do not read redacted context and must
         # not require or initialize vault-salt state.
@@ -1668,10 +1506,12 @@ def main(argv: list[str] | None = None) -> int:
             None,
         )
     config = load_config(root, args.config.expanduser().resolve() if args.config else None)
+    if detectors or discovery:
+        config = with_protected_paths(config, root, detector_protected_paths((*detectors, *discovery)))
     if args.detector_profile:
         config = replace(config, detector_profile=args.detector_profile)
     ctx = RedactedContext(root, config, include_private=args.include_private, documents=args.documents)
-    redactor = Redactor(config, mode=args.mode)
+    redactor = Redactor(config, mode=args.mode, detectors=detectors)
     return args.func(args, ctx, redactor)
 
 

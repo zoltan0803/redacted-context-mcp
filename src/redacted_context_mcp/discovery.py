@@ -22,6 +22,7 @@ from .defaults import (
     COUNTRY_OR_REGION_ONLY,
     DEFAULT_ALLOW_TERMS,
     DISCOVERY_KEYS,
+    DISCOVERY_SENSITIVE_KEYS,
     FILENAME_OR_EXTENSION_RE,
     GENERIC_ORG_WORDS,
     GENERIC_TERM_PATTERNS,
@@ -30,6 +31,7 @@ from .defaults import (
     RESERVED_PLACEHOLDER_WORDS,
     ROLE_WORDS,
 )
+from .detectors import Detector, run_detector
 from .filesystem import RedactedContext, iter_target_files, read_text_file
 from .limits import OperationBudget, OperationLimitError
 from .models import DiscoveryDocument, DiscoveryParseError, DiscoveryResult, DiscoveryUpdate
@@ -43,6 +45,46 @@ class DiscoveryClient(Protocol):
 
 
 LOCAL_ENDPOINT_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+# Canonical detector categories that feed discovery buckets. Every other
+# category (EMAIL, URL, DOMAIN, PHONE, IP, SECRET, ID, ...) is already found by
+# the deterministic baseline regexes, so discovery skips it.
+DETECTOR_DISCOVERY_KEYS = {
+    "PERSON": "people",
+    "ORG": "organizations",
+    "CLIENT": "clients",
+    "SENSITIVE": "terms",
+    "ENTITY": "terms",
+}
+
+
+class DetectorDiscoveryClient:
+    """Adapt plugged detectors to the ``DiscoveryClient`` protocol.
+
+    Lets ``redctx discover --detector ...`` and ``discover-update`` draft
+    redaction terms from a local detector instead of an Ollama model. Values
+    go through the same cleaning, post-processing, and source filtering as
+    model output. Detector failures surface as ``"Detector failed."``.
+    """
+
+    def __init__(self, *detectors: Detector, postprocess: bool = True) -> None:
+        if not detectors:
+            raise ValueError("DetectorDiscoveryClient requires at least one detector.")
+        self.detectors = detectors
+        self.postprocess = postprocess
+
+    def extract(self, *, rel_path: str, text: str) -> DiscoveryResult:
+        del rel_path
+        buckets: dict[str, list[str]] = {key: [] for key in DISCOVERY_SENSITIVE_KEYS}
+        for detector in self.detectors:
+            for span in run_detector(detector, text):
+                key = DETECTOR_DISCOVERY_KEYS.get(span.category)
+                if key is not None:
+                    buckets[key].append(text[span.start : span.end])
+        result = DiscoveryResult(**{key: clean_discovered_terms(values) for key, values in buckets.items()})
+        if self.postprocess:
+            result = postprocess_discovery_result(result)
+        return filter_discovery_to_source(result, text)
 
 
 def validate_local_ollama_endpoint(endpoint: str) -> None:

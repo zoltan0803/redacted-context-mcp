@@ -1,4 +1,8 @@
-"""Small, dependency-free passage retrieval over redacted text only."""
+"""Small, dependency-free passage retrieval over redacted text only.
+
+Retrieval is source-agnostic: it ranks documents yielded by any context
+source's ``iter_documents`` and redacts each document before tokenizing.
+"""
 
 from __future__ import annotations
 
@@ -6,12 +10,15 @@ from collections import Counter
 from dataclasses import dataclass
 import math
 import re
+from typing import TYPE_CHECKING
 
 from .defaults import PLACEHOLDER_RE
-from .filesystem import RedactedContext, iter_target_files
 from .limits import OperationBudget, OperationLimitError
-from .paths import rel_posix
+from .models import DOCUMENTS_UNSUPPORTED_MESSAGE
 from .redaction import Redactor
+
+if TYPE_CHECKING:
+    from .sources import ContextSource
 
 TOKEN_RE = re.compile(rf"{PLACEHOLDER_RE.pattern}|[^\W_]+(?:[-'][^\W_]+)*", re.UNICODE)
 STOP_WORDS = frozenset("a an and are as at be by for from how in is it of on or that the this to was what when where which who with".split())
@@ -69,10 +76,17 @@ def passages(text: str):
 
 
 def retrieve(
-    ctx: RedactedContext, redactor: Redactor, query: str, *,
+    source: ContextSource, redactor: Redactor, query: str, *,
     paths: list[str], globs: list[str], budget: OperationBudget,
     max_results: int = 8, max_chars: int = 12_000,
 ) -> str:
+    """Rank redacted passages from ``source``'s documents.
+
+    ``paths`` and ``globs`` are passed to the source as its document scope and
+    patterns. The source charges traversal and reads to ``budget``. Passages
+    from a source with ``untrusted_content`` carry an ``untrusted_external``
+    marker as the last header field.
+    """
     if not 1 <= max_results <= 50 or not 256 <= max_chars <= 100_000:
         raise SystemExit("Retrieval requires max_results between 1 and 50 and max_chars between 256 and 100000.")
     if len(query) > 2000:
@@ -80,14 +94,14 @@ def retrieve(
     terms = set(tokens(query)) - STOP_WORDS
     if not terms or len(terms) > 64:
         raise SystemExit("Retrieval requires 1 to 64 searchable query terms.")
+    if not source.supports_document_iteration:
+        raise SystemExit(DOCUMENTS_UNSUPPORTED_MESSAGE)
     candidates: list[tuple[Passage, Counter[str], int]] = []
     frequency: Counter[str] = Counter()
     count = total_length = 0
-    for path in iter_target_files(ctx, paths, globs, budget=budget):
-        raw = ctx.read_text(path, budget=budget)
-        redacted = redactor.redact(raw, preserve_line_count=True)
-        rel = rel_posix(path, ctx.root)
-        ref, safe_path = ctx.display_ref(rel), redactor.redact_path(rel)
+    for document in source.iter_documents(budget, scope=paths, patterns=globs):
+        redacted = redactor.redact(document.text, preserve_line_count=True)
+        ref, safe_path = document.ref, redactor.redact_path(document.locator)
         for start, end, text in passages(redacted):
             budget.check_deadline()
             count += 1
@@ -115,10 +129,11 @@ def retrieve(
     output = ""
     selected = 0
     marker = "[TRUNCATED: more matching passages; narrow the query or increase limits]\n"
+    untrusted = " untrusted_external" if source.untrusted_content else ""
     for passage, _matches, _length in candidates[:max_results]:
         entry = (
             f"--- {passage.ref} {passage.path} lines {passage.start_line}-{passage.end_line} "
-            f"score={passage.score:.3f} ---\n{passage.text}\n\n"
+            f"score={passage.score:.3f}{untrusted} ---\n{passage.text}\n\n"
         )
         if len(output) + len(entry) + len(marker) > max_chars:
             # Return complete cited passages; do not mislabel truncated text

@@ -13,3 +13,4 @@ build/
 .redacted-context-mcp/
 agent-workdir/work/*
 !agent-workdir/work/.gitkeep
+node_modules/

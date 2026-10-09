@@ -1,0 +1,8 @@
+{
+  "name": "redacted-context-mcp-inspector-ci",
+  "private": true,
+  "description": "Pinned MCP Inspector for the protocol CI job; install with npm ci.",
+  "dependencies": {
+    "@modelcontextprotocol/inspector": "2.4.0"
+  }
+}

@@ -10,24 +10,18 @@ from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
-from redacted_context_mcp import core, server
+from redacted_context_mcp import core, github, server
 from redacted_context_mcp.github import opaque_github_user
 from redacted_context_mcp.models import RedactionConfig
-from tests.fixtures import CLIENT_NAME, ORGANIZATION_NAME, PERSON_ONE, PERSON_TWO, PROJECT_TERM, write_redaction_config
-
-
-class FakeHttpResponse:
-    def __init__(self, payload: object) -> None:
-        self.body = json.dumps(payload).encode("utf-8")
-
-    def __enter__(self) -> "FakeHttpResponse":
-        return self
-
-    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
-        return None
-
-    def read(self) -> bytes:
-        return self.body
+from tests.fixtures import (
+    CLIENT_NAME,
+    ORGANIZATION_NAME,
+    PERSON_ONE,
+    PERSON_TWO,
+    PROJECT_TERM,
+    FakeHttpResponse,
+    write_redaction_config,
+)
 
 
 class GitHubIssueTest(unittest.TestCase):
@@ -156,6 +150,75 @@ class GitHubIssueTest(unittest.TestCase):
 
         self.assertIn("redctx_github_list_issues", names)
         self.assertIn("redctx_github_read_issue", names)
+
+    def make_mcp(self) -> server.RedactedContextMcp:
+        return server.RedactedContextMcp(root=self.root, config_path=None, mode="strict", include_private=False)
+
+    def test_non_integer_number_and_comment_count_are_never_printed(self) -> None:
+        # Numeric fields are printed without redaction, so a crafted upstream
+        # payload must not be able to smuggle text through them.
+        crafted = {"number": CLIENT_NAME, "comments": ORGANIZATION_NAME}
+        detail_args = Namespace(repo_alias="context", number=7, comments=False, max_comments=0, max_body_chars=100)
+        urlopen = "redacted_context_mcp.github.urllib.request.urlopen"
+
+        with patch(urlopen, return_value=FakeHttpResponse([crafted])):
+            cli_list = self.run_command(
+                core.command_github_issues, Namespace(repo_alias="context", state="open", label=[], limit=5)
+            )
+        with patch(urlopen, return_value=FakeHttpResponse(crafted)):
+            cli_detail = self.run_command(core.command_github_issue, detail_args)
+        mcp = self.make_mcp()
+        with patch(urlopen, return_value=FakeHttpResponse([crafted])):
+            mcp_list = mcp.call_tool("redctx_github_list_issues", {"repo_alias": "context"})
+        with patch(urlopen, return_value=FakeHttpResponse(crafted)):
+            mcp_detail = mcp.call_tool("redctx_github_read_issue", {"repo_alias": "context", "number": 7})
+
+        self.assertFalse(mcp_list["isError"])
+        self.assertFalse(mcp_detail["isError"])
+        self.assertEqual(mcp_list["content"][0]["text"], cli_list)
+        self.assertEqual(mcp_detail["content"][0]["text"], cli_detail)
+        self.assertTrue(cli_list.startswith("context#?\tstate=\tupdated=\tcomments=0\t"))
+        self.assertIn("issue: #?\n", cli_detail)
+        for output in (cli_list, cli_detail, json.dumps(mcp_list), json.dumps(mcp_detail)):
+            self.assertNotIn(CLIENT_NAME, output)
+            self.assertNotIn(ORGANIZATION_NAME, output)
+
+    def test_numeric_fields_accept_only_non_negative_integers(self) -> None:
+        for value in (True, False, -1, 1.0, "7", None, [7], {"n": 7}):
+            with self.subTest(value=value):
+                issue = github.github_issue_from_api("context", {"number": value, "comments": value})
+                self.assertIsNone(issue.number)
+                self.assertEqual(issue.comment_count, 0)
+                self.assertEqual(issue.ref, "context#?")
+        issue = github.github_issue_from_api("context", {"number": 12, "comments": 3, "assignees": "x"})
+        self.assertEqual((issue.number, issue.comment_count, issue.assignee_count), (12, 3, 0))
+        self.assertEqual(issue.ref, "context#12")
+
+    def test_oversized_github_response_fails_closed(self) -> None:
+        cap = 64
+        exact = b"[]" + b" " * (cap - 2)
+        urlopen = "redacted_context_mcp.github.urllib.request.urlopen"
+        list_args = Namespace(repo_alias="context", state="open", label=[], limit=5)
+        with patch.object(github, "GITHUB_MAX_RESPONSE_BYTES", cap):
+            with patch(urlopen, return_value=FakeHttpResponse(None, body=exact)):
+                self.assertEqual(self.run_command(core.command_github_issues, list_args), "")
+            with patch(urlopen, return_value=FakeHttpResponse(None, body=exact + b" ")):
+                with self.assertRaises(SystemExit) as caught:
+                    self.run_command(core.command_github_issues, list_args)
+            with patch(urlopen, return_value=FakeHttpResponse(None, body=exact + b" " * 1000)):
+                result = self.make_mcp().call_tool("redctx_github_list_issues", {"repo_alias": "context"})
+        self.assertEqual(str(caught.exception), "GitHub response too large.")
+        self.assertEqual(str(caught.exception), github.GITHUB_RESPONSE_TOO_LARGE_MESSAGE)
+        self.assertTrue(result["isError"])
+        self.assertEqual(result["content"][0]["text"], "GitHub response too large.")
+        self.assertEqual(github.GITHUB_MAX_RESPONSE_BYTES, 8 * 1024 * 1024)
+
+    def test_github_response_read_is_bounded(self) -> None:
+        response = FakeHttpResponse([])
+        with patch.object(response, "read", wraps=response.read) as read:
+            with patch("redacted_context_mcp.github.urllib.request.urlopen", return_value=response):
+                self.run_command(core.command_github_issues, Namespace(repo_alias="context", state="open", label=[], limit=5))
+        read.assert_called_once_with(github.GITHUB_MAX_RESPONSE_BYTES + 1)
 
 
 if __name__ == "__main__":

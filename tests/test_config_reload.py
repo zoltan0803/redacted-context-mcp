@@ -105,6 +105,10 @@ class ConfigReloadTest(unittest.TestCase):
         self.write_config('allow = ["quokkaproject"]\n')
         self.assertIn("quokkaproject", json.dumps(self.mcp.list_resources({})))
         self.write_config('terms = ["quokkaproject"]\n')
+        # The rewrite has the same size and may land within one timestamp
+        # tick; move the mtime forward so the metadata probe sees the change.
+        stat = self.config.stat()
+        os.utime(self.config, ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))
         self.assertNotIn("quokkaproject", json.dumps(self.mcp.list_resources({})))
 
     def test_invalid_config_blocks_access_and_recovers_after_repair(self) -> None:
@@ -132,6 +136,75 @@ class ConfigReloadTest(unittest.TestCase):
         with patch.dict(server.TOOL_HANDLERS, redctx_github_repos=lambda *_: self.fail("GitHub handler ran")):
             self.assertTrue(self.mcp.call_tool("redctx_github_repos", {})["isError"])
         self.assertFalse((self.root / "incoming").exists())
+
+    def test_reload_rebuilds_source_registry(self) -> None:
+        github = '[github.repos.context]\nowner = "example-owner"\nrepo = "example-repo"\n'
+        self.assertEqual(self.mcp.sources.names(), ("filesystem",))
+        self.assertEqual(self.mcp.call_tool("redctx_github_repos", {})["content"][0]["text"], "OK\n")
+
+        self.read()
+        self.assertEqual(self.mcp.cache.stats()["entries"], 1)
+        self.write_config(github)
+        result = self.mcp.call_tool("redctx_github_repos", {})
+        self.assertFalse(result["isError"])
+        self.assertEqual(result["content"][0]["text"], "context\n")
+        self.assertEqual(self.mcp.sources.names(), ("filesystem", "github"))
+        self.assertIs(self.mcp.sources.github.config, self.mcp.ctx.config)
+        self.assertIs(self.mcp.redactor.config, self.mcp.ctx.config)
+        self.assertEqual(self.mcp.cache.stats()["entries"], 0)
+
+        # An invalid policy blocks every source and clears the cache; the
+        # candidate registry is never published.
+        self.read()
+        self.config.write_text("broken = [", encoding="utf-8")
+        blocked = self.mcp.call_tool("redctx_github_repos", {})
+        self.assertTrue(blocked["isError"])
+        self.assertIn("Context access is blocked", blocked["content"][0]["text"])
+        self.assertEqual(self.mcp.cache.stats()["entries"], 0)
+
+        # Repairing the policy without the GitHub section removes the source.
+        self.write_config()
+        self.read()
+        self.assertEqual(self.mcp.sources.names(), ("filesystem",))
+        self.assertIsNone(self.mcp.sources.github)
+        self.assertEqual(self.mcp.call_tool("redctx_github_repos", {})["content"][0]["text"], "OK\n")
+        removed = self.mcp.call_tool("redctx_github_list_issues", {"repo_alias": "context"})
+        self.assertTrue(removed["isError"])
+        self.assertEqual(removed["content"][0]["text"], "Unknown GitHub repo alias.")
+        self.assertNotIn("example-owner", json.dumps(removed))
+
+    def test_source_build_failure_blocks_and_recovers(self) -> None:
+        self.assertIn("quokkaproject", self.read())
+        old_sources = self.mcp.sources
+        old_redactor = self.mcp.redactor
+        self.assertEqual(self.mcp.cache.stats()["entries"], 1)
+        real_build_sources = server.rc.build_sources
+        calls: list[int] = []
+
+        def build_sources_failing_once(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError(f"quokkaproject {self.root}")
+            return real_build_sources(*args, **kwargs)
+
+        self.write_config('terms = ["quokkaproject"]\n')
+        with patch.object(server.rc, "build_sources", build_sources_failing_once):
+            with self.assertRaisesRegex(server.ProtocolError, "Context access is blocked") as caught:
+                self.read()
+            self.assertNotIn("quokkaproject", str(caught.exception))
+            self.assertNotIn(str(self.root), str(caught.exception))
+            # The old sources and redactor stay published; cached content is gone.
+            self.assertIs(self.mcp.sources, old_sources)
+            self.assertIs(self.mcp.redactor, old_redactor)
+            self.assertEqual(self.mcp.cache.stats()["entries"], 0)
+
+            recovered = self.read()
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("quokkaproject", recovered)
+        self.assertIn("[SENSITIVE_", recovered)
+        self.assertIsNot(self.mcp.sources, old_sources)
+        self.assertIsNot(self.mcp.redactor, old_redactor)
+        self.assertIs(self.mcp.redactor.config, self.mcp.ctx.config)
 
     def test_removed_config_blocks_instead_of_falling_back(self) -> None:
         self.config.unlink()

@@ -47,6 +47,19 @@ jobs:
       - run: python -m pip install -e '.[documents]'
       - run: python -m unittest tests.test_documents tests.test_retrieval tests.test_cli.RedactedContextCliTest.test_document_retrieval_cli tests.test_mcp.RedactedContextMcpTest.test_document_read_and_retrieve_over_stdio
 
+  presidio:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -e '.[presidio]'
+      - run: python -m spacy download en_core_web_sm
+      - run: python -m unittest -v tests.test_detectors_presidio tests.test_detectors.LoadDetectorsTest
+        env:
+          REDCTX_REAL_DETECTOR_TESTS: "1"
+
   package:
     runs-on: ubuntu-latest
     steps:
@@ -121,6 +134,10 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
+          cache: npm
+          cache-dependency-path: ci/mcp-inspector/package-lock.json
+      - name: Install pinned MCP Inspector
+        run: npm ci --prefix ci/mcp-inspector --ignore-scripts --no-audit --no-fund
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: python-package-distributions
@@ -132,12 +149,13 @@ jobs:
           echo "$PWD/mcp-smoke/bin" >> "$GITHUB_PATH"
       - name: Validate tools and resources with official MCP Inspector
         run: |
-          npx --yes @modelcontextprotocol/inspector@2.4.0 --cli \
+          inspector=ci/mcp-inspector/node_modules/.bin/mcp-inspector
+          "$inspector" --cli \
             --config examples/mcp-inspector.json \
             --server redacted_context_${{ matrix.protocol_era }} \
             --method tools/list \
             --strict
-          npx --yes @modelcontextprotocol/inspector@2.4.0 --cli \
+          "$inspector" --cli \
             --config examples/mcp-inspector.json \
             --server redacted_context_${{ matrix.protocol_era }} \
             --method resources/list
