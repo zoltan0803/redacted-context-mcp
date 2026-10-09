@@ -105,6 +105,10 @@ class ConfigReloadTest(unittest.TestCase):
         self.write_config('allow = ["quokkaproject"]\n')
         self.assertIn("quokkaproject", json.dumps(self.mcp.list_resources({})))
         self.write_config('terms = ["quokkaproject"]\n')
+        # The rewrite has the same size and may land within one timestamp
+        # tick; move the mtime forward so the metadata probe sees the change.
+        stat = self.config.stat()
+        os.utime(self.config, ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))
         self.assertNotIn("quokkaproject", json.dumps(self.mcp.list_resources({})))
 
     def test_invalid_config_blocks_access_and_recovers_after_repair(self) -> None:
