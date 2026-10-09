@@ -1595,7 +1595,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "readOnlyHint": True,
             "destructiveHint": False,
             "idempotentHint": True,
-            "openWorldHint": True,
+            "openWorldHint": False,
         },
         "inputSchema": {"type": "object", "properties": {}},
     },

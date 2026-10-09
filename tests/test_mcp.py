@@ -227,6 +227,9 @@ class RedactedContextMcpTest(unittest.TestCase):
         self.assertIn("outputSchema", read_tool)
         github_tool = next(tool for tool in tools if tool["name"] == "redctx_github_list_issues")
         self.assertTrue(github_tool["annotations"]["openWorldHint"])
+        # Listing aliases reads local config only, so it is not an open-world tool.
+        repos_tool = next(tool for tool in tools if tool["name"] == "redctx_github_repos")
+        self.assertFalse(repos_tool["annotations"]["openWorldHint"])
         self.assertNotIn("redctx_submit_doc", names)
         self.assertEqual({"tools": tools}, load_snapshot(TOOLS_READ_ONLY_SNAPSHOT))
         templates = self.rpc("resources/templates/list")["result"]

@@ -959,7 +959,7 @@
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
-        "openWorldHint": true,
+        "openWorldHint": false,
         "readOnlyHint": true
       },
       "description": "List the GitHub repo aliases configured in the local policy, one per line, or `OK` when none are configured. Call it to find valid `repo_alias` values for `redctx_github_list_issues`, `redctx_github_search_issues` and `redctx_github_read_issue`; aliases are neutral names and the real owner/repo is never shown. It reads local configuration only and makes no GitHub request.",

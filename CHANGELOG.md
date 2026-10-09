@@ -139,6 +139,8 @@
   annotations, and behaviour are unchanged. The MCP server instructions now
   name `redctx_search` for exact or regex line matches, and the README lists
   every MCP tool, including the GitHub tools and `redctx_submit_doc`.
+- Marks `redctx_github_repos` as closed-world (`openWorldHint: false`): it
+  only reads the local repo aliases and never contacts GitHub.
 
 ## 0.8.0 — 2026-09-12
 
