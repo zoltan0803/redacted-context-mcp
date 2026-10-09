@@ -2112,6 +2112,68 @@ class PatternsStressTest(unittest.TestCase):
         self.assertFalse(regex_safety._superlinear(0.01, 0.04))
         self.assertTrue(regex_safety._superlinear(0.01, 0.16))
 
+    def test_growth_limit_is_midway_between_linear_and_quadratic(self) -> None:
+        step = regex_safety.REGEX_STRESS_INPUT_CHARS / regex_safety.REGEX_STRESS_SMALL_CHARS
+        self.assertEqual(regex_safety.REGEX_STRESS_GROWTH_LIMIT, (step * step**2) ** 0.5)
+        self.assertFalse(regex_safety._superlinear(0.01, 0.08))
+        self.assertTrue(regex_safety._superlinear(0.01, 0.081))
+        self.assertFalse(regex_safety._superlinear(0.005, 0.039))
+
+    def _retime(
+        self, smalls: Sequence[tuple[float, float]], larges: Sequence[float], tick: float = 0.0
+    ) -> tuple[bool, list[str]]:
+        calls: list[str] = []
+        small_runs, large_runs = iter(smalls), iter(larges)
+
+        def time_small() -> tuple[float, float]:
+            calls.append("small")
+            return next(small_runs)
+
+        def time_large() -> tuple[float, float]:
+            calls.append("large")
+            return next(large_runs), 99.0
+
+        return regex_safety._grows_superlinearly(time_small, time_large, tick), calls
+
+    def test_a_linear_pair_is_timed_once(self) -> None:
+        self.assertEqual(self._retime([(0.006, 0.006)], [0.024]), (False, ["small", "large"]))
+
+    def test_a_suspicious_pair_is_retimed_interleaved_and_kept_at_its_fastest(self) -> None:
+        # A preempted or throttled large run looks superlinear until a clean run arrives.
+        superlinear, calls = self._retime([(0.006, 0.006)] * 3, [0.06, 0.06, 0.024])
+        self.assertFalse(superlinear)
+        self.assertEqual(calls, ["small", "large"] * 3)
+        # The fastest small run is kept, so a later slow small run cannot hide growth.
+        superlinear, calls = self._retime([(0.005, 0.005), (0.02, 0.02), (0.02, 0.02)], [0.05, 0.05, 0.03])
+        self.assertFalse(superlinear)
+        self.assertEqual(len(calls), 6)
+
+    def test_persistent_growth_is_rejected_after_the_last_repeat(self) -> None:
+        repeats = regex_safety.REGEX_STRESS_REPEATS
+        superlinear, calls = self._retime([(0.01, 0.01)] * repeats, [0.16] * repeats)
+        self.assertTrue(superlinear)
+        self.assertEqual(calls, ["small", "large"] * repeats)
+        superlinear, calls = self._retime([(0.01, 0.01)] * repeats, [0.16] * (repeats - 1) + [0.04])
+        self.assertFalse(superlinear)
+
+    def test_coarse_cpu_clock_rounding_never_counts_against_a_rule(self) -> None:
+        tick = 0.015625
+        repeats = regex_safety.REGEX_STRESS_REPEATS
+        # A 4 ms small run read as zero CPU ticks is bounded by its wall time.
+        self.assertFalse(self._retime([(0.0, 0.004)] * repeats, [0.03125] * repeats, tick)[0])
+        self.assertTrue(self._retime([(0.0, 0.004)] * repeats, [0.0625] * repeats, tick)[0])
+        # A small run read as one tick may really have taken up to two.
+        self.assertFalse(self._retime([(tick, 0.5)] * repeats, [0.25] * repeats, tick)[0])
+        self.assertTrue(self._retime([(tick, 0.5)] * repeats, [0.28] * repeats, tick)[0])
+
+    def test_cpu_clock_tick_is_measured_and_a_stuck_clock_is_detected(self) -> None:
+        readings = [0.0, 0.0, 0.015625, 0.015625, 0.015625, 0.03125]
+        with patch("time.process_time", side_effect=readings), patch("time.perf_counter", return_value=0.0):
+            self.assertEqual(regex_safety._cpu_clock_tick(), 0.015625)
+        clock = itertools.count(0, 0.5)
+        with patch("time.process_time", return_value=1.0), patch("time.perf_counter", side_effect=clock):
+            self.assertIsNone(regex_safety._cpu_clock_tick())
+
     def test_factory_rejects_a_slow_rule_by_number_without_echoing_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             rules = Path(tmp) / "patterns.toml"

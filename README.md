@@ -539,18 +539,21 @@ catastrophic backtracking and then stress-tested in a separate process: every
 rule is timed over synthetic inputs built from its own character classes and
 literal prefix (for example a long run of capital letters for `[A-Z]+\d`), at
 10,000 and 40,000 characters. A rule is rejected with its rule number (never
-its text) as too slow when one run takes more than 2 seconds, or as
-superlinear when the larger input takes more than six times as long as the
-smaller one. This adds about 2.5 seconds to startup for 256 simple anchored
-rules (0.2 seconds for one rule, most of it starting the process). The checks
-catch common mistakes, not every slow pattern: a pathological rule can still
-stall your own server, so anchor rules with literal text (`TICKET-\d{4,}`
-rather than `\w+-\d+`) and keep them simple. Rules that are unanchored or
-anchored only with `\b`, and whose unbounded classes mix `.` or `-` with
-word characters, are quadratic on text such as `a.a.a.…` (every position is
-a word boundary and starts a new attempt) and are rejected. The common email
-rule `\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b` is one of them;
-bound the repeated part instead, for example
+its text) as too slow when one run takes more than 2 seconds, or as superlinear
+when the larger input takes more than eight times as much CPU time as the
+smaller one (linear growth is four times, quadratic sixteen). Growth is
+measured in CPU time and a suspicious rule is re-timed up to five times, so a
+busy machine does not reject a linear rule. This adds about 2.5 seconds to
+startup for 256 simple anchored rules (0.2 seconds for one rule, most of it
+starting the process). The checks catch common mistakes, not every slow
+pattern: a pathological rule can still stall your own server, so anchor rules
+with literal text (`TICKET-\d{4,}` rather than `\w+-\d+`) and keep them simple.
+Rules that are unanchored or anchored only with `\b`, and whose unbounded
+classes mix `.` or `-` with word characters, are quadratic on text such as
+`a.a.a.…` (every position is a word boundary and starts a new attempt) and are
+rejected. The common email rule
+`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b` is one of them; bound the
+repeated part instead, for example
 `\b[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b`.
 
 If the rules file lies under the served root it is treated like a term file:
