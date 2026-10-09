@@ -338,12 +338,19 @@ lower case followed by a run of the next atom's character, the rule's
 one-character-per-atom
 skeleton and its near miss cycled, and generic word, digit, and punctuation
 inputs. Every input is timed at 10,000 and 40,000 characters. A rule is
-rejected by number as "too slow" when one run exceeds 2 seconds (the worker
-is killed), or as "superlinear" when the larger input takes more than six
-times as long as the smaller one (linear growth is 4x, quadratic 16x).
-Growth is judged only when the larger run takes at least 20 ms, and a
-suspicious pair is re-timed with the fastest of three runs kept, so timer
-noise and loaded machines do not reject linear rules. This catches the
+rejected by number as "too slow" when one run exceeds 2 seconds of wall
+time (the worker is killed), or as "superlinear" when the larger input
+takes more than eight times as much CPU time as the smaller one (linear
+growth is 4x, quadratic 16x; 8x is their geometric midpoint, a 2x margin
+on both sides). Growth is measured with `time.process_time`, so other
+processes preempting the worker inflate neither run, and is judged only
+when the larger run takes at least 20 ms of CPU time. Where the CPU clock
+is coarse (Windows advances it in 15.625 ms ticks, measured at worker
+start) one tick of error is allowed in the rule's favour and the smaller
+run is also bounded by its wall time. A suspicious pair is re-timed, small
+and large runs interleaved, up to five runs each, and rejected only when
+the fastest large run still exceeds eight times the fastest small run, so
+CPU frequency changes and core migration do not reject linear rules. This catches the
 common quadratic shapes (`[A-Z]+\d`, unanchored `[A-Z][A-Z0-9]+-\d+`,
 `\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b`) but is
 not a guarantee: a pathological rule can still stall the operator's own

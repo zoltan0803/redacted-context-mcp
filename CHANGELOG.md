@@ -39,9 +39,9 @@
   alternate word and non-word characters, which reject `\b`-anchored rules
   such as the common unbounded email regex), at 10,000 and 40,000
   characters (about 2.5 s for 256 simple rules); a rule is rejected by number
-  as too slow (over 2 s on one input) or superlinear (more than 6x slower on
-  the larger input). Its rules file is never served or overwritten when it
-  lies under the root.
+  as too slow (over 2 s on one input) or superlinear (more than 8x the CPU
+  time on the larger input). Its rules file is never served or overwritten
+  when it lies under the root.
 - Detector nominations are applied after every built-in stage, so detectors
   never weaken the baseline. Every nominated span is redacted at its own
   position, except characters of allow-listed phrases and existing
@@ -121,6 +121,12 @@
   library.
 - Moves the regex backtracking screen into `regex_safety.py`; `core` keeps
   re-exporting it.
+- The `patterns` stress test no longer sporadically rejects linear rules
+  (such as the bounded email rule) on busy machines. Growth is measured in
+  process CPU time instead of wall time, the limit is 8x (midway between
+  linear 4x and quadratic 16x) instead of 6x, and a suspicious rule is
+  re-timed with interleaved runs up to five times instead of three. The
+  2-second wall-time limit per input is unchanged.
 
 ## 0.8.0 — 2026-09-12
 

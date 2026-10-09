@@ -324,19 +324,26 @@ def match_regex_lines(
 # Launch-time stress test for operator-supplied regexes -------------------------
 
 # Every rule runs over each of its stress inputs at two sizes. A rule is
-# rejected as "too slow" when one run exceeds REGEX_STRESS_SECONDS, and as
-# "superlinear" when the larger input takes more than REGEX_STRESS_GROWTH_LIMIT
-# times as long as the smaller one (linear growth is 4x; quadratic is 16x).
-# Growth is judged only when the larger run takes at least
-# REGEX_STRESS_MIN_SECONDS, and a suspicious pair is re-timed and the fastest
-# of REGEX_STRESS_REPEATS runs kept, so timer noise and a loaded machine do
-# not reject linear rules.
+# rejected as "too slow" when one run exceeds REGEX_STRESS_SECONDS of wall
+# time (the parent kills the worker), and as "superlinear" when the larger
+# input takes more than REGEX_STRESS_GROWTH_LIMIT times as much CPU time as
+# the smaller one. The 4x size step makes linear growth 4x and quadratic 16x;
+# the limit is their geometric midpoint, 8x, a 2x margin on both sides.
+# Growth is measured in process CPU time, so other processes preempting the
+# worker do not inflate either run, and is judged only when the larger run
+# takes at least REGEX_STRESS_MIN_SECONDS. Where the CPU clock is coarse
+# (Windows advances it in 15.625 ms ticks) one tick of error is allowed in
+# the rule's favour, with the smaller run also bounded by its wall time. A
+# suspicious pair is re-timed, small and large runs interleaved, up to
+# REGEX_STRESS_REPEATS runs each, and rejected only when the fastest large
+# run still exceeds the limit times the fastest small run, so CPU frequency
+# changes and core migration do not reject linear rules.
 REGEX_STRESS_SMALL_CHARS = 10_000
 REGEX_STRESS_INPUT_CHARS = 40_000
 REGEX_STRESS_SECONDS = 2.0
-REGEX_STRESS_GROWTH_LIMIT = 6.0
+REGEX_STRESS_GROWTH_LIMIT = 8.0
 REGEX_STRESS_MIN_SECONDS = 0.02
-REGEX_STRESS_REPEATS = 3
+REGEX_STRESS_REPEATS = 5
 REGEX_STRESS_STARTUP_SECONDS = 60.0
 REGEX_STRESS_FAILED_MESSAGE = "Regex stress test could not run."
 REGEX_STRESS_TOO_SLOW = "too slow"
@@ -558,13 +565,63 @@ def regex_stress_inputs(pattern: str, size: int = REGEX_STRESS_INPUT_CHARS, flag
     return tuple(dict.fromkeys(inputs))
 
 
-def _timed_scan(compiled: re.Pattern[str], text: str) -> float:
+def _cpu_clock_tick() -> float | None:
+    """Observed granularity of ``time.process_time``, or ``None`` if it does not advance.
+
+    ``time.get_clock_info`` reports 100 ns on Windows, but the clock moves in
+    scheduler ticks there (15.625 ms), so the step is measured by spinning.
+    """
     import time as time_module
 
-    started = time_module.perf_counter()
+    tick = 0.0
+    # Generous, so a heavily loaded machine does not fall back to wall time.
+    deadline = time_module.perf_counter() + 5.0
+    for _sample in range(2):
+        started = time_module.process_time()
+        while (now := time_module.process_time()) == started:
+            if time_module.perf_counter() > deadline:
+                return None
+        tick = max(tick, now - started)
+    return tick
+
+
+def _timed_scan(compiled: re.Pattern[str], text: str, clock: Callable[[], float]) -> tuple[float, float]:
+    """``(cpu, wall)`` seconds for one full scan, CPU time read from ``clock``."""
+    import time as time_module
+
+    wall = time_module.perf_counter()
+    cpu = clock()
     for _match in compiled.finditer(text):
         pass
-    return time_module.perf_counter() - started
+    return clock() - cpu, time_module.perf_counter() - wall
+
+
+def _grows_superlinearly(
+    time_small: Callable[[], tuple[float, float]],
+    time_large: Callable[[], tuple[float, float]],
+    tick: float,
+) -> bool:
+    """Whether the large input's CPU time grows past the limit over the small one's.
+
+    ``time_small`` and ``time_large`` each run one scan and return its
+    ``(cpu, wall)`` seconds. While the pair looks superlinear, both are
+    re-timed, interleaved, up to ``REGEX_STRESS_REPEATS`` runs each, and the
+    fastest of each is kept. ``tick`` is the CPU clock's granularity: the
+    small run counts as its CPU time plus one tick, but never more than its
+    wall time, and the large run as its CPU time minus one tick, so clock
+    rounding never counts against a rule.
+    """
+    small_cpu, small_wall = time_small()
+    large_cpu = time_large()[0]
+    runs = 1
+    while True:
+        superlinear = _superlinear(min(small_cpu + tick, small_wall), max(large_cpu - tick, 0.0))
+        if not superlinear or runs >= REGEX_STRESS_REPEATS:
+            return superlinear
+        cpu, wall = time_small()
+        small_cpu, small_wall = min(small_cpu, cpu), min(small_wall, wall)
+        large_cpu = min(large_cpu, time_large()[0])
+        runs += 1
 
 
 def _regex_stress_worker(connection: Any, rules: list[tuple[str, int]]) -> None:
@@ -572,10 +629,16 @@ def _regex_stress_worker(connection: Any, rules: list[tuple[str, int]]) -> None:
 
     Messages: ``("rule", index)`` before a rule, ``("step", index)`` after
     every timed run (the parent kills the child when one does not arrive in
-    time), ``("superlinear", index)`` when a rule's time grows too fast,
+    time), ``("superlinear", index)`` when a rule's CPU time grows too fast,
     ``("error", index)`` for a rule that does not compile, and
-    ``("ok", None)`` at the end.
+    ``("ok", None)`` at the end. Growth falls back to wall time only if the
+    CPU clock does not advance.
     """
+    import time as time_module
+
+    tick = _cpu_clock_tick()
+    clock = time_module.perf_counter if tick is None else time_module.process_time
+    tick = tick or 0.0
     connection.send(("ready", None))
     for index, (pattern, flags) in enumerate(rules):
         connection.send(("rule", index))
@@ -584,27 +647,23 @@ def _regex_stress_worker(connection: Any, rules: list[tuple[str, int]]) -> None:
         except re.error:
             connection.send(("error", index))
             return
+
+        def timed(text: str) -> tuple[float, float]:
+            measured = _timed_scan(compiled, text, clock)
+            connection.send(("step", index))
+            return measured
+
         small_inputs = regex_stress_inputs(pattern, REGEX_STRESS_SMALL_CHARS, flags)
         large_inputs = regex_stress_inputs(pattern, REGEX_STRESS_INPUT_CHARS, flags)
         for small_text, large_text in zip(small_inputs, large_inputs):
-            small = _timed_scan(compiled, small_text)
-            connection.send(("step", index))
-            large = _timed_scan(compiled, large_text)
-            connection.send(("step", index))
-            for _repeat in range(REGEX_STRESS_REPEATS - 1):
-                if not _superlinear(small, large):
-                    break
-                small = min(small, _timed_scan(compiled, small_text))
-                connection.send(("step", index))
-                large = min(large, _timed_scan(compiled, large_text))
-                connection.send(("step", index))
-            if _superlinear(small, large):
+            if _grows_superlinearly(lambda: timed(small_text), lambda: timed(large_text), tick):
                 connection.send(("superlinear", index))
                 return
     connection.send(("ok", None))
 
 
 def _superlinear(small: float, large: float) -> bool:
+    """Whether ``large`` CPU seconds are above the noise floor and the growth limit over ``small``."""
     return large >= REGEX_STRESS_MIN_SECONDS and large > REGEX_STRESS_GROWTH_LIMIT * small
 
 
@@ -621,7 +680,7 @@ def regex_stress_report(
     ``REGEX_STRESS_TOO_SLOW`` when one run needs more than ``seconds`` (the
     child is killed at the first overrun) and ``REGEX_STRESS_SUPERLINEAR``
     when the larger input takes more than ``REGEX_STRESS_GROWTH_LIMIT`` times
-    as long as the smaller one. Returns ``None`` when every rule passes.
+    as much CPU time as the smaller one. Returns ``None`` when every rule passes.
     Meant for launch-time checks of operator-trusted rules; raises
     ``SystemExit`` with an input-free message if the check itself cannot run.
     """
