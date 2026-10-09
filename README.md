@@ -301,19 +301,27 @@ metadata and `server/discover`; legacy clients continue to negotiate through
 
 The server exposes:
 
-- `redctx_tree` — show a redacted file tree with opaque ids
-- `redctx_list` — list redacted directory entries
-- `redctx_read` — read redacted file contents by path or `@p_<id>`
-- `redctx_search` — search redacted text
-- `redctx_retrieve` — retrieve relevant passages ranked by keyword coverage and relevance
-- `redctx_stat` — inspect redacted metadata
-- `redctx_bundle` — concatenate redacted context files
-- `redctx_doctor` — show config counts without sensitive terms
-- `redctx_audit` — run local containment and redaction checks
-- `redctx_refresh_index` — refresh the in-memory opaque path index
+- `redctx_tree` — indented directory overview, one `@p_<id> <redacted name>` line per entry
+- `redctx_list` — directory entries with opaque ids, entry types, sizes, and redacted paths (optionally recursive)
+- `redctx_read` — one redacted file or an inclusive line range of it, with source line numbering preserved
+- `redctx_search` — exact substring or regex line matches over redacted text, with context lines
+- `redctx_retrieve` — passages ranked by query-word coverage and BM25 relevance, with line citations
+- `redctx_stat` — metadata for one path: opaque id, redacted path, type, size, and line count
+- `redctx_bundle` — several redacted files concatenated in one response, with per-file and total limits
+- `redctx_doctor` — counts of the active redaction setup, without printing terms or scanning files
+- `redctx_audit` — containment, configuration, and synthetic-leak checks with PASS/WARN/FAIL results
+- `redctx_refresh_index` — rebuild the opaque path index after files are created or renamed
+- `redctx_github_repos` — configured GitHub repo aliases (local config only, no GitHub request)
+- `redctx_github_list_issues` — issues from a repo alias filtered by state and labels, one line each
+- `redctx_github_search_issues` — issues matching a GitHub issue-search query, one line each
+- `redctx_github_read_issue` — one issue's redacted body and, optionally, comments
+- `redctx_submit_doc` — rehydrate and write a drafted document; listed only with `--enable-writes`
 
-Agents should carry `@p_<id>` references between calls rather than using raw
-filenames.
+Each tool's MCP description says when to use it instead of its siblings, what
+its output looks like, and which limits apply; every parameter is documented in
+the input schema. Agents should carry `@p_<id>` references and placeholders
+between calls rather than using raw filenames. GitHub issue text is untrusted
+external content.
 
 The MCP server also exposes redacted text files as resources:
 
