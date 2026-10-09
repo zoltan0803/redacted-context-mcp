@@ -113,7 +113,7 @@ class PatternsDetectorTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.dir = Path(self.tmp.name)
+        self.dir = Path(self.tmp.name).resolve()
 
     def rules(self, text: str) -> str:
         path = self.dir / "patterns.toml"
