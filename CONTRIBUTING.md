@@ -78,17 +78,23 @@ From the repository root, with `redctx-mcp` installed and Node.js 22.19 or
 newer available, run:
 
 ```sh
-npx --yes @modelcontextprotocol/inspector@2.4.0 --cli \
+npm ci --prefix ci/mcp-inspector --ignore-scripts
+ci/mcp-inspector/node_modules/.bin/mcp-inspector --cli \
   --config examples/mcp-inspector.json \
   --server redacted_context_legacy \
   --method tools/list \
   --strict
-npx --yes @modelcontextprotocol/inspector@2.4.0 --cli \
+ci/mcp-inspector/node_modules/.bin/mcp-inspector --cli \
   --config examples/mcp-inspector.json \
   --server redacted_context_modern \
   --method tools/list \
   --strict
 ```
+
+The Inspector and its whole dependency tree are pinned by
+`ci/mcp-inspector/package-lock.json`, so CI never resolves packages that were
+published minutes earlier. Update the lockfile deliberately with
+`npm install --package-lock-only --prefix ci/mcp-inspector`.
 
 These commands validate connection negotiation plus the advertised tool
 schemas through the official Inspector. They are protocol smoke tests, not a
