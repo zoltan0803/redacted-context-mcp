@@ -155,6 +155,7 @@ from .rendering import (
     github_issue_list_text,
     github_issue_search_text,
     github_repos_text,
+    truncate_redacted,
     truncate_text,
 )
 from .retrieval import retrieve
@@ -234,20 +235,6 @@ def command_tree(args: argparse.Namespace, ctx: RedactedContext, redactor: Redac
     return 0
 
 
-def truncate_redacted(text: str, max_chars: int) -> str:
-    """Truncate redacted output without splitting a placeholder token."""
-    if len(text) <= max_chars:
-        return text
-    cut_at = max(0, max_chars)
-    for match in PLACEHOLDER_RE.finditer(text):
-        if match.start() < cut_at < match.end():
-            cut_at = match.start()
-            break
-        if match.start() >= cut_at:
-            break
-    return text[:cut_at] + "\n[TRUNCATED]\n"
-
-
 def command_cat(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
     budget = operation_budget_from_args(args)
     path = ctx.resolve_ref(args.path, expected="text")
@@ -259,7 +246,9 @@ def command_cat(args: argparse.Namespace, ctx: RedactedContext, redactor: Redact
     start = max(args.start_line or 1, 1)
     end = args.end_line or len(lines)
     if end < start:
-        raise SystemExit("--end-line must be greater than or equal to --start-line.")
+        if args.end_line:
+            raise SystemExit("--end-line must be greater than or equal to --start-line.")
+        raise SystemExit("--start-line is beyond the end of the file.")
     selected = "".join(lines[start - 1 : end])
     redacted = selected
     redacted = truncate_redacted(redacted, args.max_chars)

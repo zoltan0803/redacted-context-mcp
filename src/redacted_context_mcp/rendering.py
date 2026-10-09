@@ -12,6 +12,7 @@ The ``render_*`` functions only format.
 
 from __future__ import annotations
 
+from .defaults import PLACEHOLDER_RE
 from .github import (
     UNKNOWN_REPO_ALIAS_MESSAGE,
     GitHubComment,
@@ -24,10 +25,22 @@ from .github import (
 from .redaction import Redactor
 
 
-def truncate_text(text: str, max_chars: int) -> str:
+def truncate_redacted(text: str, max_chars: int) -> str:
+    """Truncate redacted output without splitting a placeholder token."""
     if len(text) <= max_chars:
         return text
-    return text[:max_chars] + "\n[TRUNCATED]\n"
+    cut_at = max(0, max_chars)
+    for match in PLACEHOLDER_RE.finditer(text):
+        if match.start() < cut_at < match.end():
+            cut_at = match.start()
+            break
+        if match.start() >= cut_at:
+            break
+    return text[:cut_at] + "\n[TRUNCATED]\n"
+
+
+# Historical name, kept importable as an alias of the placeholder-safe version.
+truncate_text = truncate_redacted
 
 
 def render_github_labels(labels: tuple[str, ...], redactor: Redactor) -> str:
@@ -54,7 +67,7 @@ def render_github_issue_detail(
     max_body_chars: int,
 ) -> str:
     title = redactor.redact(issue.title)
-    body = truncate_text(redactor.redact(issue.body), max_body_chars)
+    body = truncate_redacted(redactor.redact(issue.body), max_body_chars)
     lines = [
         f"repo: {issue.repo_alias}",
         f"issue: #{issue.display_number}",
@@ -69,7 +82,7 @@ def render_github_issue_detail(
         body,
     ]
     for index, comment in enumerate(comments, start=1):
-        comment_body = truncate_text(redactor.redact(comment.body), max_body_chars)
+        comment_body = truncate_redacted(redactor.redact(comment.body), max_body_chars)
         lines.extend(
             [
                 "",

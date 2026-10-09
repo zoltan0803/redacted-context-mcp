@@ -470,6 +470,16 @@ class RedactedContextMcpTest(unittest.TestCase):
         self.assertIn("excluded by policy", text)
         self.assertNotIn("Raw secret", text)
 
+    def test_read_start_line_beyond_end_returns_safe_error(self) -> None:
+        (self.root / "short-canary.txt").write_text("first line canary\nsecond line\n", encoding="utf-8")
+        result = self.call_tool("redctx_read", {"path": "short-canary.txt", "start_line": 5})
+        text = result["content"][0]["text"]
+
+        self.assertTrue(result["isError"])
+        self.assertEqual(text, "--start-line is beyond the end of the file.")
+        # Both the file name and its content carry the canary.
+        self.assertNotIn("canary", json.dumps(result))
+
     def test_invalid_tool_arguments_return_tool_errors(self) -> None:
         cases = [
             (
