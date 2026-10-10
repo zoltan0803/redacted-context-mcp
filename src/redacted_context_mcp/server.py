@@ -26,7 +26,7 @@ try:
     from . import __version__
     from . import core as rc
 except ImportError:  # pragma: no cover - direct script fallback
-    __version__ = "0.8.0"
+    __version__ = "0.9.0"
     package_root = Path(__file__).resolve().parents[1]
     if str(package_root) not in sys.path:
         sys.path.insert(0, str(package_root))

@@ -248,7 +248,7 @@ class RedactedContextMcpTest(unittest.TestCase):
         self.assertGreater(result["ttlMs"], 0)
         server_info = result["_meta"][SERVER_INFO_META_KEY]
         self.assertEqual(server_info["name"], "redacted-context")
-        self.assertEqual(server_info["version"], "0.8.0")
+        self.assertEqual(server_info["version"], "0.9.0")
 
     def test_modern_tools_and_resources_use_modern_result_shapes(self) -> None:
         tools_result = self.rpc("tools/list", self.modern_params())["result"]

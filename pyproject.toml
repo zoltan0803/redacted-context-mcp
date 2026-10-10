@@ -1,12 +1,12 @@
 [build-system]
-requires = ["hatchling>=1.25"]
+requires = ["hatchling>=1.25", "hatch-fancy-pypi-readme>=25.1"]
 build-backend = "hatchling.build"
 
 [project]
 name = "redacted-context-mcp"
-version = "0.8.0"
+version = "0.9.0"
 description = "Read-only-by-default redacted local knowledgebase context over MCP for coding agents."
-readme = "README.md"
+dynamic = ["readme"]
 requires-python = ">=3.11"
 license = "MIT"
 authors = [
@@ -68,6 +68,24 @@ redctx-mcp = "redacted_context_mcp.server:main"
 #
 #   [project.entry-points."redacted_context_mcp.detectors"]
 #   mydetector = "my_package.detector:factory"
+
+# README.md is the PyPI project description, but PyPI does not render Mermaid
+# diagrams or resolve links relative to the repository. This build-time hook
+# replaces each diagram with a pointer to the README on GitHub and turns
+# relative file links into absolute GitHub links. README.md stays unchanged.
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.md"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(?ms)^```mermaid[ \t]*\n.*?^```[ \t]*$'
+replacement = '*This diagram is shown in the [README on GitHub](https://github.com/zoltan0803/redacted-context-mcp#readme).*'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '\]\((?!https?://|mailto:|#)([^)\s]+)\)'
+replacement = '](https://github.com/zoltan0803/redacted-context-mcp/blob/main/\1)'
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/redacted_context_mcp"]
