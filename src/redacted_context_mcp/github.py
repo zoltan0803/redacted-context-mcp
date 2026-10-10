@@ -248,9 +248,12 @@ def github_api_request(repo_alias: str, repo_config: GitHubRepoConfig, path: str
             raw_body = response.read(GITHUB_MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
         exc.read(GITHUB_MAX_RESPONSE_BYTES + 1)
+        # This message reaches the agent verbatim. The repo alias is the
+        # neutral, agent-visible name; the configured token_env name is
+        # private local config and stays out.
         raise SystemExit(
             f"GitHub request failed for repo alias '{repo_alias}' ({exc.code}). "
-            f"Check that the repo alias is configured and {repo_config.token_env} has access."
+            "Check that the repo alias is configured and its token environment variable (token_env) has access."
         ) from exc
     except urllib.error.URLError as exc:
         raise SystemExit(format_github_url_error(exc)) from exc

@@ -35,6 +35,9 @@ claim of hard OS isolation.
   paths, logins, or upstream repository names.
 - Multi-line secrets are redacted before search results are split into lines.
 - Dynamic upstream errors are summarized without relaying raw response text.
+- GitHub request errors name only the neutral repo alias and the HTTP status
+  code; the upstream owner/repo, API URL, and configured token environment
+  variable name never appear in them.
 - Bare 256-bit-plus hex strings (the persisted vault-salt shape), salt-keyed
   assignments (including short, spaced, and triple-quoted values), and
   underscore-qualified secret assignments such as `DB_PASSWORD=...` are

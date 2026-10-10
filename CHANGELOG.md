@@ -149,6 +149,11 @@
   with `--start-line is beyond the end of the file.` instead of the misleading
   `--end-line must be greater than or equal to --start-line.`, on both the CLI
   and the MCP `redctx_read` tool.
+- Failed GitHub requests no longer name the configured `token_env` variable.
+  The error, which reaches MCP clients verbatim, now says "its token
+  environment variable (token_env)" instead, so an operator-chosen name such
+  as one carrying a client name stays in the local config. The repo alias and
+  HTTP status code are still reported.
 
 ## 0.8.0 — 2026-09-12
 
