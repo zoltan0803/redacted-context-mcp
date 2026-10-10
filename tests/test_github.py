@@ -7,6 +7,7 @@ import os
 import re
 import tempfile
 import unittest
+import urllib.error
 from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
@@ -261,6 +262,49 @@ class GitHubIssueTest(unittest.TestCase):
             with patch("redacted_context_mcp.github.urllib.request.urlopen", return_value=response):
                 self.run_command(core.command_github_issues, Namespace(repo_alias="context", state="open", label=[], limit=5))
         read.assert_called_once_with(github.GITHUB_MAX_RESPONSE_BYTES + 1)
+
+    def test_github_http_error_hides_token_env_name(self) -> None:
+        # The HTTP error message is on the safe-message list and reaches the
+        # agent verbatim, so it must not carry the private token_env name.
+        token_env = "ACME_SECRET_CLIENT_TOKEN"
+        config_path = self.root / ".agent-context-redactor.toml"
+        config_text = config_path.read_text(encoding="utf-8")
+        config_path.write_text(config_text.replace("REDCTX_TEST_GITHUB_TOKEN", token_env), encoding="utf-8")
+        self.config = core.load_config(self.root, None)
+        self.ctx = core.RedactedContext(self.root, self.config)
+        self.redactor = core.Redactor(self.config)
+        self.assertEqual(self.config.github_repos["context"].token_env, token_env)
+
+        def http_error(request: object, **kwargs: object) -> None:
+            raise urllib.error.HTTPError(
+                url="https://api.github.com/repos/client-alpha/private-context/issues",
+                code=404,
+                msg="Not Found",
+                hdrs={},  # type: ignore[arg-type]
+                fp=io.BytesIO(b'{"message":"Not Found"}'),
+            )
+
+        urlopen = "redacted_context_mcp.github.urllib.request.urlopen"
+        with patch(urlopen, side_effect=http_error):
+            with self.assertRaises(SystemExit) as caught:
+                self.run_command(
+                    core.command_github_issues, Namespace(repo_alias="context", state="open", label=[], limit=5)
+                )
+        mcp = self.make_mcp()
+        with patch(urlopen, side_effect=http_error):
+            mcp_list = mcp.call_tool("redctx_github_list_issues", {"repo_alias": "context"})
+        with patch(urlopen, side_effect=http_error):
+            mcp_detail = mcp.call_tool("redctx_github_read_issue", {"repo_alias": "context", "number": 7})
+
+        cli_message = str(caught.exception)
+        for result in (mcp_list, mcp_detail):
+            self.assertTrue(result["isError"])
+            text = result["content"][0]["text"]
+            for raw in (token_env, "client-alpha", "private-context", "api.github.com"):
+                self.assertNotIn(raw, json.dumps(result))
+            self.assertEqual(text, cli_message)
+            self.assertTrue(text.startswith("GitHub request failed for repo alias 'context' (404)."))
+            self.assertIn("token environment variable", text)
 
 
 if __name__ == "__main__":

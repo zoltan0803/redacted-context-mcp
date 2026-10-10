@@ -149,6 +149,19 @@
   with `--start-line is beyond the end of the file.` instead of the misleading
   `--end-line must be greater than or equal to --start-line.`, on both the CLI
   and the MCP `redctx_read` tool.
+- Failed GitHub requests no longer name the configured `token_env` variable.
+  The error, which reaches MCP clients verbatim, now says "its token
+  environment variable (token_env)" instead, so an operator-chosen name such
+  as one carrying a client name stays in the local config. The repo alias and
+  HTTP status code are still reported.
+- The README now explains the redaction layer with Mermaid diagrams: a new How
+  It Works section (architecture and the placeholder round trip), setup, the
+  trust boundary, one tool call end to end, the tool map, controlled writes,
+  live policy reload, detectors, `patterns` rule admission, GitHub issues, and
+  discovery. The MCP tools are grouped in a table by purpose, and prose that
+  disagreed with the code is corrected: only comment authors get opaque ids,
+  a slow `patterns` rule is timed at most five times, and discovery keeps
+  values through a case-insensitive substring match.
 
 ## 0.8.0 — 2026-09-12
 

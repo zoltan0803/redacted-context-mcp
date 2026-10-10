@@ -25,7 +25,147 @@ Contact [EMAIL_711ae704108cd6e952dcb27f0d6e999a] about [SENSITIVE_45f80ab22bc94e
 The placeholder values above are illustrative. Real values are deterministic
 for one local vault salt and will differ.
 
+## How It Works
+
+The agent never opens the private folder itself. It calls `redctx_*` tools,
+the server reads the raw files or configured GitHub issues, redacts every
+content field at one boundary, and returns only redacted text with opaque
+references such as `@p_1a2b3c4d5e6f`.
+
+In the diagrams, blue is the agent side, purple is processing inside redctx,
+amber is a check, green is redacted output or success, red is raw private data
+or a refusal, orange is a human step, explicit opt-in, or softer guardrail, and
+grey is a non-sensitive store.
+
+```mermaid
+flowchart TB
+    subgraph AGS["Agent side"]
+        direction LR
+        AG["Coding agent<br/>workspace holds no raw files"]
+        CL["MCP client<br/>(or the redctx CLI)"]
+        AG --> CL
+    end
+    subgraph SRV["redctx-mcp process (local): redctx_* tools and resources"]
+        direction TB
+        FS["Filesystem source<br/>containment, exclusions,<br/>@p_ ids"]
+        GH["GitHub source<br/>only if repos are configured"]
+        RT["Raw text in memory<br/>never returned as is"]
+        BL["Built-in baseline<br/>always on: terms, emails,<br/>URLs, secrets, names"]
+        PD["Plugged detectors<br/>optional, --detector,<br/>add spans only"]
+        PH["Deterministic placeholders<br/>[EMAIL_711a…]"]
+        FS --> RT
+        GH --> RT
+        RT --> BL
+        RT -->|"original text"| PD
+        BL --> PH
+        PD -->|"spans applied after<br/>the baseline"| PH
+    end
+    subgraph PRIV["Private side (never sent to the agent)"]
+        direction TB
+        SRC[("Private source folder<br/>raw files")]
+        API[("GitHub API<br/>raw issues")]
+        CONF[(".agent-context-redactor.toml<br/>+ term files")]
+        SALT[("Vault salt<br/>HMAC key")]
+    end
+    AGS <==>|"down: tool call with @p_ id<br/>up: redacted text + opaque refs only"| SRV
+    SRV -->|"reads raw files and issues,<br/>loads terms and salt"| PRIV
+
+    classDef agent fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    classDef step fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    classDef safe fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef raw fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+    class AG,CL agent
+    class FS,GH,BL,PD step
+    class PH safe
+    class SRC,CONF,SALT,API,RT raw
+```
+
+Placeholders and path ids are deterministic for one vault salt, so the agent
+can follow the same name or file across calls. Only the local operator can
+turn them back into raw text:
+
+```mermaid
+flowchart TB
+    subgraph BACK["Restore: local only, raw text never returned to the agent"]
+        direction LR
+        IN["Redacted text<br/>placeholders + @p_ ids"]
+        CLI["redctx rehydrate<br/>--allow-raw-output"]
+        SUB["redctx_submit_doc<br/>only with --enable-writes"]
+        SCAN["Rescan the private root<br/>same salt + config,<br/>rebuild the placeholder map"]
+        SRC[("Private source folder")]
+        OUT["Raw restored text<br/>stdout, --output, or write subdir"]
+    end
+    subgraph FWD["Redact: every response"]
+        direction LR
+        RV["Raw value, category<br/>avery@example.com, EMAIL"]
+        SALT[("Vault salt")]
+        RP["Raw relative path<br/>notes/client-a.md"]
+        HM["HMAC-SHA256 keyed by salt<br/>input: EMAIL + normalized value"]
+        HP["HMAC-SHA256 keyed by salt<br/>input: the path"]
+        PH["[EMAIL_711a…]<br/>128 bits, same value = same placeholder"]
+        PID["@p_1a2b3c4d5e6f<br/>48 bits, same path = same id"]
+    end
+
+    RV --> HM --> PH
+    SALT -.-> HM
+    SALT -.-> HP
+    RP --> HP --> PID
+    IN --> CLI
+    IN --> SUB
+    CLI --> SCAN
+    SUB --> SCAN
+    SRC --> SCAN
+    SCAN --> OUT
+    FWD -.->|"the agent drafts text with these tokens"| BACK
+
+    classDef step fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    classDef safe fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef human fill:#ffedd5,stroke:#ea580c,color:#7c2d12
+    classDef raw fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+    class RV,RP,SRC,SALT,OUT raw
+    class HM,HP,SCAN step
+    class PH,PID,IN safe
+    class CLI,SUB human
+```
+
+Restoring needs the private folder and the same salt and config; a redacted
+file alone is not enough. See [Local Rehydration](#local-rehydration) and
+[Controlled MCP Writes](#controlled-mcp-writes).
+
 ## Quick Start
+
+The whole setup, from install to the first tool call:
+
+```mermaid
+flowchart TB
+    subgraph DRAFT["1. Draft the redaction config"]
+        direction LR
+        S(["pipx install<br/>redacted-context-mcp"]) --> Q{"Use a local<br/>Ollama model?"}
+        Q -- yes --> DISC["ollama pull gemma4:e4b<br/>redctx discover drafts the config"]
+        Q -- no --> MAN["Write the config by hand<br/>see Local Redaction Config"]
+        DISC --> CFG[(".agent-context-redactor.toml<br/>contains raw terms")]
+        MAN --> CFG
+        CFG --> REV["Human review<br/>terms, people, allow list"]
+    end
+    subgraph CONNECT["2. Check and connect"]
+        direction LR
+        AUD["redctx audit<br/>PASS / WARN / FAIL checks"] --> CC["Client config<br/>.mcp.json or Codex config.toml"]
+        CC --> RUN["Client launches<br/>redctx-mcp --root … over stdio"]
+        RUN --> USE(["Agent calls<br/>redctx_* tools"])
+    end
+    DRAFT --> CONNECT
+
+    classDef agent fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    classDef step fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    classDef check fill:#fef3c7,stroke:#d97706,color:#78350f
+    classDef human fill:#ffedd5,stroke:#ea580c,color:#7c2d12
+    classDef raw fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+    class S,CC,USE agent
+    class Q check
+    class DISC,AUD,RUN step
+    class MAN,REV human
+    class CFG raw
+```
 
 Python 3.11 or newer is required. Install the commands with `pipx`, then use a
 local Ollama model to draft the project-specific redaction terms:
@@ -94,18 +234,52 @@ For hard enforcement, run the agent as a separate OS user or in a container
 that cannot access that directory directly, and expose only the MCP server or a
 separate redaction service.
 
+```mermaid
+flowchart TB
+    subgraph AW["/work/agent-workdir (agent starts here)"]
+        AG["Coding agent<br/>.mcp.json, CLAUDE.md or AGENTS.md,<br/>no raw context files"]
+    end
+    MCP["redctx-mcp<br/>--root ../source-private<br/>the sanctioned path"]
+    G1{"Agent runs as a separate<br/>OS user or in a container?"}
+    HARD["Direct read fails<br/>hard boundary"]
+    G2{"A Claude Code deny rule<br/>matches the command?"}
+    SOFT["Tool call denied<br/>softer guardrail"]
+    subgraph SP["/work/source-private"]
+        RAW[("Raw project files<br/>+ redaction config")]
+    end
+
+    AG -->|"redctx_* tool call"| MCP
+    MCP -->|"reads raw text"| RAW
+    MCP -->|"redacted text + @p_ ids"| AG
+    AG -.->|"shell or file tools"| G1
+    G1 -- yes --> HARD
+    G1 -- no --> G2
+    G2 -- yes --> SOFT
+    G2 -. "no: raw read bypasses redaction" .-> RAW
+
+    classDef agent fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    classDef step fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    classDef check fill:#fef3c7,stroke:#d97706,color:#78350f
+    classDef safe fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef human fill:#ffedd5,stroke:#ea580c,color:#7c2d12
+    classDef raw fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+    class AG agent
+    class MCP step
+    class G1,G2 check
+    class HARD safe
+    class SOFT human
+    class RAW raw
+    linkStyle 7 stroke:#dc2626,stroke-width:2px,color:#7f1d1d
+```
+
+Claude Code deny rules (see
+[examples/claude-settings.example.json](examples/claude-settings.example.json))
+only block the commands they list, so they are a softer guardrail than OS-level
+isolation.
+
 Read [SECURITY.md](SECURITY.md) for the threat model and
 [SECURITY_INVARIANTS.md](SECURITY_INVARIANTS.md) for the behavior the test suite
 is intended to preserve.
-
-The core workflow is:
-
-```text
-agent workspace
-  -> redacted MCP tools
-    -> private source folder
-      -> redacted output with opaque @p_<id> file references
-```
 
 ## Features
 
@@ -299,29 +473,119 @@ metadata and `server/discover`; legacy clients continue to negotiate through
 
 ## MCP Tools
 
-The server exposes:
+The server exposes the tools below. Most work starts by finding an opaque
+`@p_` id and then reading that file or line range. After files are created or
+renamed, `redctx_refresh_index` rebuilds the id index:
 
-- `redctx_tree` — indented directory overview, one `@p_<id> <redacted name>` line per entry
-- `redctx_list` — directory entries with opaque ids, entry types, sizes, and redacted paths (optionally recursive)
-- `redctx_read` — one redacted file or an inclusive line range of it, with source line numbering preserved
-- `redctx_search` — exact substring or regex line matches over redacted text, with context lines
-- `redctx_retrieve` — passages ranked by query-word coverage and BM25 relevance, with line citations
-- `redctx_stat` — metadata for one path: opaque id, redacted path, type, size, and line count
-- `redctx_bundle` — several redacted files concatenated in one response, with per-file and total limits
-- `redctx_doctor` — counts of the active redaction setup, without printing terms or scanning files
-- `redctx_audit` — containment, configuration, and synthetic-leak checks with PASS/WARN/FAIL results
-- `redctx_refresh_index` — rebuild the opaque path index after files are created or renamed
-- `redctx_github_repos` — configured GitHub repo aliases (local config only, no GitHub request)
-- `redctx_github_list_issues` — issues from a repo alias filtered by state and labels, one line each
-- `redctx_github_search_issues` — issues matching a GitHub issue-search query, one line each
-- `redctx_github_read_issue` — one issue's redacted body and, optionally, comments
-- `redctx_submit_doc` — rehydrate and write a drafted document; listed only with `--enable-writes`
+```mermaid
+flowchart TB
+    subgraph FILES["Private folder tools"]
+        direction LR
+        TREE["redctx_tree<br/>redctx_list"]
+        SEARCH["redctx_search<br/>line matches"]
+        RETR["redctx_retrieve<br/>ranked passages"]
+        ID(["@p_1a2b3c4d5e6f"])
+        RD["redctx_read<br/>file or line range"]
+        BUN["redctx_bundle<br/>several files"]
+        STAT["redctx_stat<br/>metadata"]
+        RES["resources/read<br/>redctx://p_1a2b3c4d5e6f"]
+        SUBMIT["redctx_submit_doc<br/>only with --enable-writes"]
+        TREE --> ID
+        SEARCH -->|"id + line"| ID
+        RETR -->|"id + line range"| ID
+        ID --> RD
+        ID --> BUN
+        ID --> STAT
+        ID --> RES
+        RD -.->|"draft keeps<br/>placeholders"| SUBMIT
+    end
+    subgraph GHUB["GitHub issue tools (configured aliases)"]
+        direction LR
+        REPOS["redctx_github_repos"]
+        GLIST["redctx_github_list_issues<br/>redctx_github_search_issues"]
+        GREAD["redctx_github_read_issue"]
+        REPOS -->|"alias: context"| GLIST
+        GLIST -->|"context#123"| GREAD
+    end
+    FILES ~~~ GHUB
+
+    classDef step fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    classDef safe fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef human fill:#ffedd5,stroke:#ea580c,color:#7c2d12
+    class TREE,SEARCH,RETR,RD,BUN,STAT,RES,REPOS,GLIST,GREAD step
+    class ID safe
+    class SUBMIT human
+```
+
+| Purpose | Tool | What it returns |
+|---|---|---|
+| Navigate | `redctx_tree` | Indented directory overview, one `@p_<id> <redacted name>` line per entry |
+| Navigate | `redctx_list` | Directory entries with opaque ids, entry types, sizes, and redacted paths (optionally recursive) |
+| Find | `redctx_search` | Exact substring or regex line matches over redacted text, with context lines |
+| Find | `redctx_retrieve` | Passages ranked by query-word coverage and BM25 relevance, with line citations |
+| Read | `redctx_read` | One redacted file or an inclusive line range of it, with source line numbering preserved |
+| Read | `redctx_bundle` | Several redacted files concatenated in one response, with per-file and total limits |
+| Read | `redctx_stat` | Metadata for one path: opaque id, redacted path, type, size, and line count |
+| Check | `redctx_doctor` | Counts of the active redaction setup, without printing terms or scanning files |
+| Check | `redctx_audit` | Containment, configuration, and synthetic-leak checks with PASS/WARN/FAIL/NOT_TESTED results |
+| Check | `redctx_refresh_index` | Rebuilds the opaque path index after files are created or renamed |
+| GitHub | `redctx_github_repos` | Configured GitHub repo aliases (local config only, no GitHub request) |
+| GitHub | `redctx_github_list_issues` | Issues from a repo alias filtered by state and labels, one line each |
+| GitHub | `redctx_github_search_issues` | Issues matching a GitHub issue-search query, one line each; the query leaves the machine unredacted |
+| GitHub | `redctx_github_read_issue` | One issue's redacted body and, optionally, comments |
+| Write | `redctx_submit_doc` | Rehydrates and writes a drafted document; listed only with `--enable-writes` |
 
 Each tool's MCP description says when to use it instead of its siblings, what
 its output looks like, and which limits apply; every parameter is documented in
 the input schema. Agents should carry `@p_<id>` references and placeholders
 between calls rather than using raw filenames. GitHub issue text is untrusted
 external content.
+
+Every file tool call goes through the same steps. Here is one `redctx_read`
+call on an opaque id:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor A as Agent (MCP client)
+    participant S as redctx-mcp
+    participant P as Live policy
+    participant F as Filesystem source
+    participant W as MarkItDown worker
+    participant R as Redactor
+
+    rect rgba(37, 99, 235, 0.14)
+    Note over A,P: Policy check before every tool call
+    A->>S: tools/call redctx_read path=@p_1a2b3c4d5e6f
+    S->>P: config or term-file metadata changed?
+    P-->>S: unchanged, keep policy (changed: reload, or fail closed)
+    end
+    rect rgba(124, 58, 237, 0.14)
+    Note over S,F: Resolve the opaque id
+    S->>F: look up p_1a2b3c4d5e6f in the path index
+    F->>F: inside root, no symlinks, not never-serve, not excluded
+    F-->>S: validated path
+    end
+    rect rgba(220, 38, 38, 0.14)
+    Note over S,W: Read raw text (stays on this machine)
+    alt plain text file
+        S->>F: read text
+        F-->>S: raw text, metadata checked before and after
+    else DOCX, PPTX, PDF, XLSX, XLS with --documents
+        S->>F: read document
+        F->>W: verified bytes only (5 MB cap, 15 s deadline)
+        W-->>F: raw Markdown
+        F-->>S: raw Markdown
+    end
+    end
+    rect rgba(22, 163, 74, 0.14)
+    Note over S,R: Redact, then select lines
+    S->>R: redact the whole file, keep line count
+    R->>R: built-in baseline, then plugged detector nominations
+    R-->>S: redacted text + counts by category
+    S-->>A: header with @p_ id and redacted path, requested lines, receipt
+    end
+```
 
 The MCP server also exposes redacted text files as resources:
 
@@ -348,6 +612,50 @@ anything under a protected detector directory), and files named like `.env*`,
 `target_path` containing `:` (drive letters and NTFS alternate data streams).
 Tool responses use redacted paths and opaque ids; they do not return the raw
 restored path.
+
+The checks run in this order, and the first failure refuses the write:
+
+```mermaid
+%%{init: {"flowchart": {"rankSpacing": 25, "nodeSpacing": 30}}}%%
+flowchart TD
+    S(["redctx_submit_doc<br/>target_path, text, overwrite"]) --> C1{"Policy OK,<br/>arguments<br/>valid?"}
+    C1 -- yes --> C2{"Started with<br/>--enable-<br/>writes?"}
+    C2 -- yes --> MAP["Rebuild the rehydration map<br/>scan the private root,<br/>skip the write subdir"]
+    MAP --> C3{"Placeholders<br/>in target_path<br/>resolve?"}
+    C3 -- yes --> C4{"target_path<br/>allowed?"}
+    C4 -- yes --> C5{"Placeholders<br/>in text<br/>resolve?"}
+    C5 -- yes --> C6{"Round trip<br/>clean?"}
+    C6 -- yes --> C7{"Target free,<br/>or a file and<br/>overwrite=true?"}
+    C7 -- yes --> WR["Atomic write<br/>same-directory temp file"]
+    WR -- published --> OK(["Written under the write subdir<br/>reply: @p_ id, redacted path, bytes"])
+    C1 -- no --> X(["Refused with an error<br/>nothing written"])
+    C2 -- no --> X
+    MAP -- "scan limit or detector error" --> X
+    C3 -- no --> X
+    C4 -- "no: empty, colon, not relative, symlink,<br/>outside the write subdir, or protected" --> X
+    C5 -- no --> X
+    C6 -- "no: a restored value would<br/>survive re-redaction" --> X
+    C7 -- "no: exists without overwrite,<br/>or is a directory" --> X
+    WR -- "publish fails" --> X
+
+    classDef agent fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    classDef step fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    classDef check fill:#fef3c7,stroke:#d97706,color:#78350f
+    classDef safe fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef raw fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+    class S agent
+    class MAP,WR step
+    class C1,C2,C3,C4,C5,C6,C7 check
+    class OK safe
+    class X raw
+```
+
+"Policy OK" is the live policy check that every tool call runs. The
+`target_path` checks run in this order: not empty, no `:`, relative without
+`..`, no symlink, inside the write subdirectory, and not a protected file
+listed above. The round trip re-redacts the restored text and the restored
+`target_path` in the server's mode and in balanced mode, and every restored
+value must disappear. An existing directory is refused even with `overwrite`.
 
 ## CLI Fallback
 
@@ -493,6 +801,36 @@ rules and retry the request: new terms, exclusions, allow-list changes, and
 detector profiles take effect without reconnecting. This also picks up config
 updates written by `discover-update`.
 
+```mermaid
+stateDiagram-v2
+    direction LR
+    state "Active policy" as active
+    state "Metadata check" as check
+    state "Reload: a new valid policy clears caches" as reload
+    state "Blocked, cache cleared" as blocked
+    state "Salt blocked, cache cleared" as salt_blocked
+
+    [*] --> active: start
+    active --> check: each request
+    check --> active: unchanged
+    check --> reload: changed
+    reload --> active: valid
+    reload --> blocked: invalid, unreadable, or removed
+    reload --> salt_blocked: salt differs
+    blocked --> check: after repair
+    salt_blocked --> check: old salt restored
+    salt_blocked --> [*]: restart
+
+    classDef safe fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef step fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    classDef check fill:#fef3c7,stroke:#d97706,color:#78350f
+    classDef raw fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+    class active safe
+    class check check
+    class reload step
+    class blocked,salt_blocked raw
+```
+
 For example, adding a project codename to `terms` causes the next read of an
 already cached document to redact that codename. Successful policy changes
 clear the redacted resource cache, path index, and old rehydration mappings.
@@ -526,6 +864,56 @@ redctx-mcp --root ../source-private --detector patterns=~/redctx/patterns.toml
 redctx --root ../source-private --detector patterns=~/redctx/patterns.toml read @p_1a2b3c4d5e6f
 ```
 
+On every request, the baseline and the plugged detectors work together like
+this:
+
+```mermaid
+flowchart TD
+    TXT["Text to redact<br/>file or issue, raw in memory"]
+    subgraph BLANE["Baseline lane (always on)"]
+        BASE["Built-in baseline<br/>terms, regexes, names"]
+        BOUT["Baseline placeholders<br/>these always win"]
+        BASE --> BOUT
+    end
+    subgraph DLANE["Detector lane (each --detector)"]
+        DET["Nominate spans<br/>on the original text"]
+        D1{"Check<br/>each span"}
+        D2{"Check the<br/>value set"}
+        IGN["Ignored"]
+        POS["Positional only<br/>this span, not other occurrences"]
+        ALT["This span + every other<br/>occurrence of the value"]
+        FAIL(["Request fails<br/>Detector nomination<br/>limit exceeded."])
+        DET --> D1
+        D1 -- "blank, allow-<br/>listed, or a<br/>placeholder word" --> IGN
+        D1 -- "over 256 chars<br/>or 16 words, or on<br/>a placeholder" --> POS
+        D1 -- "other spans" --> D2
+        D2 -- "past the 32,768-<br/>char budget" --> POS
+        D2 -- "within budget" --> ALT
+        D1 -- "over 20,000 spans<br/>from one detector" --> FAIL
+        D2 -- "over 2,000<br/>distinct values" --> FAIL
+    end
+    MERGE["Applied after the baseline<br/>allow-listed words and placeholders<br/>stay as they are"]
+    OUT["Redacted text<br/>usual placeholders + receipt counts"]
+
+    TXT --> BASE
+    TXT --> DET
+    BOUT --> MERGE
+    POS --> MERGE
+    ALT --> MERGE
+    MERGE --> OUT
+
+    classDef step fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    classDef check fill:#fef3c7,stroke:#d97706,color:#78350f
+    classDef safe fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef raw fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+    classDef data fill:#f1f5f9,stroke:#475569,color:#0f172a
+    class TXT,FAIL raw
+    class BASE,DET,POS,ALT,MERGE step
+    class D1,D2 check
+    class IGN data
+    class BOUT,OUT safe
+```
+
 The built-in `patterns` detector reads a TOML file of regex rules. Each rule
 names a placeholder category (`PERSON`, `ORG`, `CLIENT`, `SENSITIVE`, `ID`,
 `EMAIL`, `SECRET`, and the other built-in categories) and a regex:
@@ -550,8 +938,8 @@ literal prefix (for example a long run of capital letters for `[A-Z]+\d`), at
 its text) as too slow when one run takes more than 2 seconds, or as superlinear
 when the larger input takes more than eight times as much CPU time as the
 smaller one (linear growth is four times, quadratic sixteen). Growth is
-measured in CPU time and a suspicious rule is re-timed up to five times, so a
-busy machine does not reject a linear rule. This adds about 2.5 seconds to
+measured in CPU time and a suspicious rule is re-timed, with at most five timed
+runs per input size, so a busy machine does not reject a linear rule. This adds about 2.5 seconds to
 startup for 256 simple anchored rules (0.2 seconds for one rule, most of it
 starting the process). The checks catch common mistakes, not every slow
 pattern: a pathological rule can still stall your own server, so anchor rules
@@ -563,6 +951,46 @@ rejected. The common email rule
 `\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b` is one of them; bound the
 repeated part instead, for example
 `\b[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b`.
+
+The startup checks for `patterns` rules, in order:
+
+```mermaid
+flowchart TB
+    subgraph STATIC["1. Static checks, rule by rule"]
+        direction LR
+        S(["--detector<br/>patterns=rules.toml"]) --> V{"File and<br/>rule valid?"}
+        V -- yes --> SC{"Static<br/>screen OK?"}
+        SC -- yes --> CMP{"Compiles,<br/>non-empty?"}
+        V -- "no: over 256 rules,<br/>unknown category, or<br/>regex over 2,000 chars" --> X1(["Startup fails<br/>regex text never echoed"])
+        SC -- "no: catastrophic-<br/>backtracking shape" --> X1
+        CMP -- "no: invalid, or<br/>matches empty string" --> X1
+    end
+    subgraph STRESS["2. Stress test, all rules in one killable process"]
+        direction LR
+        ST["Time each rule on inputs<br/>built from its own classes<br/>and prefix, at 10,000 and<br/>40,000 chars"] --> SLOW{"A run over<br/>2 seconds?"}
+        SLOW -- no --> GROW{"Large run<br/>over 8x CPU?"}
+        GROW -- "yes, and<br/>20 ms+ CPU" --> RT["Re-time, interleaved,<br/>at most 5 runs per size,<br/>keep the fastest"]
+        RT --> GROW2{"Still<br/>over 8x?"}
+        GROW -- no --> OK(["Rule accepted<br/>runs in-process"])
+        GROW2 -- no --> OK
+        SLOW -- "yes: too slow" --> X2(["Startup fails<br/>regex text never echoed"])
+        GROW2 -- "yes: superlinear" --> X2
+        RT -- "a run over<br/>2 s: too slow" --> X2
+        ST -- "stress test<br/>cannot run" --> X2
+    end
+    STATIC -->|"every rule passed"| STRESS
+
+    classDef agent fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    classDef step fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    classDef check fill:#fef3c7,stroke:#d97706,color:#78350f
+    classDef safe fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef raw fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+    class S agent
+    class ST,RT step
+    class V,SC,CMP,SLOW,GROW,GROW2 check
+    class OK safe
+    class X1,X2 raw
+```
 
 If the rules file lies under the served root it is treated like a term file:
 it is never listed, read, served, or overwritten by controlled writes, even
@@ -787,6 +1215,48 @@ redctx --root ../source-private github issue context 123 --comments
 redctx --root ../source-private github search context "policy controls"
 ```
 
+The agent only sees the neutral alias and redacted fields:
+
+```mermaid
+flowchart TB
+    subgraph LOC["Stays local or upstream"]
+        CONF[(".agent-context-redactor.toml<br/>[github.repos.context]<br/>owner, repo, token_env")]
+        TOK[("Token value<br/>from the token_env variable")]
+        API[("GitHub API<br/>raw titles, bodies,<br/>logins, URLs")]
+    end
+    subgraph SRV["redctx (local process)"]
+        GS["GitHub source<br/>called with repo_alias=context<br/>read-only, 8 MiB response cap"]
+        NUM["Issue number, counts<br/>only non-negative integers"]
+        RED["Redactor<br/>titles, bodies, labels,<br/>states, dates"]
+        AL["Comment author alias<br/>HMAC over salt,<br/>alias, and login"]
+    end
+    subgraph AGV["What the agent sees"]
+        OUT1["Issue line<br/>context#123 state=open<br/>untrusted_title=[ORG_a81f…] plan"]
+        OUT2["Issue detail<br/>body_untrusted_external: …<br/>comment_untrusted_external: …<br/>author: user_9f2c… (comments only)"]
+    end
+
+    CONF -->|"alias to owner/repo"| GS
+    TOK -.->|"Authorization header"| API
+    API -->|"raw JSON"| GS
+    API -.-|"search query is sent<br/>as typed, unredacted"| GS
+    CONF -.->|"owner and repo<br/>added as terms"| RED
+    GS --> NUM
+    GS --> RED
+    GS --> AL
+    NUM --> OUT1
+    RED --> OUT1
+    RED --> OUT2
+    AL --> OUT2
+
+    classDef step fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    classDef safe fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef raw fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+    class GS,RED,AL,NUM step
+    class OUT1,OUT2 safe
+    class CONF,TOK,API raw
+    linkStyle 3 stroke:#dc2626,stroke-width:2px,color:#7f1d1d
+```
+
 The MCP server exposes the same flow with:
 
 - `redctx_github_repos`
@@ -796,13 +1266,70 @@ The MCP server exposes the same flow with:
 
 Outputs redact titles, bodies, labels, and comments, and mark GitHub text as
 untrusted external content. Raw author logins and raw GitHub URLs are not
-printed; authors are shown as stable per-vault, per-repo opaque ids.
+printed; comment authors are shown as stable per-vault, per-repo opaque ids,
+and the issue author is not printed.
 
 ## Discover Terms With A Local LLM
 
 `redctx discover` can draft `.agent-context-redactor.toml` using a local
 Ollama model. This is a human setup command, not an MCP tool, because its output
 intentionally contains the raw names you want to redact.
+
+```mermaid
+flowchart TB
+    subgraph DISC["redctx discover: first draft"]
+        direction LR
+        EP{"Endpoint loopback<br/>or https?"}
+        REF(["Refused unless<br/>--allow-remote-endpoint"])
+        PF[("Private files<br/>sampled, --glob,<br/>--max-files")]
+        OLL["Local Ollama<br/>/api/generate,<br/>JSON output"]
+        CL["Cleanup rules, then keep<br/>values found in that file<br/>--raw-discovery skips cleanup"]
+        DRAFT[("Draft config<br/>raw terms")]
+        HR["Human review<br/>before use"]
+        DET1["or --detector after discover:<br/>local detector, no model call"]
+        EP -- yes --> PF
+        EP -- "no: remote plain http" --> REF
+        PF --> OLL
+        OLL --> CL
+        CL --> DRAFT
+        DRAFT --> HR
+        PF -.-> DET1
+        DET1 -.-> CL
+    end
+    subgraph UPD["redctx discover-update: hooks keep it current"]
+        direction LR
+        JL[("Hook JSONL<br/>one staged blob<br/>per line")]
+        LIM{"Within the<br/>size limits?"}
+        STOP(["Fails before<br/>any model call"])
+        PER["One request per complete<br/>document, same endpoint rule,<br/>then drop values not in it"]
+        EX[("Existing target config<br/>existing terms")]
+        SEED[("Seed config<br/>optional --seed-config")]
+        MO["--merge-only<br/>no documents, no model"]
+        MRG["Monotonic merge<br/>terms: seed + existing<br/>+ found<br/>allow: the seed's if given,<br/>else the existing one<br/>found allow terms only<br/>with --include-<br/>discovered-allow"]
+        AW[(".agent-context-redactor.toml<br/>atomic write")]
+        DET2["or --detector after discover-update:<br/>local detector, no model call"]
+        JL --> LIM
+        LIM -- "no: --max-files,<br/>--max-chars-per-document,<br/>--max-total-chars" --> STOP
+        LIM -- yes --> PER
+        PER --> MRG
+        EX --> MRG
+        SEED -.-> MRG
+        MO -.-> MRG
+        MRG --> AW
+        LIM -.-> DET2
+        DET2 -.-> MRG
+    end
+    DISC ~~~ UPD
+
+    classDef step fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    classDef check fill:#fef3c7,stroke:#d97706,color:#78350f
+    classDef human fill:#ffedd5,stroke:#ea580c,color:#7c2d12
+    classDef raw fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+    class PF,JL,DRAFT,SEED,EX,AW,REF,STOP raw
+    class EP,LIM check
+    class OLL,CL,PER,MRG,DET1,DET2 step
+    class HR,MO human
+```
 
 Example with a small local model:
 
@@ -830,7 +1357,8 @@ does not include project-specific names; it only:
 - ignores single first names by default because they over-redact.
 
 Use `--raw-discovery` if you want the local model's categories with only basic
-dedupe.
+dedupe. Either way, model values that do not occur in the sampled file are
+dropped; the match is case-insensitive and keeps the file's casing.
 
 Useful options:
 
@@ -867,8 +1395,9 @@ redctx --root ../source-private discover-update \
 ```
 
 `discover-update` sends each complete document to the configured local Ollama
-endpoint in a separate request. It rejects model values that are not exact
-substrings of that document, monotonically adds sensitive terms, keeps reviewed
+endpoint in a separate request. It drops model values that do not occur in
+that document (a case-insensitive substring match that keeps the document's
+casing), monotonically adds sensitive terms, keeps reviewed
 seed policy settings authoritative, preserves unrelated TOML tables and
 comments, and writes atomically. By default, model output cannot expand the
 allow-list.
