@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 — 2026-10-10
 
 - Introduces an internal source adapter interface so private data sources
   plug into one redaction boundary. Sources own opaque references (path ids,
@@ -162,6 +162,11 @@
   disagreed with the code is corrected: only comment authors get opaque ids,
   a slow `patterns` rule is timed at most five times, and discovery keeps
   values through a case-insensitive substring match.
+- The PyPI project description now renders cleanly. A build-time
+  `hatch-fancy-pypi-readme` hook replaces each Mermaid diagram, which PyPI
+  shows as raw code, with a link to the README on GitHub and turns relative
+  file links into absolute GitHub links. `README.md` itself is unchanged, and
+  the package still has no runtime dependencies.
 
 ## 0.8.0 — 2026-09-12
 
