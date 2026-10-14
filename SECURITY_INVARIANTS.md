@@ -169,9 +169,19 @@ claim of hard OS isolation.
 
 ## Alias Groups
 
-- Alias groups exist only when the operator declares them in
-  `[redaction.aliases]`. The alias list lives in the local config, which is
-  never served, and no other persisted store of raw values is created.
+- Alias groups exist only in `[redaction.aliases]` of the local config:
+  written by the operator, carried from a reviewed `--seed-config`, or merged
+  from discovery only with `discover-update --include-discovered-aliases`.
+  The config is never served, and no other persisted store of raw values is
+  created.
+- Discovery's alias proposals are review-only in `redctx discover`. Every
+  proposed value occurs in the sampled source, and every proposal passes the
+  same checks as a hand-written group, against the draft or the merged lists,
+  before it is written. Invalid, unsourced, or conflicting proposals are
+  dropped and only counted; their values never appear in output or errors.
+- Alias merging in `discover-update` is monotonic: existing groups are never
+  removed or rewritten, and a proposal that conflicts with them is skipped and
+  counted.
 - Linking is an intentional, bounded disclosure: an agent learns that the
   declared forms belong to one entity (they share the canonical placeholder's
   entity hex) and nothing more about the values.

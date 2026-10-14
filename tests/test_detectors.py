@@ -664,7 +664,11 @@ class DetectorDiscoveryTest(unittest.TestCase):
         self.assertIn('"Alice Example"', config)
         self.assertIn('"Example Partners"', config)
         self.assertIn("provider=detector detectors=patterns", config)
-        self.assertNotIn("alice@example.invalid", config)
+        # Detector EMAIL spans never become drafted terms (the baseline covers
+        # them); the address only appears as a proposed alias of its owner.
+        terms, aliases = config.split("[redaction.aliases]")
+        self.assertNotIn("alice@example.invalid", terms)
+        self.assertIn('"Alice Example" = ["alice@example.invalid"]', aliases)
         self.assertNotIn(str(self.rules), config)
 
     def test_cli_discover_update_with_detector_makes_no_network_call(self) -> None:

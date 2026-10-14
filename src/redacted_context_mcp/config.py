@@ -198,10 +198,7 @@ def resolve_alias_groups(
     """
     if not groups:
         return ()
-    category_of: dict[str, str] = {}
-    for category, values in categories:
-        for configured in values:
-            category_of.setdefault(normalize_alias(configured), category)
+    category_of = alias_category_index(categories)
     allowed = {normalize_alias(term) for term in allow}
     canonical_groups: dict[str, int] = {}
     for number, (canonical, _aliases) in enumerate(groups, start=1):
@@ -230,7 +227,7 @@ def resolve_alias_groups(
         for value in (canonical, *aliases):
             if normalize_alias(value) in RESERVED_PLACEHOLDER_WORDS:
                 raise SystemExit(f"Alias group {number} contains a reserved placeholder word.")
-            if len(value) > MAX_NOMINATED_VALUE_CHARS or len(value.split()) > MAX_NOMINATED_VALUE_TOKENS:
+            if alias_value_over_limits(value):
                 raise SystemExit(
                     f"Alias group {number} contains a value over {MAX_NOMINATED_VALUE_CHARS} characters "
                     f"or {MAX_NOMINATED_VALUE_TOKENS} words."
@@ -259,6 +256,94 @@ def resolve_alias_groups(
             alias_groups[normalized] = number
         resolved.append(AliasGroup(category=category, canonical=canonical, aliases=aliases))
     return tuple(resolved)
+
+
+def alias_category_index(categories: tuple[tuple[str, tuple[str, ...]], ...]) -> dict[str, str]:
+    """Map each normalized configured value to the first category (in order) that holds it."""
+    category_of: dict[str, str] = {}
+    for category, values in categories:
+        for configured in values:
+            category_of.setdefault(normalize_alias(configured), category)
+    return category_of
+
+
+def alias_value_over_limits(value: str) -> bool:
+    return len(value) > MAX_NOMINATED_VALUE_CHARS or len(value.split()) > MAX_NOMINATED_VALUE_TOKENS
+
+
+def merge_alias_proposals(
+    groups: tuple[tuple[str, tuple[str, ...]], ...],
+    proposals: Iterable[tuple[str, Iterable[str]]],
+    *,
+    categories: tuple[tuple[str, tuple[str, ...]], ...],
+    allow: Iterable[str],
+) -> tuple[tuple[tuple[str, tuple[str, ...]], ...], int, int]:
+    """Add proposed aliases to alias groups monotonically, dropping what the loader would refuse.
+
+    ``groups`` (for example an existing config's groups) are kept exactly,
+    in order. A proposal for one of their canonical values only appends new
+    aliases; any other proposal becomes a new group after them. A proposed
+    alias is dropped when it is blank, reserved, over the per-value limits,
+    equal to its own or any group's canonical value, already an alias of
+    another group, on ``allow``, or beyond the per-group limit; every alias
+    of a proposal whose new canonical value is not in ``categories``, is
+    redacted before configured terms, is reserved, over the limits, or
+    already an alias is dropped too. An alias already in its group is a
+    no-op. The form-suffix check needs the vault salt and is left to config
+    loading. Returns ``(groups, added, dropped)``; the counts never carry a
+    value.
+    """
+    category_of = alias_category_index(categories)
+    allowed = {normalize_alias(term) for term in allow}
+    proposals = [(canonical, tuple(aliases)) for canonical, aliases in proposals]
+    merged: dict[str, tuple[str, list[str]]] = {}
+    owner: dict[str, str] = {}
+    for canonical, aliases in groups:
+        key = normalize_alias(canonical)
+        entry = merged.setdefault(key, (canonical, []))
+        for alias in aliases:
+            owner.setdefault(normalize_alias(alias), key)
+            entry[1].append(alias)
+    existing = set(merged)
+    canonicals = existing | {normalize_alias(canonical) for canonical, _aliases in proposals}
+    added = dropped = 0
+    for canonical, aliases in proposals:
+        canonical = re.sub(r"\s+", " ", str(canonical).strip())
+        key = normalize_alias(canonical)
+        if key not in existing and (
+            not canonical
+            or key not in category_of
+            or key in owner
+            or key in RESERVED_PLACEHOLDER_WORDS
+            or alias_value_over_limits(canonical)
+            or claimed_before_configured_terms(canonical)
+        ):
+            dropped += len(aliases)
+            continue
+        entry = merged.setdefault(key, (canonical, []))
+        present = {normalize_alias(alias) for alias in entry[1]}
+        for alias in aliases:
+            alias = re.sub(r"\s+", " ", str(alias).strip())
+            normalized = normalize_alias(alias)
+            if alias and normalized in present:
+                continue
+            if (
+                not alias
+                or normalized in RESERVED_PLACEHOLDER_WORDS
+                or alias_value_over_limits(alias)
+                or normalized in canonicals
+                or normalized in owner
+                or normalized in allowed
+                or len(entry[1]) >= MAX_ALIASES_PER_GROUP
+            ):
+                dropped += 1
+                continue
+            entry[1].append(alias)
+            present.add(normalized)
+            owner[normalized] = key
+            added += 1
+    result = tuple((canonical, tuple(aliases)) for canonical, aliases in merged.values() if aliases)
+    return result, added, dropped
 
 
 def with_protected_paths(config: RedactionConfig, root: Path, paths: Iterable[Path]) -> RedactionConfig:

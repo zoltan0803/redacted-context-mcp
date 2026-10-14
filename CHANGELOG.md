@@ -32,11 +32,24 @@
   explains how to find every form by the shared hex; the tool output schema
   and `redctx_doctor` description mention linked forms.
 - Path redaction now leaves whole placeholders untouched before redacting
-  path tokens, the raw-search prefilter is skipped for queries that could be
-  a fragment of a linked placeholder, and `discover-update` keeps
-  `[redaction.aliases]` (and any other `[redaction.*]` sub-table) unchanged,
-  recognizes table headers followed by comments, and adds an explicit
-  `[redaction]` table when a config has only sub-tables.
+  path tokens, and the raw-search prefilter is skipped for queries that could
+  be a fragment of a linked placeholder.
+- `redctx discover` proposes alias groups for review in its draft, with
+  deterministic rules that need no model: a person's first name when it is
+  used on its own, is unambiguous among known names, and is not a common
+  word; and email addresses whose local part spells exactly one known
+  person's name. The model may suggest groups under an `aliases` key; its
+  suggestions must occur as whole words in their file. All proposals pass the
+  alias-group checks against the draft, and dropped ones are only counted.
+  `--raw-discovery` skips the deterministic rules.
+- `discover-update` merges alias groups monotonically: it always carries a
+  `--seed-config`'s `[redaction.aliases]` table, adds groups proposed from the
+  documents only with the new `--include-discovered-aliases` flag, never
+  removes or rewrites existing groups, skips conflicting or invalid
+  additions, and prints `alias_counts`. It also keeps other `[redaction.*]`
+  sub-tables unchanged, recognizes table headers followed by comments, adds
+  an explicit `[redaction]` table when a config has only sub-tables, and adds
+  missing keys before a section's trailing blank lines.
 
 ## 0.9.0 — 2026-10-10
 

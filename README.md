@@ -873,8 +873,10 @@ redact as one linked placeholder on their own.
 Linking is a deliberate disclosure: the agent learns that these forms belong
 to one entity, and nothing more about the values. Declare only forms you are
 comfortable linking. The alias list lives in this local config, which is never
-served, and no other store of raw values is created. `discover-update` keeps
-the `[redaction.aliases]` table unchanged; `discover` does not propose groups.
+served, and no other store of raw values is created. `redctx discover` can
+propose groups for review, and `discover-update` adds groups only from a seed
+config or, with `--include-discovered-aliases`, from discovery; see
+[Discover Terms With A Local LLM](#discover-terms-with-a-local-llm).
 
 ### Updating Rules During an MCP Session
 
@@ -1388,7 +1390,7 @@ flowchart TB
         EX[("Existing target config<br/>existing terms")]
         SEED[("Seed config<br/>optional --seed-config")]
         MO["--merge-only<br/>no documents, no model"]
-        MRG["Monotonic merge<br/>terms: seed + existing<br/>+ found<br/>allow: the seed's if given,<br/>else the existing one<br/>found allow terms only<br/>with --include-<br/>discovered-allow"]
+        MRG["Monotonic merge<br/>terms: seed + existing<br/>+ found<br/>allow: the seed's if given,<br/>else the existing one<br/>found allow terms only<br/>with --include-<br/>discovered-allow<br/>alias groups: existing + seed,<br/>found ones only with<br/>--include-discovered-aliases"]
         AW[(".agent-context-redactor.toml<br/>atomic write")]
         DET2["or --detector after discover-update:<br/>local detector, no model call"]
         JL --> LIM
@@ -1443,6 +1445,41 @@ Use `--raw-discovery` if you want the local model's categories with only basic
 dedupe. Either way, model values that do not occur in the sampled file are
 dropped; the match is case-insensitive and keeps the file's casing.
 
+The draft also proposes [alias groups](#alias-groups) in a
+`[redaction.aliases]` table headed by a review reminder. A wrong link tells
+the agent that two people are one, so every proposal is for review only, and
+the rules are deliberately narrow. They need no model, so they also work with
+`discover --detector`:
+
+- **Standalone first name.** For a full name in the draft's `people`, its first
+  name is proposed when it is at least three letters long and occurs on its own
+  in the sample (`Thank you, Avery`). It must not be a word of any other known
+  name (the draft's people and the people of the loaded config), so two Averys,
+  or an Avery and a Jo Avery, produce nothing. It must not be a common or
+  allow-listed word, or appear in lower case as an ordinary word anywhere in the
+  sample (that rules out names like Will or Grace). Finally, it must never be
+  directly followed on its line by a capitalized word other than the rest of a
+  known name, since that could be another person's surname.
+- **Email address.** An address found in the sample is proposed for the one
+  known person its local part (before any `+tag`) spells: the full name in
+  either order with or without `.`, `_` or `-` (`avery.example`,
+  `example_avery`, `averyexample`), the first initial and surname (`aexample`,
+  `a.example`), or the first name alone when that first name passes the
+  ambiguity checks above. An address that fits no one, or more than one
+  person, is skipped.
+
+The model may suggest groups too, under an `aliases` key in its JSON. Each
+suggested value must occur as a whole word in the file it came from.
+Heuristic and model proposals then pass the same checks as a hand-written
+group, against the draft itself, so the draft loads as written. The canonical
+value must be one of the draft's names or terms. An alias may not be on the
+draft's allow list or the built-in one, a reserved word, too long, a canonical
+value, or an alias of another group. Dropped proposals are only counted, in a
+comment at the top of the draft; their values are never printed.
+`--raw-discovery` skips the heuristics but keeps the model's own suggestions,
+still checked. `--format json` adds an `aliases` object and a
+`dropped_alias_proposals` count.
+
 Useful options:
 
 ```sh
@@ -1490,6 +1527,24 @@ Documents are never silently truncated. A document over
 before the model is called. Set those limits to fit the selected model's actual
 context window. `--merge-only` applies a reviewed seed change without reading
 documents or calling Ollama.
+
+[Alias groups](#alias-groups) merge monotonically: groups already in the target
+config are never removed or rewritten, and new aliases are appended to them or
+added as new groups. A seed config's `[redaction.aliases]` table is always
+merged, like its other reviewed settings. Groups proposed from the documents
+(the rules above, with the target config's and the seed's people as further
+canonical values and ambiguity checks) are merged only with
+`--include-discovered-aliases`. That keeps unreviewed links out of a hook's
+automatic updates unless you opt in. Every addition is checked against the
+merged term and allow lists, and anything invalid or conflicting with an
+existing group, such as an alias that already belongs to another group, is
+skipped. The command prints
+`alias_counts: {"discovered":N,"dropped":N,"seed":N}`: aliases added from
+discovery and from the seed, and proposals skipped. To be extended, existing
+groups must be written as a `[redaction.aliases]` table; an inline `aliases`
+table is left as it is and stops the merge only when there is something to
+add. The vault salt is not read here, so a form-suffix clash (below one in two
+million for a group of 64) is caught when the config next loads.
 
 The equivalent Python composition API is:
 

@@ -86,11 +86,21 @@ class RedactionConfig:
 
 @dataclass(frozen=True)
 class DiscoveryResult:
+    """Discovered raw terms, plus proposed alias groups for human review.
+
+    ``aliases`` holds ``(canonical, aliases)`` proposals whose values all
+    occur in the sampled source; ``dropped_aliases`` counts proposed aliases
+    dropped so far as unsourced, invalid, or conflicting. ``as_dict`` covers
+    the term buckets only.
+    """
+
     clients: tuple[str, ...] = ()
     organizations: tuple[str, ...] = ()
     people: tuple[str, ...] = ()
     terms: tuple[str, ...] = ()
     allow: tuple[str, ...] = ()
+    aliases: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    dropped_aliases: int = 0
 
     def as_dict(self) -> dict[str, tuple[str, ...]]:
         return {
@@ -118,6 +128,9 @@ class DiscoveryUpdate:
     discovery: DiscoveryResult
     config_text: str
     changed: bool
+    # Aliases added from the seed config and from discovery, and proposed
+    # aliases dropped as unsourced, invalid, or conflicting. Counts only.
+    alias_counts: dict[str, int] = field(default_factory=dict)
 
 
 class DiscoveryParseError(ValueError):

@@ -69,6 +69,7 @@ from .discovery import (
     build_discovery_prompt,
     build_strict_discovery_prompt,
     clean_discovered_terms,
+    config_people,
     discover_documents,
     discover_entities,
     extract_ollama_error,
@@ -91,6 +92,7 @@ from .discovery import (
     parse_discovery_response,
     parse_json_object,
     postprocess_discovery_result,
+    propose_alias_groups,
     should_drop_discovered_value,
     write_discovery_update,
     write_discovery_output,
@@ -1037,9 +1039,16 @@ def command_discover(args: argparse.Namespace, ctx: RedactedContext, redactor: R
         max_total_raw_bytes=getattr(args, "max_total_raw_bytes", DEFAULT_MAX_TOTAL_RAW_BYTES),
         postprocess=not args.raw_discovery,
         fail_on_truncation=getattr(args, "fail_on_truncation", False),
+        # Raw discovery keeps the model's own alias suggestions (still
+        # source-checked and validated) but skips the deterministic ones.
+        propose_aliases=not args.raw_discovery,
+        known_people=redactor.config.explicit_people if redactor is not None else (),
     )
     if args.format == "json":
-        output = json.dumps(result.as_dict(), indent=2, ensure_ascii=False) + "\n"
+        payload: dict[str, object] = dict(result.as_dict())
+        payload["aliases"] = {canonical: list(aliases) for canonical, aliases in result.aliases}
+        payload["dropped_alias_proposals"] = result.dropped_aliases
+        output = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     else:
         output = format_discovery_toml(
             result,
@@ -1093,24 +1102,6 @@ def command_discover_update(
                 f"Discovery input exceeds --max-total-chars={args.max_total_chars}."
             )
 
-        if documents and detectors:
-            # Local detectors replace the Ollama model; no network call is made.
-            result = discover_documents(
-                documents,
-                client=DetectorDiscoveryClient(*detectors, postprocess=True),
-                postprocess=True,
-            )
-        elif documents:
-            client = OllamaDiscoveryClient(
-                endpoint=ollama_endpoint(args),
-                model=ollama_model(args),
-                timeout=args.timeout,
-                postprocess=True,
-                allow_remote=getattr(args, "allow_remote_endpoint", False),
-            )
-            result = discover_documents(documents, client=client, postprocess=True)
-        else:
-            result = DiscoveryResult()
         config_path = resolve_under_root(
             ctx.root,
             args.output_config or LOCAL_CONFIG,
@@ -1123,11 +1114,43 @@ def command_discover_update(
         if args.seed_config:
             seed_path = resolve_under_root(ctx.root, args.seed_config)
             seed_text = seed_path.read_text(encoding="utf-8-sig")
+        # Discovered alias groups are merged only on explicit request: a
+        # wrong link would tell the agent that two people are one.
+        include_aliases = getattr(args, "include_discovered_aliases", False)
+        alias_people = config_people(seed_text, existing_text) if include_aliases else ()
+
+        if documents and detectors:
+            # Local detectors replace the Ollama model; no network call is made.
+            result = discover_documents(
+                documents,
+                client=DetectorDiscoveryClient(*detectors, postprocess=True),
+                postprocess=True,
+                propose_aliases=include_aliases,
+                alias_people=alias_people,
+            )
+        elif documents:
+            client = OllamaDiscoveryClient(
+                endpoint=ollama_endpoint(args),
+                model=ollama_model(args),
+                timeout=args.timeout,
+                postprocess=True,
+                allow_remote=getattr(args, "allow_remote_endpoint", False),
+            )
+            result = discover_documents(
+                documents,
+                client=client,
+                postprocess=True,
+                propose_aliases=include_aliases,
+                alias_people=alias_people,
+            )
+        else:
+            result = DiscoveryResult()
         update = build_discovery_update(
             existing_text,
             result,
             seed_text=seed_text,
             include_discovered_allow=args.include_discovered_allow,
+            include_discovered_aliases=include_aliases,
         )
     except (OSError, ValueError, OperationLimitError) as exc:
         raise SystemExit(str(exc)) from exc
@@ -1148,6 +1171,7 @@ def command_discover_update(
     else:
         print(f"model: {ollama_model(args) if documents else 'skipped'}")
     print(f"discovered_counts: {json.dumps(counts, sort_keys=True, separators=(',', ':'))}")
+    print(f"alias_counts: {json.dumps(update.alias_counts, sort_keys=True, separators=(',', ':'))}")
     print(f"config_changed: {str(update.changed).lower()}")
     return 0
 
@@ -1404,6 +1428,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--include-discovered-allow",
         action="store_true",
         help="allow model-discovered public terms to expand the allow-list",
+    )
+    discover_update_parser.add_argument(
+        "--include-discovered-aliases",
+        action="store_true",
+        help=(
+            "merge proposed alias groups found in the documents; only adds valid, non-conflicting "
+            "aliases (seed config aliases are always merged)"
+        ),
     )
     discover_update_parser.add_argument(
         "--merge-only",

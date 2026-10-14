@@ -523,6 +523,22 @@ placeholder matcher (`PLACEHOLDER_RE` and the patterns built from it,
 including path redaction, truncation, retrieval tokens, and rehydration)
 accepts the optional suffix.
 
+Discovery can propose groups. `DiscoveryResult.aliases` carries proposals
+whose values all occur in the sampled source (model suggestions under an
+`aliases` key must occur as whole words in their own file), and
+`DiscoveryResult.dropped_aliases` counts what was dropped; `as_dict()` stays
+the term buckets only. `propose_alias_groups` in `discovery.py` adds the
+deterministic proposals (standalone, unambiguous first names and email local
+parts that spell one known name). `config.merge_alias_proposals` is the
+lenient twin of the loader's validation: it applies the same rules but drops
+and counts instead of failing, keeps existing groups exactly, and only
+appends. `discover` runs it against the draft's own lists so the draft loads
+as written; `discover-update` runs it against the merged lists, for the seed's
+groups always and for discovered groups only with
+`--include-discovered-aliases`, then `write_alias_additions` rewrites only the
+entries that grew, appends new groups, and parses the result back. It does
+not read the vault salt, so the form-suffix check stays with config loading.
+
 ## Configuration
 
 The local `.agent-context-redactor.toml` file is intentionally ignored by git.
