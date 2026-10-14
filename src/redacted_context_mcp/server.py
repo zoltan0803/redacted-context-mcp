@@ -66,7 +66,9 @@ TEXT_OUTPUT_SCHEMA = {
             "type": "string",
             "description": (
                 "The tool output, identical to the text content block and already redacted: sensitive values "
-                "appear as deterministic `[CATEGORY_<hex>]` placeholders and files as `@p_<id>` references. "
+                "appear as deterministic `[CATEGORY_<hex>]` placeholders (forms declared as aliases of one entity "
+                "share its hex and add a form suffix, `[CATEGORY_<hex>.<form>]`) and files as `@p_<id>` "
+                "references. "
                 "When the result has `isError: true`, this is a fixed error message instead, such as a limit "
                 "error or the notice that context access is blocked until the operator repairs the local "
                 "redaction config."
@@ -735,6 +737,7 @@ def redaction_config_fingerprint(config: rc.RedactionConfig) -> str:
         "exclude_dirs": config.exclude_dirs,
         "exclude_globs": config.exclude_globs,
         "detector_profile": config.detector_profile,
+        "alias_groups": [[group.category, group.canonical, group.aliases] for group in config.alias_groups],
     }
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -1282,7 +1285,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "Use it for exact words, identifiers or patterns and to see nearby lines; use `redctx_retrieve` "
             "instead for ranked passages answering a multi-word question. "
             "Matching runs on redacted output, so raw sensitive values never match; search for a placeholder such "
-            "as `[PERSON_<hex>]` copied from earlier output to find every mention of that entity. "
+            "as `[PERSON_<hex>]` copied from earlier output to find every mention of that exact value. "
+            "Forms the operator declared as aliases of one entity share its hex and add a form suffix, as in "
+            "`[PERSON_<hex>.<form>]` or `[EMAIL_<hex>.<form>]`: search for `[PERSON_<hex>` without the closing "
+            "bracket to find every person-typed form, or for the bare `<hex>` to find every form. "
             "Output stops at `max_results` lines with `[TRUNCATED]`; the call fails after 30 s or when a file in "
             "scope exceeds 5 MB, so narrow `paths` or `glob` on large roots."
         ),
@@ -1532,8 +1538,9 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "name": "redctx_doctor",
         "description": (
             "Report the active redaction setup as `key: value` lines: whether a config file was loaded, mode, "
-            "detector profile, salt source, counts of configured clients, organizations, people, other and allow "
-            "terms, exclusion counts, and any additional detectors by name and version. "
+            "detector profile, salt source, counts of configured clients, organizations, people, other terms, "
+            "alias groups and aliases, and allow terms, exclusion counts, and any additional detectors by name "
+            "and version. "
             "It prints counts only, never the terms, and reads no context files. "
             "Use it to confirm which policy is in effect; use `redctx_audit` to actually test redaction and "
             "containment. "

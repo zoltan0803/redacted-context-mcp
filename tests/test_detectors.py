@@ -19,6 +19,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from dataclasses import replace
 from importlib import metadata
@@ -37,7 +38,7 @@ from redacted_context_mcp.detectors import (
     load_detectors,
     patterns_detector_factory,
 )
-from redacted_context_mcp.discovery import DetectorDiscoveryClient
+from redacted_context_mcp.discovery import DetectorDiscoveryClient, discover_documents
 from redacted_context_mcp.filesystem import RedactedContext
 from redacted_context_mcp.limits import OperationBudget
 from redacted_context_mcp.models import (
@@ -46,6 +47,7 @@ from redacted_context_mcp.models import (
     DETECTOR_LIMIT_MESSAGE,
     DETECTOR_SPAN_MESSAGE,
     WRITE_TARGET_PROTECTED_MESSAGE,
+    DiscoveryDocument,
     RedactionConfig,
 )
 from redacted_context_mcp.redaction import Redactor
@@ -635,6 +637,22 @@ class DetectorDiscoveryTest(unittest.TestCase):
         self.assertNotIn("alice@example.invalid", flattened)
         self.assertNotIn("10.1.2.3", flattened)
 
+    def test_bridge_keeps_name_like_values_in_the_detector_category(self) -> None:
+        text = "Avery Example met Example Lantern Labs, Fictional Harbor Studio and Blue Heron.\n"
+        detector = FakeDetector(
+            {
+                "Avery Example": "PERSON",
+                "Example Lantern Labs": "ORG",
+                "Fictional Harbor Studio": "CLIENT",
+                "Blue Heron": "SENSITIVE",
+            }
+        )
+        result = DetectorDiscoveryClient(detector).extract(rel_path="context/note.md", text=text)
+        self.assertEqual(result.people, ("Avery Example",))
+        self.assertEqual(result.organizations, ("Example Lantern Labs",))
+        self.assertEqual(result.clients, ("Fictional Harbor Studio",))
+        self.assertEqual(result.terms, ("Blue Heron",))
+
     def test_bridge_failures_are_safe(self) -> None:
         client = DetectorDiscoveryClient(FakeDetector(error=RuntimeError(LIBRARY_CANARY)))
         with self.assertRaises(DetectorError) as caught:
@@ -664,7 +682,11 @@ class DetectorDiscoveryTest(unittest.TestCase):
         self.assertIn('"Alice Example"', config)
         self.assertIn('"Example Partners"', config)
         self.assertIn("provider=detector detectors=patterns", config)
-        self.assertNotIn("alice@example.invalid", config)
+        # Detector EMAIL spans never become drafted terms (the baseline covers
+        # them); the address only appears as a proposed alias of its owner.
+        terms, aliases = config.split("[redaction.aliases]")
+        self.assertNotIn("alice@example.invalid", terms)
+        self.assertIn('"Alice Example" = ["alice@example.invalid"]', aliases)
         self.assertNotIn(str(self.rules), config)
 
     def test_cli_discover_update_with_detector_makes_no_network_call(self) -> None:
@@ -691,6 +713,144 @@ class DetectorDiscoveryTest(unittest.TestCase):
         config = (self.root / ".agent-context-redactor.toml").read_text(encoding="utf-8")
         self.assertIn('"Alice Example"', config)
         self.assertIn('"Example Partners"', config)
+
+    def test_cli_discover_with_detector_keeps_organizations_out_of_people(self) -> None:
+        (self.root / "context" / "team.md").write_text(
+            "Avery Example and Morgan Sample moved from Example Lantern Labs to Fictional Harbor Studio.\n",
+            encoding="utf-8",
+        )
+        rules = Path(self.tmp.name) / "names.toml"
+        rules.write_text(
+            "[[patterns]]\ncategory = 'PERSON'\nregex = 'Avery Example'\n"
+            "[[patterns]]\ncategory = 'PERSON'\nregex = 'Morgan Sample'\n"
+            "[[patterns]]\ncategory = 'ORG'\nregex = 'Example Lantern Labs'\n"
+            "[[patterns]]\ncategory = 'ORG'\nregex = 'Fictional Harbor Studio'\n",
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"REDACTED_CONTEXT_STATE_DIR": self.state.name}):
+            with contextlib.redirect_stdout(io.StringIO()):
+                status = core.main(
+                    [
+                        "--mode",
+                        "balanced",
+                        "--root",
+                        str(self.root),
+                        "discover",
+                        "--detector",
+                        f"patterns={rules}",
+                        "--glob",
+                        "*.md",
+                        "--output",
+                        ".agent-context-redactor.toml",
+                    ]
+                )
+        self.assertEqual(status, 0)
+        config = (self.root / ".agent-context-redactor.toml").read_text(encoding="utf-8")
+        section = tomllib.loads(config)["redaction"]
+        self.assertCountEqual(section["organizations"], ["Example Lantern Labs", "Fictional Harbor Studio"])
+        self.assertCountEqual(section["people"], ["Avery Example", "Morgan Sample"])
+        self.assertEqual(section["clients"], [])
+
+    # Lowercase codenames match the tool/package-name heuristic that sends
+    # model-drafted terms to ``allow``; detector-tagged values must stay terms.
+    CODENAME_TEXT = "The zorblax rollout depends on orion-ledger exports.\n"
+    CODENAMES = ("zorblax", "orion-ledger")
+
+    def write_codename_rules(self) -> Path:
+        (self.root / "context" / "codenames.md").write_text(self.CODENAME_TEXT, encoding="utf-8")
+        rules = Path(self.tmp.name) / "codenames.toml"
+        rules.write_text(
+            "[[patterns]]\ncategory = 'SENSITIVE'\nregex = '\\bzorblax\\b'\n"
+            "[[patterns]]\ncategory = 'ENTITY'\nregex = '\\borion-ledger\\b'\n",
+            encoding="utf-8",
+        )
+        return rules
+
+    def codename_detector(self) -> FakeDetector:
+        return FakeDetector({"zorblax": "SENSITIVE", "orion-ledger": "ENTITY"})
+
+    def test_bridge_keeps_lowercase_detector_terms_out_of_allow(self) -> None:
+        result = DetectorDiscoveryClient(self.codename_detector()).extract(
+            rel_path="context/codenames.md", text=self.CODENAME_TEXT
+        )
+        self.assertEqual(result.terms, self.CODENAMES)
+        self.assertEqual(result.allow, ())
+
+    def test_discover_documents_merge_keeps_lowercase_detector_terms_out_of_allow(self) -> None:
+        document = DiscoveryDocument(path="context/codenames.md", text=self.CODENAME_TEXT)
+        for client_postprocess in (True, False):
+            with self.subTest(client_postprocess=client_postprocess):
+                client = DetectorDiscoveryClient(self.codename_detector(), postprocess=client_postprocess)
+                result = discover_documents([document], client=client)
+                self.assertEqual(result.terms, self.CODENAMES)
+                self.assertEqual(result.allow, ())
+
+    def test_cli_discover_with_detector_keeps_lowercase_codenames_redacted(self) -> None:
+        rules = self.write_codename_rules()
+        draft = self.root / ".agent-context-redactor.toml"
+        with patch.dict(os.environ, {"REDACTED_CONTEXT_STATE_DIR": self.state.name}):
+            with contextlib.redirect_stdout(io.StringIO()):
+                status = core.main(
+                    [
+                        "--root",
+                        str(self.root),
+                        "discover",
+                        "--detector",
+                        f"patterns={rules}",
+                        "--output",
+                        ".agent-context-redactor.toml",
+                    ]
+                )
+            self.assertEqual(status, 0)
+            redaction = tomllib.loads(draft.read_text(encoding="utf-8"))["redaction"]
+            for value in self.CODENAMES:
+                self.assertIn(value, redaction["terms"])
+                self.assertNotIn(value, redaction["allow"])
+            for global_detector in ([], ["--detector", f"patterns={rules}"]):
+                with self.subTest(global_detector=bool(global_detector)):
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        status = core.main(
+                            [
+                                "--root",
+                                str(self.root),
+                                "--config",
+                                str(draft),
+                                *global_detector,
+                                "cat",
+                                "context/codenames.md",
+                            ]
+                        )
+                    self.assertEqual(status, 0)
+                    self.assertIn("rollout depends on", output.getvalue())
+                    for value in self.CODENAMES:
+                        self.assertNotIn(value, output.getvalue())
+
+    def test_cli_discover_update_with_detector_keeps_lowercase_codenames_out_of_allow(self) -> None:
+        rules = self.write_codename_rules()
+        documents = self.root / "documents.jsonl"
+        documents.write_text(
+            json.dumps({"path": "context/codenames.md", "text": self.CODENAME_TEXT}) + "\n", encoding="utf-8"
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            status = core.main(
+                [
+                    "--root",
+                    str(self.root),
+                    "discover-update",
+                    "--input-jsonl",
+                    str(documents),
+                    "--detector",
+                    f"patterns={rules}",
+                    "--include-discovered-allow",
+                ]
+            )
+        self.assertEqual(status, 0)
+        config = (self.root / ".agent-context-redactor.toml").read_text(encoding="utf-8")
+        redaction = tomllib.loads(config)["redaction"]
+        for value in self.CODENAMES:
+            self.assertIn(value, redaction["terms"])
+            self.assertNotIn(value, redaction.get("allow", []))
 
 
 class DetectorMcpTest(unittest.TestCase):
