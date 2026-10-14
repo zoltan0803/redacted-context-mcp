@@ -41,11 +41,21 @@ class RedactedContext:
     untrusted_content = False
     supports_document_iteration = True
 
-    def __init__(self, root: Path, config: RedactionConfig, *, include_private: bool = False, documents: bool = False):
+    def __init__(
+        self,
+        root: Path,
+        config: RedactionConfig,
+        *,
+        include_private: bool = False,
+        documents: bool = False,
+        max_index_entries: int = DEFAULT_MAX_TRAVERSAL_ENTRIES,
+    ):
         self.root = root.resolve()
         self.config = config
         self.include_private = include_private
         self.documents = documents
+        # Entry budget for the cached path index behind opaque references.
+        self.max_index_entries = max_index_entries
         if documents:
             require_document_support()
         self.exclude_dirs = set(DEFAULT_EXCLUDE_DIRS) | set(config.exclude_dirs)
@@ -239,7 +249,7 @@ class RedactedContext:
         if self._path_index is not None and budget is None:
             return self._path_index
         index: dict[str, str] = {}
-        index_budget = budget or OperationBudget(max_entries=DEFAULT_MAX_TRAVERSAL_ENTRIES)
+        index_budget = budget or OperationBudget(max_entries=self.max_index_entries)
         try:
             for path in self.walk(include_dirs=True, budget=index_budget):
                 rel = rel_posix(path, self.root)

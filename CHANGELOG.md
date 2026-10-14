@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- The MCP tree, list, read, search, bundle, stat, and audit tools and opaque
+  `@p_` reference resolution now honour `--max-traversal-entries`,
+  `--max-raw-bytes-per-file`, and `--max-total-raw-bytes` instead of the
+  built-in defaults, so a raised limit serves larger trees and a lowered one
+  bounds every tool. The CLI's `--max-entries` now also bounds `@p_`
+  resolution.
+
 ## 0.9.0 — 2026-10-10
 
 - Introduces an internal source adapter interface so private data sources

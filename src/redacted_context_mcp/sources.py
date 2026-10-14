@@ -17,6 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable, Iterator, Protocol, Sequence, cast, runtime_checkable
 
+from .defaults import DEFAULT_MAX_TRAVERSAL_ENTRIES
 from .filesystem import RedactedContext
 from .github import GitHubSource
 from .limits import OperationBudget
@@ -103,6 +104,7 @@ def build_sources(
     *,
     include_private: bool = False,
     documents: bool = False,
+    max_index_entries: int = DEFAULT_MAX_TRAVERSAL_ENTRIES,
 ) -> SourceRegistry:
     """Build every source enabled by ``config``.
 
@@ -111,7 +113,13 @@ def build_sources(
     registry together with the ``Redactor`` whenever the policy changes.
     """
     sources: list[ContextSource] = [
-        RedactedContext(root, config, include_private=include_private, documents=documents)
+        RedactedContext(
+            root,
+            config,
+            include_private=include_private,
+            documents=documents,
+            max_index_entries=max_index_entries,
+        )
     ]
     github = GitHubSource.from_config(config)
     if github is not None:
