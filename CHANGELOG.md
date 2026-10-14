@@ -1,5 +1,68 @@
 # Changelog
 
+## Unreleased
+
+- Adds alias groups. `[redaction.aliases]` maps a canonical value (a
+  configured client, organization, person, or term) to other forms of the same
+  entity, for example `"Avery Example" = ["Avery", "avery@example.com"]`.
+  Each alias is redacted in its own right with configured-term boundaries and
+  gets a linked placeholder that shares the canonical placeholder's entity hex
+  and adds a keyed form suffix, `[PERSON_<entity>.<form>]`, so an agent can
+  tell that the forms belong to one entity. The canonical placeholder is
+  unchanged, and every other placeholder is byte-identical without groups.
+- A linked form keeps the category of whichever built-in stage or plugged
+  detector redacts it (an email alias stays `EMAIL_`), and longest-match
+  ordering still applies. The form suffix is the first 32 bits of an HMAC
+  keyed by the vault salt; two aliases of one group never share one.
+- `redctx rehydrate` and `redctx_submit_doc` restore each form to its own
+  spelling, still from a rescan of the private root, and controlled writes
+  re-redact restored alias forms before publishing. An alias's previous
+  placeholder in the same category still restores it, so documents redacted
+  before the group was declared keep rehydrating. Unresolvable linked
+  placeholders are refused like any other.
+- Invalid groups fail closed with messages that name groups by position and
+  never echo values: unconfigured canonical values or ones a built-in stage
+  redacts before configured terms, aliases that repeat their own or another
+  group's canonical value or another group's alias, allow-listed or reserved
+  aliases, values over 256 characters or 16 words, empty groups, more than 64
+  aliases, and form-suffix clashes. Live policy reload applies group changes.
+- `redctx doctor` reports `alias_groups` and `aliases` counts, and `redctx
+  audit` adds an `alias groups` check that counts forms which do not redact as
+  one linked placeholder on their own. The `redctx_search` description
+  explains how to find every form by the shared hex; the tool output schema
+  and `redctx_doctor` description mention linked forms.
+- Path redaction now leaves whole placeholders untouched before redacting
+  path tokens, and the raw-search prefilter is skipped for queries that could
+  be a fragment of a linked placeholder.
+- `redctx discover` proposes alias groups for review in its draft, with
+  deterministic rules that need no model: a person's first name when it is
+  used on its own, is unambiguous among known names, and is not a common
+  word; and email addresses whose local part spells exactly one known
+  person's name. The model may suggest groups under an `aliases` key; its
+  suggestions must occur as whole words in their file. All proposals pass the
+  alias-group checks against the draft, and dropped ones are only counted.
+  `--raw-discovery` skips the deterministic rules.
+- `discover-update` merges alias groups monotonically: it always carries a
+  `--seed-config`'s `[redaction.aliases]` table, adds groups proposed from the
+  documents only with the new `--include-discovered-aliases` flag, never
+  removes or rewrites existing groups, skips conflicting or invalid
+  additions, and prints `alias_counts`. It also keeps other `[redaction.*]`
+  sub-tables unchanged, recognizes table headers followed by comments, adds
+  an explicit `[redaction]` table when a config has only sub-tables, and adds
+  missing keys before a section's trailing blank lines.
+- `redctx discover` and `discover-update` no longer reclassify organization,
+  client, or term values that look like full names (for example
+  `Example Lantern Labs`) as people. They keep the detector's or model's
+  category and placeholder, and no longer count as known people when alias
+  groups are proposed. Post-processing still drops generic, public, and role
+  values.
+- `redctx discover --detector` and `discover-update --detector` no longer move
+  lowercase detector-tagged values (for example a codename matched by a
+  `patterns` rule) to `allow`, where they disabled redaction of that value,
+  including the detector's own redaction at serving time. They now stay in
+  `terms`. Ollama discovery still moves likely tool and package names to
+  `allow`.
+
 ## 0.9.0 — 2026-10-10
 
 - Introduces an internal source adapter interface so private data sources

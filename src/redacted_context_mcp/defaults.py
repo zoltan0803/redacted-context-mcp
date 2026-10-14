@@ -471,9 +471,21 @@ PLACEHOLDER_CATEGORIES = frozenset(
     }
 )
 PLACEHOLDER_CATEGORY_PATTERN = "|".join(sorted(PLACEHOLDER_CATEGORIES, key=len, reverse=True))
+# A declared alias form's placeholder is its group's 32-hex entity id, this
+# separator, and a keyed form suffix: `[PERSON_<entity>.<form>]`. The
+# separator is not a word character, so word boundaries still fall at the
+# brackets, and unlike `~` or `*` it is not Markdown emphasis or
+# strikethrough syntax when two linked placeholders share a paragraph.
+ALIAS_FORM_SEPARATOR = "."
+ALIAS_FORM_SUFFIX_HEX = 8
 PLACEHOLDER_RE = re.compile(
-    rf"\[(?:{PLACEHOLDER_CATEGORY_PATTERN})_(?:\d{{2}}|[0-9a-f]{{8}}|[0-9a-f]{{32}})\]"
+    rf"\[(?:{PLACEHOLDER_CATEGORY_PATTERN})_"
+    rf"(?:\d{{2}}|[0-9a-f]{{8}}|[0-9a-f]{{32}}(?:{re.escape(ALIAS_FORM_SEPARATOR)}[0-9a-f]{{{ALIAS_FORM_SUFFIX_HEX}}})?)\]"
 )
+# Per-group bound on declared aliases. With 32-bit form suffixes the chance
+# that two forms of one group share a suffix stays below one in two million,
+# and such a clash is refused when the config loads.
+MAX_ALIASES_PER_GROUP = 64
 RESERVED_PLACEHOLDER_WORDS = {
     "client",
     "org",

@@ -154,7 +154,8 @@ claim of hard OS isolation.
 
 ## Determinism
 
-- Opaque path ids and placeholders remain stable within one vault salt.
+- Opaque path ids and placeholders remain stable within one vault salt,
+  including alias forms for an unchanged alias group.
 - User aliases remain stable within one vault and repo alias.
 
 ## Bijection
@@ -162,6 +163,45 @@ claim of hard OS isolation.
 - Generated redaction placeholders use at least 128 bits of HMAC output.
 - Distinct private values cannot silently share one placeholder; collisions
   raise an error instead of building an unsafe rehydration map.
+- Declared alias forms add a 32-bit form suffix to their group's 128-bit
+  entity hex. A config in which two aliases of one group would share a suffix
+  is refused, and any other clash still fails through the collision check.
+
+## Alias Groups
+
+- Alias groups exist only in `[redaction.aliases]` of the local config:
+  written by the operator, carried from a reviewed `--seed-config`, or merged
+  from discovery only with `discover-update --include-discovered-aliases`.
+  The config is never served, and no other persisted store of raw values is
+  created.
+- Discovery's alias proposals are review-only in `redctx discover`. Every
+  proposed value occurs in the sampled source, and every proposal passes the
+  same checks as a hand-written group, against the draft or the merged lists,
+  before it is written. Invalid, unsourced, or conflicting proposals are
+  dropped and only counted; their values never appear in output or errors.
+- Alias merging in `discover-update` is monotonic: existing groups are never
+  removed or rewritten, and a proposal that conflicts with them is skipped and
+  counted.
+- Linking is an intentional, bounded disclosure: an agent learns that the
+  declared forms belong to one entity (they share the canonical placeholder's
+  entity hex) and nothing more about the values.
+- The canonical value's placeholder is never changed by alias groups, so
+  existing redacted documents still rehydrate. A canonical value that is not
+  configured, or that a built-in stage redacts before configured terms, is
+  refused.
+- Each alias form is redacted in its own right, and every stage and plugged
+  detector that redacts it produces `[<CATEGORY>_<entity hex>.<form suffix>]`
+  in its own category. The suffix is an HMAC keyed by the vault salt over the
+  normalized form, domain-separated from placeholder digests, so it can be
+  neither computed nor checked without the salt.
+- Invalid alias groups fail closed. Their messages name groups by position
+  only and never echo a canonical value or alias; `doctor` and `audit` report
+  counts only.
+- Rehydration maps for alias forms are rebuilt from the scanned source corpus
+  like every other placeholder; an alias's previous placeholder in the same
+  category restores it too, so documents redacted before the group was
+  declared still rehydrate. Controlled writes re-redact restored alias forms
+  before publication.
 
 ## Write Confinement
 

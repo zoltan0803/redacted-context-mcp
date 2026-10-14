@@ -13,6 +13,8 @@ from typing import Callable
 
 from .defaults import (
     ACRONYM_RE,
+    ALIAS_FORM_SEPARATOR,
+    ALIAS_FORM_SUFFIX_HEX,
     COMMON_CAPITALIZED_WORDS,
     CONNECTION_STRING_RE,
     CREDIT_CARD_RE,
@@ -84,6 +86,42 @@ SEGMENT_ALLOWED = 2
 # and ASCII punctuation only. Everything else (letters, digits, combining
 # marks, private-use characters, emoji) is redacted.
 REMNANT_TRIM_CHARS = frozenset(string.whitespace + string.punctuation)
+# HMAC key used when a config carries no salt (load_config always sets one).
+DEFAULT_PLACEHOLDER_SALT = "redacted-context-mcp-v1"
+# Built-in stages that run before configured terms, in pipeline order, with
+# the category each one redacts as. The extended stages follow the default
+# ones only under the extended detector profile.
+EARLY_BASELINE_STAGES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (PEM_PRIVATE_KEY_RE, "SECRET"),
+    (SALT_ASSIGNMENT_RE, "SECRET"),
+    (GENERIC_SECRET_RE, "SECRET"),
+    (HEX_SECRET_RE, "SECRET"),
+    (URL_RE, "URL"),
+    (EMAIL_RE, "EMAIL"),
+    (UUID_RE, "ID"),
+    (IP_RE, "IP"),
+    (SSN_RE, "SSN"),
+    (CREDIT_CARD_RE, "CARD"),
+    (PHONE_RE, "PHONE"),
+    (DOMAIN_RE, "DOMAIN"),
+    (HANDLE_RE, "HANDLE"),
+)
+EXTENDED_BASELINE_STAGES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (SERVICE_ACCOUNT_RE, "SERVICE_ACCOUNT"),
+    (CONNECTION_STRING_RE, "CONNECTION"),
+    (IBAN_RE, "IBAN"),
+    (IPV6_RE, "IP"),
+    (MAC_RE, "MAC"),
+    (DOB_RE, "DOB"),
+    (PASSPORT_RE, "PASSPORT"),
+    (DRIVER_ID_RE, "DRIVER_ID"),
+    (UNICODE_CONTROL_RE, "UNICODE_CONTROL"),
+    (PROMPT_INJECTION_RE, "PROMPT_INJECTION"),
+)
+# Path redaction keeps whole placeholders (including linked alias forms,
+# whose suffix starts after a non-word separator) and redacts the
+# remaining path tokens.
+PATH_REDACTION_RE = re.compile(rf"({PLACEHOLDER_RE.pattern})|{PATH_TOKEN_RE.pattern}")
 
 
 class RedactionCollisionError(RuntimeError):
@@ -258,6 +296,23 @@ class Redactor:
         self.allow_terms = {term for term in allow_terms if term}
         self.allow_lookup = {term.casefold() for term in self.allow_terms}
         self.allow_pattern = compile_terms_pattern(self.allow_terms)
+        # Declared aliases of an alias group: each normalized alias maps to
+        # its group's entity hex (the hex of the canonical value's ordinary
+        # placeholder) and its own keyed form suffix. The canonical value
+        # needs no entry; its placeholder is never changed. Aliases also
+        # join their group's category in the configured-term stage, so each
+        # is redacted in its own right.
+        self.alias_links: dict[str, tuple[str, str]] = {}
+        # Per redacted alias key, the ordinary placeholder it would have
+        # without its group; rehydration still restores it.
+        self.superseded_placeholders: dict[tuple[str, str], str] = {}
+        alias_terms: dict[str, list[str]] = {}
+        for group in self.config.alias_groups:
+            entity = placeholder_digest(self.config.salt, group.category, normalize_alias(group.canonical))
+            for alias in group.aliases:
+                normalized = normalize_alias(alias)
+                self.alias_links.setdefault(normalized, (entity, alias_form_suffix(self.config.salt, normalized)))
+            alias_terms.setdefault(group.category, []).extend(group.aliases)
         self.literal_patterns: list[tuple[str, re.Pattern[str]]] = []
         for category, terms in (
             ("CLIENT", self.config.clients),
@@ -265,6 +320,7 @@ class Redactor:
             ("PERSON", self.config.people),
             ("SENSITIVE", self.config.terms),
         ):
+            terms = (*terms, *alias_terms.get(category, ()))
             filtered = [term for term in terms if term.casefold() not in RESERVED_PLACEHOLDER_WORDS]
             pattern = compile_terms_pattern(filtered)
             if pattern is not None:
@@ -295,31 +351,12 @@ class Redactor:
             )
 
         text = PLACEHOLDER_RE.sub(lambda match: session.stash_allowed(match.group(0)), text)
-        text = PEM_PRIVATE_KEY_RE.sub(lambda match: stash("SECRET", match.group(0)), text)
-        text = SALT_ASSIGNMENT_RE.sub(lambda match: stash("SECRET", match.group(0)), text)
-        text = GENERIC_SECRET_RE.sub(lambda match: stash("SECRET", match.group(0)), text)
-        text = HEX_SECRET_RE.sub(lambda match: stash("SECRET", match.group(0)), text)
-        text = URL_RE.sub(lambda match: stash("URL", match.group(0)), text)
-        text = EMAIL_RE.sub(lambda match: stash("EMAIL", match.group(0)), text)
-        text = UUID_RE.sub(lambda match: stash("ID", match.group(0)), text)
-        text = IP_RE.sub(lambda match: stash("IP", match.group(0)), text)
-        text = SSN_RE.sub(lambda match: stash("SSN", match.group(0)), text)
-        text = CREDIT_CARD_RE.sub(lambda match: stash("CARD", match.group(0)), text)
-        text = PHONE_RE.sub(lambda match: stash("PHONE", match.group(0)), text)
-        text = DOMAIN_RE.sub(lambda match: stash("DOMAIN", match.group(0)), text)
-        text = HANDLE_RE.sub(lambda match: stash("HANDLE", match.group(0)), text)
+        for pattern, category in EARLY_BASELINE_STAGES:
+            text = pattern.sub(lambda match, cat=category: stash(cat, match.group(0)), text)
 
         if self.config.detector_profile == "extended":
-            text = SERVICE_ACCOUNT_RE.sub(lambda match: stash("SERVICE_ACCOUNT", match.group(0)), text)
-            text = CONNECTION_STRING_RE.sub(lambda match: stash("CONNECTION", match.group(0)), text)
-            text = IBAN_RE.sub(lambda match: stash("IBAN", match.group(0)), text)
-            text = IPV6_RE.sub(lambda match: stash("IP", match.group(0)), text)
-            text = MAC_RE.sub(lambda match: stash("MAC", match.group(0)), text)
-            text = DOB_RE.sub(lambda match: stash("DOB", match.group(0)), text)
-            text = PASSPORT_RE.sub(lambda match: stash("PASSPORT", match.group(0)), text)
-            text = DRIVER_ID_RE.sub(lambda match: stash("DRIVER_ID", match.group(0)), text)
-            text = UNICODE_CONTROL_RE.sub(lambda match: stash("UNICODE_CONTROL", match.group(0)), text)
-            text = PROMPT_INJECTION_RE.sub(lambda match: stash("PROMPT_INJECTION", match.group(0)), text)
+            for pattern, category in EXTENDED_BASELINE_STAGES:
+                text = pattern.sub(lambda match, cat=category: stash(cat, match.group(0)), text)
 
         for category, pattern in self.literal_patterns:
             text = pattern.sub(lambda match, cat=category: stash(cat, match.group(0)), text)
@@ -498,7 +535,7 @@ class Redactor:
         # Paths are redacted by the built-in baseline only; detectors never
         # run on path strings.
         redacted = self._redact(path, preserve_line_count=False, detect=False)
-        return PATH_TOKEN_RE.sub(self._replace_path_token, redacted)
+        return PATH_REDACTION_RE.sub(self._replace_path_token, redacted)
 
     def placeholder(self, category: str, value: str) -> str:
         normalized = normalize_alias(value)
@@ -506,13 +543,23 @@ class Redactor:
         with self._lock:
             self.counters[category] = self.counters.get(category, 0) + 1
             if key not in self.aliases:
-                salt = self.config.salt or "redacted-context-mcp-v1"
-                digest = hmac.new(
-                    salt.encode("utf-8"),
-                    f"{category}:{normalized}".encode("utf-8"),
-                    hashlib.sha256,
-                ).hexdigest()[:32]
-                placeholder = f"[{category}_{digest}]"
+                ordinary = f"[{category}_{placeholder_digest(self.config.salt, category, normalized)}]"
+                link = self.alias_links.get(normalized)
+                if link is None:
+                    placeholder = ordinary
+                else:
+                    # A declared alias keeps the category of whichever stage
+                    # or detector redacted it and shares its group's entity
+                    # hex, whatever that category is. Its ordinary
+                    # placeholder, which documents redacted before the alias
+                    # was declared carry, stays in the rehydration map.
+                    entity, suffix = link
+                    placeholder = f"[{category}_{entity}{ALIAS_FORM_SEPARATOR}{suffix}]"
+                    existing_key = self.placeholder_keys.get(ordinary)
+                    if existing_key is not None and existing_key != key:
+                        raise RedactionCollisionError(f"Placeholder collision for {category}.")
+                    self.placeholder_keys[ordinary] = key
+                    self.superseded_placeholders[key] = ordinary
                 existing_key = self.placeholder_keys.get(placeholder)
                 if existing_key is not None and existing_key != key:
                     raise RedactionCollisionError(f"Placeholder collision for {category}.")
@@ -523,6 +570,9 @@ class Redactor:
             if existing_value is not None and existing_value != value and normalize_alias(existing_value) != normalized:
                 raise RedactionCollisionError(f"Placeholder collision for {category}.")
             self.raw_aliases.setdefault(placeholder, value)
+            superseded = self.superseded_placeholders.get(key)
+            if superseded is not None:
+                self.raw_aliases.setdefault(superseded, value)
             return placeholder
 
     def rehydration_map(self) -> dict[str, str]:
@@ -711,6 +761,8 @@ class Redactor:
 
     def _replace_path_token(self, match: re.Match[str]) -> str:
         value = match.group(0)
+        if match.group(1) is not None:
+            return value
         key = value.casefold()
         if (
             key in self.allow_lookup
@@ -728,6 +780,43 @@ def normalize_alias(value: str) -> str:
     if "\t" in stripped or "\n" in stripped or "\r" in stripped or "  " in stripped:
         stripped = re.sub(r"[ \t\r\n]+", " ", stripped)
     return stripped.casefold()
+
+
+def placeholder_digest(salt: str, category: str, normalized: str) -> str:
+    """The 128-bit hex of the ordinary placeholder for a normalized value."""
+    return hmac.new(
+        (salt or DEFAULT_PLACEHOLDER_SALT).encode("utf-8"),
+        f"{category}:{normalized}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()[:32]
+
+
+def alias_form_suffix(salt: str, normalized: str) -> str:
+    """Keyed form suffix of a declared alias: the first 32 bits of an HMAC.
+
+    Like a placeholder digest it is keyed by the vault salt, so a suffix can
+    be neither computed nor checked without the salt. The message is
+    domain-separated from placeholder digests (categories are upper-case
+    words, never ``alias-form``).
+    """
+    return hmac.new(
+        (salt or DEFAULT_PLACEHOLDER_SALT).encode("utf-8"),
+        f"alias-form:{normalized}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()[:ALIAS_FORM_SUFFIX_HEX]
+
+
+def claimed_before_configured_terms(value: str) -> bool:
+    """Whether a value standing alone would lose characters before the configured-term stage.
+
+    True when an existing placeholder token or any default-profile built-in
+    stage that runs before configured terms (secrets, URLs, emails, ids, IP
+    addresses, card and phone numbers, domains, handles) matches inside it.
+    Such a value cannot reach the configured-term stage intact.
+    """
+    if PLACEHOLDER_RE.search(value):
+        return True
+    return any(pattern.search(value) for pattern, _category in EARLY_BASELINE_STAGES)
 
 
 def compile_literal_pattern(term: str) -> re.Pattern[str] | None:

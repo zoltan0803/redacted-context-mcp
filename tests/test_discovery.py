@@ -71,6 +71,42 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(result.terms, ("Project Orion",))
         self.assertEqual(result.allow, ("pytest",))
 
+    def test_parse_discovery_response_keeps_name_like_values_in_their_category(self) -> None:
+        result = core.parse_discovery_response(
+            '{"clients":["Example Lantern Labs","Germany","Customer"],'
+            '"organizations":["Fictional Harbor Studio","Regional Director","GitHub"],'
+            '"people":["Avery Example"],'
+            '"terms":["Blue Heron","pytest"],'
+            '"allow":[]}'
+        )
+
+        self.assertEqual(result.clients, ("Example Lantern Labs",))
+        self.assertEqual(result.organizations, ("Fictional Harbor Studio",))
+        self.assertEqual(result.people, ("Avery Example",))
+        self.assertEqual(result.terms, ("Blue Heron",))
+        self.assertEqual(result.allow, ("pytest",))
+
+    def test_discover_documents_keeps_organizations_out_of_people(self) -> None:
+        class OrganizationClient:
+            def extract(self, *, rel_path: str, text: str) -> core.DiscoveryResult:
+                return core.DiscoveryResult(
+                    organizations=("Example Lantern Labs", "Fictional Harbor Studio"),
+                    people=("Avery Example",),
+                )
+
+        result = core.discover_documents(
+            (
+                core.DiscoveryDocument(
+                    path="context/note.md",
+                    text="Avery Example joined Example Lantern Labs from Fictional Harbor Studio.",
+                ),
+            ),
+            client=OrganizationClient(),  # type: ignore[arg-type]
+        )
+
+        self.assertEqual(result.organizations, ("Example Lantern Labs", "Fictional Harbor Studio"))
+        self.assertEqual(result.people, ("Avery Example",))
+
     def test_discovery_prompt_marks_document_text_as_untrusted(self) -> None:
         prompt = core.build_discovery_prompt(
             rel_path="context/note.md",
@@ -224,6 +260,20 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(result.organizations, ("Example Partners",))
         self.assertEqual(result.people, ("Alice Example",))
         self.assertEqual(result.terms, ())
+
+    def test_discover_documents_still_routes_model_tool_names_to_allow(self) -> None:
+        class ToolNameClient:
+            def extract(self, *, rel_path: str, text: str) -> core.DiscoveryResult:
+                del rel_path, text
+                return core.DiscoveryResult(terms=("Project Orion", "orion-ledger"))
+
+        result = core.discover_documents(
+            (core.DiscoveryDocument(path="context/note.md", text="Project Orion uses orion-ledger."),),
+            client=ToolNameClient(),  # type: ignore[arg-type]
+        )
+
+        self.assertEqual(result.terms, ("Project Orion",))
+        self.assertEqual(result.allow, ("orion-ledger",))
 
     def test_discover_entities_can_fail_closed_on_truncation(self) -> None:
         client = FakeDiscoveryClient()

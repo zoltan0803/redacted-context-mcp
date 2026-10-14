@@ -35,6 +35,7 @@ from .config import (
     with_protected_paths,
 )
 from .defaults import (
+    ALIAS_FORM_SEPARATOR,
     DEFAULT_DISCOVERY_MAX_CHARS,
     DEFAULT_DISCOVERY_MAX_FILES,
     DEFAULT_DISCOVERY_MODEL,
@@ -68,6 +69,7 @@ from .discovery import (
     build_discovery_prompt,
     build_strict_discovery_prompt,
     clean_discovered_terms,
+    config_people,
     discover_documents,
     discover_entities,
     extract_ollama_error,
@@ -90,6 +92,7 @@ from .discovery import (
     parse_discovery_response,
     parse_json_object,
     postprocess_discovery_result,
+    propose_alias_groups,
     should_drop_discovered_value,
     write_discovery_update,
     write_discovery_output,
@@ -138,7 +141,7 @@ from .models import (
     RedactionConfig,
 )
 from .paths import display_ref, path_id, rel_posix, resolve_under_root
-from .redaction import Redactor, compile_literal_pattern, normalize_alias
+from .redaction import Redactor, compile_literal_pattern, normalize_alias, placeholder_digest
 from .regex_safety import (
     QUANTIFIER_REPETITION_FLOOR,
     UNSAFE_REGEX_MESSAGE,
@@ -164,6 +167,9 @@ from .documents import DOCUMENT_EXTENSIONS
 
 
 HEX_QUERY_RE = re.compile(r"[0-9a-fA-F]+")
+# Hex digits around one alias-form separator may be a fragment of a linked
+# placeholder (`<entity>.<form>`), which exists only in redacted text.
+LINKED_HEX_QUERY_RE = re.compile(rf"[0-9a-fA-F]*{re.escape(ALIAS_FORM_SEPARATOR)}[0-9a-fA-F]*")
 PLACEHOLDER_STRUCTURAL_CHARS = frozenset("[]_")
 
 
@@ -185,7 +191,7 @@ def can_use_raw_search_prefilter(query: str, *, regex: bool, ignore_case: bool) 
         return False
     if any(char in PLACEHOLDER_STRUCTURAL_CHARS for char in stripped):
         return False
-    if HEX_QUERY_RE.fullmatch(stripped):
+    if HEX_QUERY_RE.fullmatch(stripped) or LINKED_HEX_QUERY_RE.fullmatch(stripped):
         return False
     if ignore_case:
         folded = stripped.casefold()
@@ -699,6 +705,8 @@ def command_doctor(args: argparse.Namespace, ctx: RedactedContext, redactor: Red
     print(f"organizations: {len(redactor.config.organizations)}")
     print(f"people_terms: {len(redactor.config.people)}")
     print(f"other_terms: {len(redactor.config.terms)}")
+    print(f"alias_groups: {len(redactor.config.alias_groups)}")
+    print(f"aliases: {sum(len(group.aliases) for group in redactor.config.alias_groups)}")
     print(f"allow_terms: {len(redactor.allow_terms)}")
     print(f"excluded_dirs: {len(ctx.exclude_dirs)}")
     print(f"excluded_globs: {len(ctx.exclude_globs)}")
@@ -845,13 +853,29 @@ def audit_checks(
             "detail": "raw write path not reported",
         },
     ]
-    if redactor.detectors:
-        # Keep the configuration checks together: right after the allow-list
-        # check (or at the end if that check is ever renamed).
-        anchor = next(
-            (index + 1 for index, check in enumerate(checks) if check["name"] == "overly broad allow entries"),
-            len(checks),
+    # Keep the configuration checks together: right after the allow-list
+    # check (or at the end if that check is ever renamed).
+    anchor = next(
+        (index + 1 for index, check in enumerate(checks) if check["name"] == "overly broad allow entries"),
+        len(checks),
+    )
+    if redactor.config.alias_groups:
+        groups = redactor.config.alias_groups
+        unlinked = unlinked_alias_forms(redactor)
+        checks.insert(
+            anchor,
+            {
+                "category": "configuration",
+                "name": "alias groups",
+                "status": "WARN" if unlinked else "PASS",
+                "detail": (
+                    f"{len(groups)} groups, {sum(len(group.aliases) for group in groups)} aliases, "
+                    f"{unlinked} forms not redacted as one linked placeholder on their own"
+                ),
+            },
         )
+        anchor += 1
+    if redactor.detectors:
         checks.insert(
             anchor,
             {
@@ -862,6 +886,28 @@ def audit_checks(
             },
         )
     return checks
+
+
+def unlinked_alias_forms(redactor: Redactor) -> int:
+    """Count alias-group forms that do not redact, standing alone, as one linked placeholder.
+
+    Each canonical value must become its ordinary placeholder in the group's
+    category and each alias one placeholder carrying the group's entity hex.
+    A form a built-in stage only partly claims (for example a canonical value
+    that an extended-profile detector matches) is counted. The probe uses the
+    built-in baseline only and reports a count, never a value.
+    """
+    probe = Redactor(redactor.config, mode=redactor.mode)
+    unlinked = 0
+    for group in redactor.config.alias_groups:
+        entity = placeholder_digest(redactor.config.salt, group.category, normalize_alias(group.canonical))
+        if probe.redact(group.canonical) != f"[{group.category}_{entity}]":
+            unlinked += 1
+        for alias in group.aliases:
+            redacted = probe.redact(alias)
+            if not PLACEHOLDER_RE.fullmatch(redacted) or f"_{entity}{ALIAS_FORM_SEPARATOR}" not in redacted:
+                unlinked += 1
+    return unlinked
 
 
 def command_benchmark(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
@@ -993,9 +1039,16 @@ def command_discover(args: argparse.Namespace, ctx: RedactedContext, redactor: R
         max_total_raw_bytes=getattr(args, "max_total_raw_bytes", DEFAULT_MAX_TOTAL_RAW_BYTES),
         postprocess=not args.raw_discovery,
         fail_on_truncation=getattr(args, "fail_on_truncation", False),
+        # Raw discovery keeps the model's own alias suggestions (still
+        # source-checked and validated) but skips the deterministic ones.
+        propose_aliases=not args.raw_discovery,
+        known_people=redactor.config.explicit_people if redactor is not None else (),
     )
     if args.format == "json":
-        output = json.dumps(result.as_dict(), indent=2, ensure_ascii=False) + "\n"
+        payload: dict[str, object] = dict(result.as_dict())
+        payload["aliases"] = {canonical: list(aliases) for canonical, aliases in result.aliases}
+        payload["dropped_alias_proposals"] = result.dropped_aliases
+        output = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     else:
         output = format_discovery_toml(
             result,
@@ -1049,24 +1102,6 @@ def command_discover_update(
                 f"Discovery input exceeds --max-total-chars={args.max_total_chars}."
             )
 
-        if documents and detectors:
-            # Local detectors replace the Ollama model; no network call is made.
-            result = discover_documents(
-                documents,
-                client=DetectorDiscoveryClient(*detectors, postprocess=True),
-                postprocess=True,
-            )
-        elif documents:
-            client = OllamaDiscoveryClient(
-                endpoint=ollama_endpoint(args),
-                model=ollama_model(args),
-                timeout=args.timeout,
-                postprocess=True,
-                allow_remote=getattr(args, "allow_remote_endpoint", False),
-            )
-            result = discover_documents(documents, client=client, postprocess=True)
-        else:
-            result = DiscoveryResult()
         config_path = resolve_under_root(
             ctx.root,
             args.output_config or LOCAL_CONFIG,
@@ -1079,11 +1114,43 @@ def command_discover_update(
         if args.seed_config:
             seed_path = resolve_under_root(ctx.root, args.seed_config)
             seed_text = seed_path.read_text(encoding="utf-8-sig")
+        # Discovered alias groups are merged only on explicit request: a
+        # wrong link would tell the agent that two people are one.
+        include_aliases = getattr(args, "include_discovered_aliases", False)
+        alias_people = config_people(seed_text, existing_text) if include_aliases else ()
+
+        if documents and detectors:
+            # Local detectors replace the Ollama model; no network call is made.
+            result = discover_documents(
+                documents,
+                client=DetectorDiscoveryClient(*detectors, postprocess=True),
+                postprocess=True,
+                propose_aliases=include_aliases,
+                alias_people=alias_people,
+            )
+        elif documents:
+            client = OllamaDiscoveryClient(
+                endpoint=ollama_endpoint(args),
+                model=ollama_model(args),
+                timeout=args.timeout,
+                postprocess=True,
+                allow_remote=getattr(args, "allow_remote_endpoint", False),
+            )
+            result = discover_documents(
+                documents,
+                client=client,
+                postprocess=True,
+                propose_aliases=include_aliases,
+                alias_people=alias_people,
+            )
+        else:
+            result = DiscoveryResult()
         update = build_discovery_update(
             existing_text,
             result,
             seed_text=seed_text,
             include_discovered_allow=args.include_discovered_allow,
+            include_discovered_aliases=include_aliases,
         )
     except (OSError, ValueError, OperationLimitError) as exc:
         raise SystemExit(str(exc)) from exc
@@ -1104,6 +1171,7 @@ def command_discover_update(
     else:
         print(f"model: {ollama_model(args) if documents else 'skipped'}")
     print(f"discovered_counts: {json.dumps(counts, sort_keys=True, separators=(',', ':'))}")
+    print(f"alias_counts: {json.dumps(update.alias_counts, sort_keys=True, separators=(',', ':'))}")
     print(f"config_changed: {str(update.changed).lower()}")
     return 0
 
@@ -1360,6 +1428,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--include-discovered-allow",
         action="store_true",
         help="allow model-discovered public terms to expand the allow-list",
+    )
+    discover_update_parser.add_argument(
+        "--include-discovered-aliases",
+        action="store_true",
+        help=(
+            "merge proposed alias groups found in the documents; only adds valid, non-conflicting "
+            "aliases (seed config aliases are always merged)"
+        ),
     )
     discover_update_parser.add_argument(
         "--merge-only",
