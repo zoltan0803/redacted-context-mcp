@@ -46,6 +46,21 @@ class GitHubRepoConfig:
 
 
 @dataclass(frozen=True)
+class AliasGroup:
+    """One validated ``[redaction.aliases]`` entry.
+
+    ``canonical`` and ``aliases`` are raw private values from the local
+    config (whitespace-collapsed, case kept). ``category`` is the
+    configured-term category of the canonical value; it keys the entity hex
+    that every form of the group shares.
+    """
+
+    category: str
+    canonical: str
+    aliases: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class RedactionConfig:
     clients: tuple[str, ...] = ()
     organizations: tuple[str, ...] = ()
@@ -66,15 +81,26 @@ class RedactionConfig:
     detector_profile: str = "default"
     term_files: tuple[str, ...] = ()
     protected_paths: tuple[str, ...] = ()
+    alias_groups: tuple[AliasGroup, ...] = ()
 
 
 @dataclass(frozen=True)
 class DiscoveryResult:
+    """Discovered raw terms, plus proposed alias groups for human review.
+
+    ``aliases`` holds ``(canonical, aliases)`` proposals whose values all
+    occur in the sampled source; ``dropped_aliases`` counts proposed aliases
+    dropped so far as unsourced, invalid, or conflicting. ``as_dict`` covers
+    the term buckets only.
+    """
+
     clients: tuple[str, ...] = ()
     organizations: tuple[str, ...] = ()
     people: tuple[str, ...] = ()
     terms: tuple[str, ...] = ()
     allow: tuple[str, ...] = ()
+    aliases: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    dropped_aliases: int = 0
 
     def as_dict(self) -> dict[str, tuple[str, ...]]:
         return {
@@ -102,6 +128,9 @@ class DiscoveryUpdate:
     discovery: DiscoveryResult
     config_text: str
     changed: bool
+    # Aliases added from the seed config and from discovery, and proposed
+    # aliases dropped as unsourced, invalid, or conflicting. Counts only.
+    alias_counts: dict[str, int] = field(default_factory=dict)
 
 
 class DiscoveryParseError(ValueError):

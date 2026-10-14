@@ -18,12 +18,16 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback
 from .defaults import (
     DETECTOR_PROFILE_ENV,
     LOCAL_CONFIG,
+    MAX_ALIASES_PER_GROUP,
+    RESERVED_PLACEHOLDER_WORDS,
     SALT_ENV,
     STATE_DIR_ENV,
     TERMS_ENV,
 )
-from .models import GitHubRepoConfig, RedactionConfig
+from .detectors import MAX_NOMINATED_VALUE_CHARS, MAX_NOMINATED_VALUE_TOKENS
+from .models import AliasGroup, GitHubRepoConfig, RedactionConfig
 from .paths import rel_posix, resolve_under_root
+from .redaction import alias_form_suffix, claimed_before_configured_terms, normalize_alias
 
 def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
     root = root.expanduser().resolve()
@@ -48,6 +52,7 @@ def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
     detector_profile = "default"
     term_files: list[str] = []
     protected_paths: list[str] = []
+    raw_alias_groups: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
     root_terms = derive_root_terms(root)
     for term in root_terms:
@@ -70,6 +75,7 @@ def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
             values[key].extend(loaded_values)
             if key in explicit_values:
                 explicit_values[key].extend(loaded_values)
+        raw_alias_groups = parse_alias_groups(redaction.get("aliases"))
         salt = str(redaction.get("salt", "")).strip()
         if salt:
             salt_source = "config"
@@ -107,12 +113,23 @@ def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
     if detector_profile not in {"default", "extended"}:
         raise SystemExit("detector_profile must be default or extended.")
 
+    clients = dedupe(values["clients"])
+    organizations = dedupe(values["organizations"])
+    people = dedupe(expand_person_terms(values["people"]))
+    terms = dedupe(values["terms"])
+    allow = dedupe(values["allow"])
+    alias_groups = resolve_alias_groups(
+        raw_alias_groups,
+        categories=(("CLIENT", clients), ("ORG", organizations), ("PERSON", people), ("SENSITIVE", terms)),
+        allow=allow,
+        salt=salt,
+    )
     return RedactionConfig(
-        clients=dedupe(values["clients"]),
-        organizations=dedupe(values["organizations"]),
-        people=dedupe(expand_person_terms(values["people"])),
-        terms=dedupe(values["terms"]),
-        allow=dedupe(values["allow"]),
+        clients=clients,
+        organizations=organizations,
+        people=people,
+        terms=terms,
+        allow=allow,
         exclude_dirs=dedupe(values["exclude_dirs"]),
         exclude_globs=dedupe(values["exclude_globs"]),
         github_repos=github_repos,
@@ -127,7 +144,206 @@ def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
         detector_profile=detector_profile,
         term_files=tuple(dedupe(term_files)),
         protected_paths=tuple(dedupe(protected_paths)),
+        alias_groups=alias_groups,
     )
+
+
+def parse_alias_groups(value: object) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Parse ``[redaction.aliases]``, which maps each canonical value to its aliases.
+
+    Returns ``(canonical, aliases)`` pairs in file order, whitespace-collapsed
+    and with repeated aliases removed. Errors name a group only by its
+    1-based position and never echo a configured value.
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, dict):
+        raise SystemExit("Expected [redaction.aliases] to map canonical values to alias lists.")
+    groups: list[tuple[str, tuple[str, ...]]] = []
+    for number, (canonical, aliases) in enumerate(value.items(), start=1):
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        if (
+            not str(canonical).strip()
+            or not isinstance(aliases, list)
+            or not aliases
+            or not all(isinstance(alias, str) and alias.strip() for alias in aliases)
+        ):
+            raise SystemExit(
+                f"Alias group {number} must map a non-empty canonical value to a non-empty list of non-empty strings."
+            )
+        groups.append((dedupe([str(canonical)])[0], dedupe(aliases)))
+    return tuple(groups)
+
+
+def resolve_alias_groups(
+    groups: tuple[tuple[str, tuple[str, ...]], ...],
+    *,
+    categories: tuple[tuple[str, tuple[str, ...]], ...],
+    allow: tuple[str, ...],
+    salt: str,
+) -> tuple[AliasGroup, ...]:
+    """Validate parsed alias groups against the final term lists and assign categories.
+
+    A group's category is that of the first configured-term list (in
+    ``categories`` order, the order of the configured-term stage) holding its
+    canonical value, so the canonical value's placeholder is the one it
+    already had. Everything ambiguous or ineffective fails closed: an
+    unconfigured or pre-claimed canonical value, an alias that repeats its
+    own canonical value, another group's canonical value or another group's
+    alias, an allow-listed or reserved value, a value over the per-value
+    limits, too many aliases, or two aliases of one group whose form
+    suffixes coincide under this salt. Messages identify groups by position
+    only and never echo a value.
+    """
+    if not groups:
+        return ()
+    category_of = alias_category_index(categories)
+    allowed = {normalize_alias(term) for term in allow}
+    canonical_groups: dict[str, int] = {}
+    for number, (canonical, _aliases) in enumerate(groups, start=1):
+        key = normalize_alias(canonical)
+        if key in canonical_groups:
+            raise SystemExit(f"Alias group {number} repeats the canonical value of alias group {canonical_groups[key]}.")
+        canonical_groups[key] = number
+    alias_groups: dict[str, int] = {}
+    resolved: list[AliasGroup] = []
+    for number, (canonical, aliases) in enumerate(groups, start=1):
+        key = normalize_alias(canonical)
+        category = category_of.get(key)
+        if category is None:
+            raise SystemExit(
+                f"Alias group {number}: the canonical value must also be a configured client, "
+                "organization, person, or term."
+            )
+        if claimed_before_configured_terms(canonical):
+            raise SystemExit(
+                f"Alias group {number}: a built-in detector redacts the canonical value before configured "
+                "terms; use a name or term as the canonical value and list emails, URLs, handles, and "
+                "similar identifiers as its aliases."
+            )
+        if len(aliases) > MAX_ALIASES_PER_GROUP:
+            raise SystemExit(f"Alias group {number} declares more than {MAX_ALIASES_PER_GROUP} aliases.")
+        for value in (canonical, *aliases):
+            if normalize_alias(value) in RESERVED_PLACEHOLDER_WORDS:
+                raise SystemExit(f"Alias group {number} contains a reserved placeholder word.")
+            if alias_value_over_limits(value):
+                raise SystemExit(
+                    f"Alias group {number} contains a value over {MAX_NOMINATED_VALUE_CHARS} characters "
+                    f"or {MAX_NOMINATED_VALUE_TOKENS} words."
+                )
+        suffixes: set[str] = set()
+        for alias in aliases:
+            normalized = normalize_alias(alias)
+            if normalized == key:
+                raise SystemExit(f"Alias group {number} lists its canonical value as an alias.")
+            if normalized in canonical_groups:
+                raise SystemExit(
+                    f"Alias group {number} lists the canonical value of alias group "
+                    f"{canonical_groups[normalized]} as an alias."
+                )
+            if normalized in alias_groups:
+                raise SystemExit(f"Alias group {number} repeats an alias of alias group {alias_groups[normalized]}.")
+            if normalized in allowed:
+                raise SystemExit(f"Alias group {number} lists an alias that is on the allow list.")
+            suffix = alias_form_suffix(salt, normalized)
+            if suffix in suffixes:
+                raise SystemExit(
+                    f"Alias group {number} has two aliases with the same form suffix under this salt; "
+                    "remove or reword one of them."
+                )
+            suffixes.add(suffix)
+            alias_groups[normalized] = number
+        resolved.append(AliasGroup(category=category, canonical=canonical, aliases=aliases))
+    return tuple(resolved)
+
+
+def alias_category_index(categories: tuple[tuple[str, tuple[str, ...]], ...]) -> dict[str, str]:
+    """Map each normalized configured value to the first category (in order) that holds it."""
+    category_of: dict[str, str] = {}
+    for category, values in categories:
+        for configured in values:
+            category_of.setdefault(normalize_alias(configured), category)
+    return category_of
+
+
+def alias_value_over_limits(value: str) -> bool:
+    return len(value) > MAX_NOMINATED_VALUE_CHARS or len(value.split()) > MAX_NOMINATED_VALUE_TOKENS
+
+
+def merge_alias_proposals(
+    groups: tuple[tuple[str, tuple[str, ...]], ...],
+    proposals: Iterable[tuple[str, Iterable[str]]],
+    *,
+    categories: tuple[tuple[str, tuple[str, ...]], ...],
+    allow: Iterable[str],
+) -> tuple[tuple[tuple[str, tuple[str, ...]], ...], int, int]:
+    """Add proposed aliases to alias groups monotonically, dropping what the loader would refuse.
+
+    ``groups`` (for example an existing config's groups) are kept exactly,
+    in order. A proposal for one of their canonical values only appends new
+    aliases; any other proposal becomes a new group after them. A proposed
+    alias is dropped when it is blank, reserved, over the per-value limits,
+    equal to its own or any group's canonical value, already an alias of
+    another group, on ``allow``, or beyond the per-group limit; every alias
+    of a proposal whose new canonical value is not in ``categories``, is
+    redacted before configured terms, is reserved, over the limits, or
+    already an alias is dropped too. An alias already in its group is a
+    no-op. The form-suffix check needs the vault salt and is left to config
+    loading. Returns ``(groups, added, dropped)``; the counts never carry a
+    value.
+    """
+    category_of = alias_category_index(categories)
+    allowed = {normalize_alias(term) for term in allow}
+    proposals = [(canonical, tuple(aliases)) for canonical, aliases in proposals]
+    merged: dict[str, tuple[str, list[str]]] = {}
+    owner: dict[str, str] = {}
+    for canonical, aliases in groups:
+        key = normalize_alias(canonical)
+        entry = merged.setdefault(key, (canonical, []))
+        for alias in aliases:
+            owner.setdefault(normalize_alias(alias), key)
+            entry[1].append(alias)
+    existing = set(merged)
+    canonicals = existing | {normalize_alias(canonical) for canonical, _aliases in proposals}
+    added = dropped = 0
+    for canonical, aliases in proposals:
+        canonical = re.sub(r"\s+", " ", str(canonical).strip())
+        key = normalize_alias(canonical)
+        if key not in existing and (
+            not canonical
+            or key not in category_of
+            or key in owner
+            or key in RESERVED_PLACEHOLDER_WORDS
+            or alias_value_over_limits(canonical)
+            or claimed_before_configured_terms(canonical)
+        ):
+            dropped += len(aliases)
+            continue
+        entry = merged.setdefault(key, (canonical, []))
+        present = {normalize_alias(alias) for alias in entry[1]}
+        for alias in aliases:
+            alias = re.sub(r"\s+", " ", str(alias).strip())
+            normalized = normalize_alias(alias)
+            if alias and normalized in present:
+                continue
+            if (
+                not alias
+                or normalized in RESERVED_PLACEHOLDER_WORDS
+                or alias_value_over_limits(alias)
+                or normalized in canonicals
+                or normalized in owner
+                or normalized in allowed
+                or len(entry[1]) >= MAX_ALIASES_PER_GROUP
+            ):
+                dropped += 1
+                continue
+            entry[1].append(alias)
+            present.add(normalized)
+            owner[normalized] = key
+            added += 1
+    result = tuple((canonical, tuple(aliases)) for canonical, aliases in merged.values() if aliases)
+    return result, added, dropped
 
 
 def with_protected_paths(config: RedactionConfig, root: Path, paths: Iterable[Path]) -> RedactionConfig:
