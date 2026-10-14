@@ -72,6 +72,10 @@
   built-in defaults, so a raised limit serves larger trees and a lowered one
   bounds every tool. The CLI's `--max-entries` now also bounds `@p_`
   resolution.
+- The MCP read, search, and bundle tool descriptions now name the server's
+  per-file byte limit (and, for search and bundle, its total byte limit) with
+  their defaults instead of stating a fixed 5 MB, so agents are not misled when
+  `--max-raw-bytes-per-file` or `--max-total-raw-bytes` is changed.
 
 ## 0.9.0 — 2026-10-10
 

@@ -1160,6 +1160,9 @@ REPO_ALIAS_DESCRIPTION = (
     "Default `context`. An unknown alias fails with `Unknown GitHub repo alias.`."
 )
 GITHUB_STATE_DESCRIPTION = "Issue state filter: `open` (default), `closed`, or `all`."
+# Defaults of --max-raw-bytes-per-file and --max-total-raw-bytes, in MB.
+DEFAULT_FILE_LIMIT_MB = rc.DEFAULT_MAX_RAW_BYTES_PER_FILE // 1_000_000
+DEFAULT_TOTAL_LIMIT_MB = rc.DEFAULT_MAX_TOTAL_RAW_BYTES // 1_000_000
 
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
@@ -1243,7 +1246,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "one call, and `redctx_search` or `redctx_retrieve` to locate the lines first. "
             "Redaction preserves line numbering, and text beyond `max_chars` is cut with a `[TRUNCATED]` marker "
             "that never splits a placeholder. "
-            "Binary, excluded or protected files and files over 5 MB are refused with an error; DOCX, PPTX, PDF, "
+            "Binary, excluded or protected files and files over the server's per-file byte limit "
+            f"({DEFAULT_FILE_LIMIT_MB} MB by default) are refused with an error; DOCX, PPTX, PDF, "
             "XLSX and XLS files are readable as extracted Markdown only when the server runs with `--documents`."
         ),
         "inputSchema": {
@@ -1300,8 +1304,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "Forms the operator declared as aliases of one entity share its hex and add a form suffix, as in "
             "`[PERSON_<hex>.<form>]` or `[EMAIL_<hex>.<form>]`: search for `[PERSON_<hex>` without the closing "
             "bracket to find every person-typed form, or for the bare `<hex>` to find every form. "
-            "Output stops at `max_results` lines with `[TRUNCATED]`; the call fails after 30 s or when a file in "
-            "scope exceeds 5 MB, so narrow `paths` or `glob` on large roots."
+            "Output stops at `max_results` lines with `[TRUNCATED]`; the call fails after 30 s, when a file in "
+            f"scope exceeds the server's per-file byte limit ({DEFAULT_FILE_LIMIT_MB} MB by default), or when the "
+            f"scope exceeds its total byte limit ({DEFAULT_TOTAL_LIMIT_MB} MB by default), so narrow `paths` or "
+            "`glob` on large roots."
         ),
         "inputSchema": {
             "type": "object",
@@ -1450,7 +1456,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "Each file is cut at `max_chars_per_file` with `[TRUNCATED]`, and when `max_files` or "
             "`max_total_chars` is reached before the last file the bundle ends with "
             "`[TRUNCATED: file or total character limit reached]`. "
-            "A file over 5 MB in scope fails the call."
+            f"A file in scope over the server's per-file byte limit ({DEFAULT_FILE_LIMIT_MB} MB by default), or a "
+            f"scope over its total byte limit ({DEFAULT_TOTAL_LIMIT_MB} MB by default), fails the call."
         ),
         "inputSchema": {
             "type": "object",
