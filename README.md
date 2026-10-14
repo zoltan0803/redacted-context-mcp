@@ -1435,7 +1435,8 @@ Discovery output is post-processed with generic cleanup rules. The cleanup
 does not include project-specific names; it only:
 
 - omits public/default-allowed terms that the redactor already allows;
-- moves other likely tool/package names to `allow`;
+- moves other likely tool/package names to `allow` (model output only; terms
+  drafted with `--detector` are never moved to `allow`);
 - drops obvious filenames, meeting/ticket IDs, country-only values, job titles,
   and generic workflow/process labels;
 - strips role notes from full names such as `Alice Example (CIO)`;

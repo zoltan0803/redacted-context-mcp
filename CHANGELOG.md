@@ -56,6 +56,12 @@
   category and placeholder, and no longer count as known people when alias
   groups are proposed. Post-processing still drops generic, public, and role
   values.
+- `redctx discover --detector` and `discover-update --detector` no longer move
+  lowercase detector-tagged values (for example a codename matched by a
+  `patterns` rule) to `allow`, where they disabled redaction of that value,
+  including the detector's own redaction at serving time. They now stay in
+  `terms`. Ollama discovery still moves likely tool and package names to
+  `allow`.
 
 ## 0.9.0 — 2026-10-10
 
