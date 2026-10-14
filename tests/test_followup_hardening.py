@@ -361,6 +361,69 @@ class FollowupHardeningTest(unittest.TestCase):
             with self.assertRaises(OperationLimitError):
                 ctx.scan_link_entries(budget=OperationBudget(max_entries=1))
 
+    @staticmethod
+    def make_nested_tree(root: Path) -> int:
+        """Build a tree of files and nested directories; return root + every entry below it."""
+        (root / "a.txt").write_text("a", encoding="utf-8")
+        (root / "b.txt").write_text("b", encoding="utf-8")
+        (root / "empty").mkdir()
+        (root / "one").mkdir()
+        (root / "one" / "c.txt").write_text("c", encoding="utf-8")
+        (root / "one" / "two" / "three").mkdir(parents=True)
+        (root / "one" / "two" / "d.txt").write_text("d", encoding="utf-8")
+        (root / "one" / "two" / "three" / "e.txt").write_text("e", encoding="utf-8")
+        (root / "sibling").mkdir()
+        (root / "sibling" / "f.txt").write_text("f", encoding="utf-8")
+        return 1 + sum(1 for _ in root.rglob("*"))
+
+    def test_walk_charges_each_entry_once(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            real = self.make_nested_tree(root)
+            ctx = RedactedContext(root, RedactionConfig(salt="salt"))
+            budget = OperationBudget()
+            list(ctx.walk(include_dirs=True, budget=budget))
+            self.assertEqual(budget.entries_seen, real)
+            walked = list(ctx.walk(include_dirs=True, budget=OperationBudget(max_entries=real)))
+            self.assertEqual(len(walked), real)
+            with self.assertRaises(OperationLimitError):
+                list(ctx.walk(include_dirs=True, budget=OperationBudget(max_entries=real - 1)))
+
+    def test_path_index_charges_each_entry_once(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            real = self.make_nested_tree(root)
+            ctx = RedactedContext(root, RedactionConfig(salt="salt"))
+            index = ctx.path_index(budget=OperationBudget(max_entries=real))
+            self.assertEqual(len(index), real)
+            with self.assertRaises(OperationLimitError):
+                ctx.path_index(budget=OperationBudget(max_entries=real - 1))
+
+    def test_link_scan_charges_each_entry_once(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            real = self.make_nested_tree(root)
+            ctx = RedactedContext(root, RedactionConfig(salt="salt"))
+            budget = OperationBudget()
+            ctx.scan_link_entries(budget=budget)
+            self.assertEqual(budget.entries_seen, real)
+            self.assertEqual(ctx.scan_link_entries(budget=OperationBudget(max_entries=real)), ([], 0))
+            with self.assertRaises(OperationLimitError):
+                ctx.scan_link_entries(budget=OperationBudget(max_entries=real - 1))
+
+    def test_refresh_index_entry_limit_counts_directories_once(self) -> None:
+        with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {"REDACTED_CONTEXT_STATE_DIR": str(Path(td) / "state")}):
+            root = Path(td) / "root"
+            root.mkdir()
+            real = self.make_nested_tree(root)
+            mcp = server.RedactedContextMcp(root=root, config_path=None, mode="strict", include_private=False, max_traversal_entries=real)
+            result = mcp.call_tool("redctx_refresh_index", {})
+            self.assertFalse(result.get("isError"), result)
+            mcp = server.RedactedContextMcp(root=root, config_path=None, mode="strict", include_private=False, max_traversal_entries=real - 1)
+            result = mcp.call_tool("redctx_refresh_index", {})
+            self.assertTrue(result["isError"])
+            self.assertIn("Traversal entry limit exceeded", result["content"][0]["text"])
+
     def test_submit_doc_rehydration_map_respects_byte_limit(self) -> None:
         with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {"REDACTED_CONTEXT_STATE_DIR": str(Path(td) / "state")}):
             root = Path(td) / "root"
