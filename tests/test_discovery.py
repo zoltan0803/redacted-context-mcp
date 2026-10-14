@@ -261,6 +261,20 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(result.people, ("Alice Example",))
         self.assertEqual(result.terms, ())
 
+    def test_discover_documents_still_routes_model_tool_names_to_allow(self) -> None:
+        class ToolNameClient:
+            def extract(self, *, rel_path: str, text: str) -> core.DiscoveryResult:
+                del rel_path, text
+                return core.DiscoveryResult(terms=("Project Orion", "orion-ledger"))
+
+        result = core.discover_documents(
+            (core.DiscoveryDocument(path="context/note.md", text="Project Orion uses orion-ledger."),),
+            client=ToolNameClient(),  # type: ignore[arg-type]
+        )
+
+        self.assertEqual(result.terms, ("Project Orion",))
+        self.assertEqual(result.allow, ("orion-ledger",))
+
     def test_discover_entities_can_fail_closed_on_truncation(self) -> None:
         client = FakeDiscoveryClient()
         with self.assertRaises(core.OperationLimitError):

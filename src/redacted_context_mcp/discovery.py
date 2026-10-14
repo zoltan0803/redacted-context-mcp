@@ -48,7 +48,14 @@ from .redaction import normalize_alias
 
 
 class DiscoveryClient(Protocol):
-    """Minimal client contract accepted by the document discovery API."""
+    """Minimal client contract accepted by the document discovery API.
+
+    A client may also set an optional ``route_tool_names`` attribute. When it
+    is false, the merge pass in ``discover_entities`` and
+    ``discover_documents`` keeps lowercase tool/package-like terms in
+    ``terms`` instead of moving them to ``allow``. Clients without the
+    attribute keep the default model behaviour (routing enabled).
+    """
 
     def extract(self, *, rel_path: str, text: str) -> DiscoveryResult: ...
 
@@ -73,8 +80,14 @@ class DetectorDiscoveryClient:
     Lets ``redctx discover --detector ...`` and ``discover-update`` draft
     redaction terms from a local detector instead of an Ollama model. Values
     go through the same cleaning, post-processing, and source filtering as
-    model output. Detector failures surface as ``"Detector failed."``.
+    model output, except that detector terms are never routed to ``allow``.
+    Detector failures surface as ``"Detector failed."``.
     """
+
+    # Detector categories are authoritative, and an allow-listed value is also
+    # exempt from detector nominations at serving time, so routing a detector
+    # span to ``allow`` would disable the operator's own rule.
+    route_tool_names = False
 
     def __init__(self, *detectors: Detector, postprocess: bool = True) -> None:
         if not detectors:
@@ -92,7 +105,7 @@ class DetectorDiscoveryClient:
                     buckets[key].append(text[span.start : span.end])
         result = DiscoveryResult(**{key: clean_discovered_terms(values) for key, values in buckets.items()})
         if self.postprocess:
-            result = postprocess_discovery_result(result)
+            result = postprocess_discovery_result(result, route_tool_names=self.route_tool_names)
         return filter_discovery_to_source(result, text)
 
 
@@ -399,7 +412,11 @@ def discover_documents(
         result = client.extract(rel_path=document.path, text=document.text)
         results.append(filter_discovery_to_source(result, document.text))
         texts.append(document.text)
-    merged = merge_discovery_results(results, postprocess=postprocess)
+    merged = merge_discovery_results(
+        results,
+        postprocess=postprocess,
+        route_tool_names=getattr(client, "route_tool_names", True),
+    )
     if not propose_aliases:
         return merged
     alias_people = tuple(alias_people)
@@ -466,7 +483,12 @@ def clean_discovered_terms(values: Iterable[str]) -> tuple[str, ...]:
     return dedupe(cleaned)
 
 
-def postprocess_discovery_result(result: DiscoveryResult, *, include_single_names: bool = False) -> DiscoveryResult:
+def postprocess_discovery_result(
+    result: DiscoveryResult,
+    *,
+    include_single_names: bool = False,
+    route_tool_names: bool = True,
+) -> DiscoveryResult:
     buckets: dict[str, list[str]] = {key: [] for key in DISCOVERY_KEYS}
 
     def add(key: str, value: str) -> None:
@@ -474,8 +496,9 @@ def postprocess_discovery_result(result: DiscoveryResult, *, include_single_name
         if cleaned:
             buckets[key].append(cleaned)
 
-    # Cleanup drops values and routes tool-like terms to allow, but it never moves a value
-    # between clients, organizations, people and terms.
+    # Cleanup drops values and, when route_tool_names is on (detector clients turn it off),
+    # routes tool-like terms to allow, but it never moves a value between clients,
+    # organizations, people and terms.
     for value in result.clients:
         if should_drop_discovered_value(value):
             continue
@@ -508,7 +531,7 @@ def postprocess_discovery_result(result: DiscoveryResult, *, include_single_name
             continue
         if is_public_or_allowed_term(value):
             continue
-        if is_likely_tool_or_package_name(value):
+        if route_tool_names and is_likely_tool_or_package_name(value):
             add("allow", value)
         elif is_generic_discovery_term(value):
             continue
@@ -617,7 +640,12 @@ def is_name_token(token: str) -> bool:
     return letters[0].isupper()
 
 
-def merge_discovery_results(results: Iterable[DiscoveryResult], *, postprocess: bool = True) -> DiscoveryResult:
+def merge_discovery_results(
+    results: Iterable[DiscoveryResult],
+    *,
+    postprocess: bool = True,
+    route_tool_names: bool = True,
+) -> DiscoveryResult:
     merged: dict[str, list[str]] = {key: [] for key in DISCOVERY_KEYS}
     aliases: list[tuple[str, tuple[str, ...]]] = []
     dropped = 0
@@ -635,7 +663,9 @@ def merge_discovery_results(results: Iterable[DiscoveryResult], *, postprocess: 
         aliases=merge_alias_group_lists(aliases),
         dropped_aliases=dropped,
     )
-    return postprocess_discovery_result(result) if postprocess else result
+    if not postprocess:
+        return result
+    return postprocess_discovery_result(result, route_tool_names=route_tool_names)
 
 
 # Words that are never proposed as a standalone first-name alias: linking
@@ -853,7 +883,11 @@ def discover_entities(
         )
         texts.append(text)
     return draft_alias_groups(
-        merge_discovery_results(results, postprocess=postprocess),
+        merge_discovery_results(
+            results,
+            postprocess=postprocess,
+            route_tool_names=getattr(client, "route_tool_names", True),
+        ),
         texts,
         propose=propose_aliases,
         known_people=known_people,

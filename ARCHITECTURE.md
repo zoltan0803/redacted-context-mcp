@@ -362,11 +362,17 @@ detectors.
 `DiscoveryClient` protocol for `redctx discover --detector` (PERSON to people,
 ORG to organizations, CLIENT to clients, SENSITIVE and ENTITY to terms; other
 categories are already covered by the baseline regexes; post-processing may
-drop values or route tool-like terms to `allow`, but never moves a value into
-another of these buckets). Only the discover
+drop values, but never moves a value into another of these buckets or to
+`allow`). Only the discover
 subcommands' own `--detector` (argparse dest `subcommand_detector`) selects
 detector discovery; the global `--detector` configures serving, and `--model`
 or `--endpoint` combined with the subcommand `--detector` is an error. The
+client sets `route_tool_names = False`, which both its own post-processing pass
+and the merge pass in `discover_entities`/`discover_documents` honour (the
+merge pass reads the attribute from the client, defaulting to `True`), so a
+lowercase detector term is never moved to `allow` by the tool/package-name
+heuristic: an allow-listed value is also exempt from detector nominations at
+serving time, so the move would disable the operator's own rule. The
 bridge lives in `discovery.py` so `detectors.py` stays a leaf module that
 `redaction.py` can import without pulling in sources.
 
