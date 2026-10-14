@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from redacted_context_mcp import core, server
+from redacted_context_mcp import core, filesystem, server
 from redacted_context_mcp.discovery import discover_entities
 from redacted_context_mcp.filesystem import RedactedContext, is_probably_text
 from redacted_context_mcp.limits import OperationBudget, OperationLimitError
@@ -649,6 +649,145 @@ class FakeDiscoveryClient:
     def extract(self, *, rel_path: str, text: str) -> DiscoveryResult:
         self.texts.append(text)
         return DiscoveryResult()
+
+
+class McpOperatorLimitTest(unittest.TestCase):
+    """MCP tools and opaque references honour the server's operator limits."""
+
+    BIG = 1_000_000
+    TRAVERSAL_CALLS = (
+        ("redctx_tree", {}),
+        ("redctx_list", {"recursive": True}),
+        ("redctx_search", {"query": "alpha"}),
+        ("redctx_bundle", {}),
+        ("redctx_retrieve", {"query": "alpha"}),
+        ("redctx_audit", {}),
+    )
+
+    @contextlib.contextmanager
+    def root_dir(self):
+        with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {
+            "REDACTED_CONTEXT_SALT": "",
+            "REDACTED_CONTEXT_TERMS": "",
+            "REDACTED_CONTEXT_DETECTOR_PROFILE": "",
+            "REDACTED_CONTEXT_STATE_DIR": str(Path(td) / "state"),
+        }):
+            root = Path(td) / "root"
+            (root / "sub").mkdir(parents=True)
+            for rel in ("a.txt", "b.txt", "sub/c.txt"):
+                (root / rel).write_text("alpha " * 10, encoding="utf-8")
+            yield root
+
+    def make_mcp(self, root: Path, **limits: int) -> server.RedactedContextMcp:
+        return server.RedactedContextMcp(root=root, config_path=None, mode="strict", include_private=False, **limits)
+
+    def assert_tool_error(self, mcp: server.RedactedContextMcp, name: str, arguments: dict, message: str) -> None:
+        result = mcp.call_tool(name, arguments)
+        self.assertTrue(result["isError"], result)
+        self.assertIn(message, result["content"][0]["text"])
+
+    def assert_tool_ok(self, mcp: server.RedactedContextMcp, name: str, arguments: dict) -> None:
+        result = mcp.call_tool(name, arguments)
+        self.assertFalse(result["isError"], result)
+
+    def test_tools_honour_lowered_entry_limit(self) -> None:
+        with self.root_dir() as root:
+            mcp = self.make_mcp(root, max_traversal_entries=1)
+            for name, arguments in self.TRAVERSAL_CALLS:
+                with self.subTest(tool=name):
+                    self.assert_tool_error(mcp, name, arguments, "Traversal entry limit exceeded")
+
+    def test_tools_honour_raised_entry_limit(self) -> None:
+        with self.root_dir() as root, patch.object(core, "DEFAULT_MAX_TRAVERSAL_ENTRIES", 1), \
+                patch.object(filesystem, "DEFAULT_MAX_TRAVERSAL_ENTRIES", 1):
+            mcp = self.make_mcp(root, max_traversal_entries=100)
+            for name, arguments in self.TRAVERSAL_CALLS:
+                with self.subTest(tool=name):
+                    self.assert_tool_ok(mcp, name, arguments)
+
+    def test_tools_honour_lowered_per_file_byte_limit(self) -> None:
+        with self.root_dir() as root:
+            mcp = self.make_mcp(root, max_raw_bytes_per_file=10)
+            for name, arguments in (
+                ("redctx_read", {"path": "a.txt"}),
+                ("redctx_stat", {"path": "a.txt"}),
+                ("redctx_search", {"query": "alpha", "paths": ["a.txt"]}),
+                ("redctx_bundle", {"paths": ["a.txt"]}),
+            ):
+                with self.subTest(tool=name):
+                    self.assert_tool_error(mcp, name, arguments, "Raw file byte limit exceeded.")
+
+    def test_tools_honour_lowered_total_byte_limit(self) -> None:
+        with self.root_dir() as root:
+            mcp = self.make_mcp(root, max_total_raw_bytes=100)
+            self.assert_tool_ok(mcp, "redctx_read", {"path": "a.txt"})
+            for name, arguments in (
+                ("redctx_search", {"query": "alpha"}),
+                ("redctx_bundle", {}),
+            ):
+                with self.subTest(tool=name):
+                    self.assert_tool_error(mcp, name, arguments, "Total raw byte limit exceeded.")
+
+    def test_tools_honour_raised_byte_limits(self) -> None:
+        with self.root_dir() as root, patch.object(core, "DEFAULT_MAX_RAW_BYTES_PER_FILE", 10), \
+                patch.object(core, "DEFAULT_MAX_TOTAL_RAW_BYTES", 10):
+            mcp = self.make_mcp(root, max_raw_bytes_per_file=self.BIG, max_total_raw_bytes=self.BIG)
+            for name, arguments in (
+                ("redctx_read", {"path": "a.txt"}),
+                ("redctx_stat", {"path": "a.txt"}),
+                ("redctx_search", {"query": "alpha"}),
+                ("redctx_bundle", {}),
+            ):
+                with self.subTest(tool=name):
+                    self.assert_tool_ok(mcp, name, arguments)
+
+    def test_opaque_reference_resolution_honours_entry_limit(self) -> None:
+        with self.root_dir() as root:
+            mcp = self.make_mcp(root, max_traversal_entries=1)
+            ref = mcp.ctx.display_ref("a.txt")
+            for name, arguments in (
+                ("redctx_read", {"path": ref}),
+                ("redctx_stat", {"path": ref}),
+                ("redctx_bundle", {"paths": [ref]}),
+            ):
+                with self.subTest(tool=name, limit="lowered"):
+                    self.assert_tool_error(mcp, name, arguments, "Traversal entry limit exceeded")
+        with self.root_dir() as root, patch.object(filesystem, "DEFAULT_MAX_TRAVERSAL_ENTRIES", 1):
+            mcp = self.make_mcp(root, max_traversal_entries=100)
+            ref = mcp.ctx.display_ref("a.txt")
+            for name in ("redctx_read", "redctx_stat"):
+                with self.subTest(tool=name, limit="raised"):
+                    self.assert_tool_ok(mcp, name, {"path": ref})
+
+    def test_policy_reload_keeps_index_entry_limit(self) -> None:
+        for limit, default in ((1, filesystem.DEFAULT_MAX_TRAVERSAL_ENTRIES), (100, 1)):
+            with self.subTest(limit=limit), self.root_dir() as root, \
+                    patch.object(filesystem, "DEFAULT_MAX_TRAVERSAL_ENTRIES", default):
+                config = root / ".agent-context-redactor.toml"
+                config.write_text('[redaction]\nsalt = "limit-salt"\n', encoding="utf-8")
+                mcp = self.make_mcp(root, max_traversal_entries=limit)
+                original_ctx = mcp.ctx
+                ref = mcp.ctx.display_ref("a.txt")
+                config.write_text('[redaction]\nsalt = "limit-salt"\nterms = ["omega"]\n', encoding="utf-8")
+                result = mcp.call_tool("redctx_read", {"path": ref})
+                self.assertIsNot(mcp.ctx, original_ctx)
+                if limit == 1:
+                    self.assertTrue(result["isError"], result)
+                    self.assertIn("Traversal entry limit exceeded", result["content"][0]["text"])
+                else:
+                    self.assertFalse(result["isError"], result)
+
+    def test_cli_max_entries_bounds_opaque_reference_resolution(self) -> None:
+        with self.root_dir() as root:
+            ref = RedactedContext(root, core.load_config(root, None)).display_ref("a.txt")
+            with self.assertRaisesRegex(SystemExit, "Traversal entry limit exceeded"):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    core.main(["--root", str(root), "cat", ref, "--max-entries", "1"])
+            output = io.StringIO()
+            with patch.object(filesystem, "DEFAULT_MAX_TRAVERSAL_ENTRIES", 1), contextlib.redirect_stdout(output):
+                status = core.main(["--root", str(root), "cat", ref, "--max-entries", "100"])
+            self.assertEqual(status, 0)
+            self.assertIn("alpha", output.getvalue())
 
 
 if __name__ == "__main__":

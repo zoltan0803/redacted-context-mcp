@@ -1575,7 +1575,13 @@ def main(argv: list[str] | None = None) -> int:
         config = with_protected_paths(config, root, detector_protected_paths((*detectors, *discovery)))
     if args.detector_profile:
         config = replace(config, detector_profile=args.detector_profile)
-    ctx = RedactedContext(root, config, include_private=args.include_private, documents=args.documents)
+    ctx = RedactedContext(
+        root,
+        config,
+        include_private=args.include_private,
+        documents=args.documents,
+        max_index_entries=getattr(args, "max_entries", DEFAULT_MAX_TRAVERSAL_ENTRIES),
+    )
     redactor = Redactor(config, mode=args.mode, detectors=detectors)
     return args.func(args, ctx, redactor)
 

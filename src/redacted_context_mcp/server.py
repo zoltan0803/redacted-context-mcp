@@ -216,6 +216,11 @@ class RedactedContextMcp:
             raise SystemExit(str(exc)) from exc
         self.include_private = include_private
         self.documents = documents
+        self.max_resource_bytes = max_resource_bytes
+        self.max_traversal_entries = max_traversal_entries
+        self.max_submit_files = max_submit_files
+        self.max_raw_bytes_per_file = max_raw_bytes_per_file
+        self.max_total_raw_bytes = max_total_raw_bytes
         # Every source enabled by the policy; rebuilt with the redactor on reload.
         self.sources = self.build_sources(config)
         self.redactor = rc.Redactor(config, mode=mode, detectors=self.detectors)
@@ -223,11 +228,6 @@ class RedactedContextMcp:
         self.mode = mode
         self.enable_writes = enable_writes
         self.write_root = resolve_write_root(self.root, write_subdir)
-        self.max_resource_bytes = max_resource_bytes
-        self.max_traversal_entries = max_traversal_entries
-        self.max_submit_files = max_submit_files
-        self.max_raw_bytes_per_file = max_raw_bytes_per_file
-        self.max_total_raw_bytes = max_total_raw_bytes
         self.cache = RedactedContentCache(cache_bytes)
 
     @property
@@ -241,6 +241,7 @@ class RedactedContextMcp:
             config,
             include_private=self.include_private,
             documents=self.documents,
+            max_index_entries=self.max_traversal_entries,
         )
 
     def ensure_current_config(self) -> None:
@@ -274,6 +275,14 @@ class RedactedContextMcp:
 
     def traversal_budget(self) -> rc.OperationBudget:
         return rc.OperationBudget(max_entries=self.max_traversal_entries)
+
+    def budget_arguments(self) -> dict[str, int]:
+        """Operator limits for CLI commands that build their budget from args."""
+        return {
+            "max_entries": self.max_traversal_entries,
+            "max_raw_bytes_per_file": self.max_raw_bytes_per_file,
+            "max_total_raw_bytes": self.max_total_raw_bytes,
+        }
 
     def submit_budget(self) -> rc.OperationBudget:
         return rc.OperationBudget(
@@ -931,6 +940,7 @@ def redctx_tree(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
         Namespace(
             path=string_arg(arguments, "path", "."),
             max_depth=int_arg(arguments, "max_depth", 3),
+            **server.budget_arguments(),
         ),
     )
 
@@ -942,6 +952,7 @@ def redctx_list(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
             path=string_arg(arguments, "path", "."),
             recursive=bool_arg(arguments, "recursive", False),
             max_depth=int_arg(arguments, "max_depth", None),
+            **server.budget_arguments(),
         ),
     )
 
@@ -955,6 +966,7 @@ def redctx_read(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
             end_line=int_arg(arguments, "end_line", None),
             max_chars=int_arg(arguments, "max_chars", rc.DEFAULT_MAX_CHARS) or rc.DEFAULT_MAX_CHARS,
             line_numbers=bool_arg(arguments, "line_numbers", False),
+            **server.budget_arguments(),
         ),
     )
 
@@ -972,6 +984,7 @@ def redctx_search(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
             max_results=int_arg(arguments, "max_results", rc.DEFAULT_MAX_SEARCH_RESULTS)
             or rc.DEFAULT_MAX_SEARCH_RESULTS,
             max_seconds=rc.DEFAULT_MCP_SEARCH_SECONDS,
+            **server.budget_arguments(),
         ),
     )
 
@@ -979,7 +992,7 @@ def redctx_search(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
 def redctx_stat(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
     return server.run_cli_command(
         rc.command_stat,
-        Namespace(path=string_arg(arguments, "path", ".")),
+        Namespace(path=string_arg(arguments, "path", "."), **server.budget_arguments()),
     )
 
 def redctx_retrieve(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
@@ -989,9 +1002,8 @@ def redctx_retrieve(server: RedactedContextMcp, arguments: dict[str, Any]) -> st
             query=string_arg(arguments, "query", ""),
             paths=string_list_arg(arguments, "paths"), glob=string_list_arg(arguments, "glob"),
             max_results=int_arg(arguments, "max_results", 8), max_chars=int_arg(arguments, "max_chars", 12_000),
-            max_files=rc.DEFAULT_MAX_FILES, max_entries=server.max_traversal_entries,
-            max_raw_bytes_per_file=server.max_raw_bytes_per_file,
-            max_total_raw_bytes=server.max_total_raw_bytes, max_seconds=rc.DEFAULT_MCP_SEARCH_SECONDS,
+            max_files=rc.DEFAULT_MAX_FILES, max_seconds=rc.DEFAULT_MCP_SEARCH_SECONDS,
+            **server.budget_arguments(),
         ),
     )
 
@@ -1005,6 +1017,7 @@ def redctx_bundle(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
             max_files=int_arg(arguments, "max_files", rc.DEFAULT_MAX_FILES) or rc.DEFAULT_MAX_FILES,
             max_chars_per_file=int_arg(arguments, "max_chars_per_file", 30_000) or 30_000,
             max_total_chars=int_arg(arguments, "max_total_chars", 300_000) or 300_000,
+            **server.budget_arguments(),
         ),
     )
 
@@ -1031,10 +1044,8 @@ def redctx_audit(server: RedactedContextMcp, arguments: dict[str, Any]) -> str:
             format=string_arg(arguments, "format", "text"),
             writes_enabled=server.enable_writes,
             write_subdir_confined=True,
-            max_raw_bytes_per_file=rc.DEFAULT_MAX_RAW_BYTES_PER_FILE,
-            max_total_raw_bytes=rc.DEFAULT_MAX_TOTAL_RAW_BYTES,
-            max_entries=server.max_traversal_entries,
             max_seconds=None,
+            **server.budget_arguments(),
         ),
     )
 
@@ -2036,7 +2047,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-traversal-entries",
         type=int,
         default=rc.DEFAULT_MAX_TRAVERSAL_ENTRIES,
-        help="maximum entries inspected for MCP resource/index traversal",
+        help="maximum entries inspected by MCP tools, resources, the path index, and submit-doc rehydration",
     )
     parser.add_argument(
         "--max-submit-files",
@@ -2048,13 +2059,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-raw-bytes-per-file",
         type=int,
         default=rc.DEFAULT_MAX_RAW_BYTES_PER_FILE,
-        help="maximum raw bytes per file for MCP submit-doc rehydration scans",
+        help="maximum raw bytes per file for MCP tools and submit-doc rehydration scans",
     )
     parser.add_argument(
         "--max-total-raw-bytes",
         type=int,
         default=rc.DEFAULT_MAX_TOTAL_RAW_BYTES,
-        help="maximum total raw bytes for MCP submit-doc rehydration scans",
+        help="maximum total raw bytes for MCP tool calls and submit-doc rehydration scans",
     )
     parser.add_argument(
         "--cache-bytes",
