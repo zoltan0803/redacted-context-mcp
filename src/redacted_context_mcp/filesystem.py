@@ -358,7 +358,10 @@ class RedactedContext:
             folded = str(path).casefold()
             if any(folded == exact or folded.startswith(prefix) for prefix, exact in folded_prune_roots):
                 return
-        budget.consume_entry()
+        # Only the start is charged on entry; every deeper path was already
+        # charged when its parent directory was scanned.
+        if depth == 0:
+            budget.consume_entry()
         if path.is_symlink() or is_reparse_point(path):
             return
         try:
@@ -441,7 +444,6 @@ class RedactedContext:
 
         def visit(path: Path) -> None:
             nonlocal broken
-            scan_budget.consume_entry()
             try:
                 with os.scandir(path) as entries:
                     for entry in entries:
@@ -461,6 +463,9 @@ class RedactedContext:
             except OSError:
                 return
 
+        # Only the root is charged here; every directory visit() recurses
+        # into was already charged when its parent was scanned.
+        scan_budget.consume_entry()
         visit(root)
         return links, broken
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Directory traversal (tree, list, search, bundle, retrieve, resources, the
+  path index, rehydration and the audit link scan) now charges each directory
+  once against the traversal entry limit instead of twice, so trees with many
+  directories no longer hit `Traversal entry limit exceeded.` early.
+
 ## 0.9.0 — 2026-10-10
 
 - Introduces an internal source adapter interface so private data sources
