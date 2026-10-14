@@ -361,7 +361,9 @@ detectors.
 `DetectorDiscoveryClient` in `discovery.py` adapts detectors to the
 `DiscoveryClient` protocol for `redctx discover --detector` (PERSON to people,
 ORG to organizations, CLIENT to clients, SENSITIVE and ENTITY to terms; other
-categories are already covered by the baseline regexes). Only the discover
+categories are already covered by the baseline regexes; post-processing may
+drop values or route tool-like terms to `allow`, but never moves a value into
+another of these buckets). Only the discover
 subcommands' own `--detector` (argparse dest `subcommand_detector`) selects
 detector discovery; the global `--detector` configures serving, and `--model`
 or `--endpoint` combined with the subcommand `--detector` is an error. The

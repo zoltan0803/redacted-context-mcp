@@ -1439,7 +1439,9 @@ does not include project-specific names; it only:
 - drops obvious filenames, meeting/ticket IDs, country-only values, job titles,
   and generic workflow/process labels;
 - strips role notes from full names such as `Alice Example (CIO)`;
-- ignores single first names by default because they over-redact.
+- ignores single first names by default because they over-redact;
+- never moves a value between clients, organizations, people and terms: the
+  detector's or model's category is kept.
 
 Use `--raw-discovery` if you want the local model's categories with only basic
 dedupe. Either way, model values that do not occur in the sampled file are

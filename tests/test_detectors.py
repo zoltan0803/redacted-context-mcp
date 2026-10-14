@@ -19,6 +19,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from dataclasses import replace
 from importlib import metadata
@@ -635,6 +636,22 @@ class DetectorDiscoveryTest(unittest.TestCase):
         self.assertNotIn("alice@example.invalid", flattened)
         self.assertNotIn("10.1.2.3", flattened)
 
+    def test_bridge_keeps_name_like_values_in_the_detector_category(self) -> None:
+        text = "Avery Example met Example Lantern Labs, Fictional Harbor Studio and Blue Heron.\n"
+        detector = FakeDetector(
+            {
+                "Avery Example": "PERSON",
+                "Example Lantern Labs": "ORG",
+                "Fictional Harbor Studio": "CLIENT",
+                "Blue Heron": "SENSITIVE",
+            }
+        )
+        result = DetectorDiscoveryClient(detector).extract(rel_path="context/note.md", text=text)
+        self.assertEqual(result.people, ("Avery Example",))
+        self.assertEqual(result.organizations, ("Example Lantern Labs",))
+        self.assertEqual(result.clients, ("Fictional Harbor Studio",))
+        self.assertEqual(result.terms, ("Blue Heron",))
+
     def test_bridge_failures_are_safe(self) -> None:
         client = DetectorDiscoveryClient(FakeDetector(error=RuntimeError(LIBRARY_CANARY)))
         with self.assertRaises(DetectorError) as caught:
@@ -695,6 +712,43 @@ class DetectorDiscoveryTest(unittest.TestCase):
         config = (self.root / ".agent-context-redactor.toml").read_text(encoding="utf-8")
         self.assertIn('"Alice Example"', config)
         self.assertIn('"Example Partners"', config)
+
+    def test_cli_discover_with_detector_keeps_organizations_out_of_people(self) -> None:
+        (self.root / "context" / "team.md").write_text(
+            "Avery Example and Morgan Sample moved from Example Lantern Labs to Fictional Harbor Studio.\n",
+            encoding="utf-8",
+        )
+        rules = Path(self.tmp.name) / "names.toml"
+        rules.write_text(
+            "[[patterns]]\ncategory = 'PERSON'\nregex = 'Avery Example'\n"
+            "[[patterns]]\ncategory = 'PERSON'\nregex = 'Morgan Sample'\n"
+            "[[patterns]]\ncategory = 'ORG'\nregex = 'Example Lantern Labs'\n"
+            "[[patterns]]\ncategory = 'ORG'\nregex = 'Fictional Harbor Studio'\n",
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"REDACTED_CONTEXT_STATE_DIR": self.state.name}):
+            with contextlib.redirect_stdout(io.StringIO()):
+                status = core.main(
+                    [
+                        "--mode",
+                        "balanced",
+                        "--root",
+                        str(self.root),
+                        "discover",
+                        "--detector",
+                        f"patterns={rules}",
+                        "--glob",
+                        "*.md",
+                        "--output",
+                        ".agent-context-redactor.toml",
+                    ]
+                )
+        self.assertEqual(status, 0)
+        config = (self.root / ".agent-context-redactor.toml").read_text(encoding="utf-8")
+        section = tomllib.loads(config)["redaction"]
+        self.assertCountEqual(section["organizations"], ["Example Lantern Labs", "Fictional Harbor Studio"])
+        self.assertCountEqual(section["people"], ["Avery Example", "Morgan Sample"])
+        self.assertEqual(section["clients"], [])
 
 
 class DetectorMcpTest(unittest.TestCase):

@@ -474,13 +474,13 @@ def postprocess_discovery_result(result: DiscoveryResult, *, include_single_name
         if cleaned:
             buckets[key].append(cleaned)
 
+    # Cleanup drops values and routes tool-like terms to allow, but it never moves a value
+    # between clients, organizations, people and terms.
     for value in result.clients:
         if should_drop_discovered_value(value):
             continue
         if is_public_or_allowed_term(value):
             continue
-        elif is_probable_person(value, include_single_names=include_single_names):
-            add("people", normalize_person_name(value))
         elif is_country_or_region_only(value) or is_generic_org_value(value):
             continue
         else:
@@ -491,8 +491,6 @@ def postprocess_discovery_result(result: DiscoveryResult, *, include_single_name
             continue
         if is_public_or_allowed_term(value):
             continue
-        elif is_probable_person(value, include_single_names=include_single_names):
-            add("people", normalize_person_name(value))
         elif is_country_or_region_only(value) or is_role_or_title(value) or is_generic_org_value(value):
             continue
         else:
@@ -512,8 +510,6 @@ def postprocess_discovery_result(result: DiscoveryResult, *, include_single_name
             continue
         if is_likely_tool_or_package_name(value):
             add("allow", value)
-        elif is_probable_person(value, include_single_names=include_single_names):
-            add("people", normalize_person_name(value))
         elif is_generic_discovery_term(value):
             continue
         else:

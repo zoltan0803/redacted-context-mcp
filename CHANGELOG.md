@@ -50,6 +50,12 @@
   sub-tables unchanged, recognizes table headers followed by comments, adds
   an explicit `[redaction]` table when a config has only sub-tables, and adds
   missing keys before a section's trailing blank lines.
+- `redctx discover` and `discover-update` no longer reclassify organization,
+  client, or term values that look like full names (for example
+  `Example Lantern Labs`) as people. They keep the detector's or model's
+  category and placeholder, and no longer count as known people when alias
+  groups are proposed. Post-processing still drops generic, public, and role
+  values.
 
 ## 0.9.0 — 2026-10-10
 

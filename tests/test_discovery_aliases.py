@@ -187,6 +187,31 @@ class DiscoverDraftTest(TempRoot):
             self.assertNotIn(raw, draft)
         self.load_groups(draft)
 
+    def discover_orgs(self, text: str, suggested: core.DiscoveryResult) -> core.DiscoveryResult:
+        self.write("orgs/notes.md", text)
+        return core.discover_entities(
+            self.ctx, paths=["orgs"], globs=[], client=StaticClient(suggested),  # type: ignore[arg-type]
+            max_files=10, max_chars_per_file=10_000, propose_aliases=True,
+        )
+
+    def test_person_shaped_organizations_do_not_make_a_first_name_ambiguous(self) -> None:
+        # Post-processing keeps a person-shaped organization out of people, so it
+        # never counts as a namesake in the alias ambiguity checks.
+        result = self.discover_orgs(
+            "Avery Example leads the pilot with Avery Lantern Labs.\nReach her at avery@example.com.\n",
+            core.DiscoveryResult(people=("Avery Example",), organizations=("Avery Lantern Labs",)),
+        )
+        self.assertEqual(result.aliases, (("Avery Example", ("avery@example.com",)),))
+        self.assertEqual((result.people, result.organizations), (("Avery Example",), ("Avery Lantern Labs",)))
+
+    def test_person_shaped_organizations_get_no_email_alias(self) -> None:
+        result = self.discover_orgs(
+            "The Harbor Lantern desk takes intake at harbor.lantern@example.com.\n",
+            core.DiscoveryResult(organizations=("Harbor Lantern",)),
+        )
+        self.assertEqual((result.aliases, result.dropped_aliases), ((), 0))
+        self.assertEqual((result.people, result.organizations), ((), ("Harbor Lantern",)))
+
     def test_raw_discovery_skips_heuristics_but_keeps_model_suggestions(self) -> None:
         suggested = core.DiscoveryResult(people=PEOPLE, aliases=(("Morgan Sample", ("Morgan",)),))
         result = self.discover(StaticClient(suggested), postprocess=False, propose_aliases=False)
