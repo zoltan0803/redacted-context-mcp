@@ -385,8 +385,9 @@ bridge lives in `discovery.py` so `detectors.py` stays a leaf module that
    can use it directly. It is not free in import cost, though: importing
    `redacted_context_mcp.testing` first imports the package root
    (`redacted_context_mcp/__init__.py`), which imports `discovery` and,
-   through it, `config`, `filesystem`, `documents`, and `limits`. None of
-   the optional detector libraries are imported.
+   through it, `config` (and with it `redaction`, for alias-group
+   validation), `filesystem`, `documents`, and `limits`. None of the
+   optional detector libraries are imported.
 
 ## Module Layout
 
@@ -412,7 +413,8 @@ bridge lives in `discovery.py` so `detectors.py` stays a leaf module that
   and detector rules.
 - `testing.py`: shipped `DetectorConformance` contract tests for detector
   authors.
-- `config.py`: local TOML config loading and validation.
+- `config.py`: local TOML config loading and validation, including alias
+  groups.
 - `config_reload.py`: request-boundary policy change detection, stable reloads,
   and fail-closed handling of invalid or missing policy inputs.
 - `paths.py`: root-constrained path resolution and opaque path ids.
@@ -485,6 +487,41 @@ salt, for example `[PERSON_1a2b3c4d5e6f7890a1b2c3d4e5f60718]`. The same raw
 value maps to the same placeholder for one private config without exposing the
 raw value. Placeholder collisions are detected and fail closed instead of
 building an ambiguous rehydration map.
+
+The built-in stages that run before configured terms (secrets, URLs, emails,
+ids, IP addresses, card and phone numbers, domains, handles, plus the extended
+profile's identifiers) are listed in pipeline order in two tables,
+`EARLY_BASELINE_STAGES` and `EXTENDED_BASELINE_STAGES` in `redaction.py`,
+which `Redactor` walks in turn.
+
+### Alias Groups
+
+`[redaction.aliases]` maps a canonical value to the other forms of one entity.
+`config.py` validates the groups against the final term lists and resolves
+each group's category: the first of clients, organizations, people, and terms
+that holds the canonical value, which is the category the configured-term
+stage already gives it. Every check fails closed with a message that names the
+group by position only. The canonical value must reach the configured-term
+stage intact, so a value that a default-profile early stage matches (an email
+address, say) is refused as a canonical value.
+
+`Redactor` turns the groups into two things. The aliases join their group's
+category in the configured-term stage, so they are redacted in their own right
+with the usual boundaries and longest-match ordering. And `alias_links` maps
+each normalized alias to the group's entity hex (the canonical value's
+ordinary placeholder hex) and its form suffix, the first 32 bits of
+`HMAC(salt, "alias-form:" + normalized alias)`. `Redactor.placeholder` is the
+single place where placeholders are minted, so whichever stage or plugged
+detector redacts an alias, in whatever category, the result is
+`[<CATEGORY>_<entity hex>.<form suffix>]`. The canonical value has no link
+entry and keeps its ordinary placeholder. A linked alias also registers the
+ordinary placeholder it would have without its group, for collision checks
+and in the rehydration map (never in output), so documents redacted before
+the group was declared still rehydrate. Collision checks, rehydration maps,
+and receipts otherwise work on these placeholders unchanged; every
+placeholder matcher (`PLACEHOLDER_RE` and the patterns built from it,
+including path redaction, truncation, retrieval tokens, and rehydration)
+accepts the optional suffix.
 
 ## Configuration
 

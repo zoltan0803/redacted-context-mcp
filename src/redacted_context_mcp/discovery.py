@@ -713,30 +713,46 @@ def as_toml_string_list(value: object, key: str) -> list[str]:
     return list(value)
 
 
+# TOML table and array-of-tables header lines (after strip), optionally
+# followed by a comment. Sub-tables such as [redaction.aliases] end the
+# [redaction] section like any other header and are never rewritten.
+TOML_HEADER_RE = re.compile(r"\[\[?[^\]]+\]\]?\s*(?:#.*)?")
+REDACTION_HEADER_RE = re.compile(r"\[\s*redaction\s*\]\s*(?:#.*)?")
+REDACTION_SUBTABLE_RE = re.compile(r"\[\s*redaction\s*\.")
+
+
 def replace_redaction_assignments(text: str, replacements: dict[str, str]) -> str:
     """Replace selected assignments without rewriting unrelated tables/comments."""
 
     newline = "\r\n" if "\r\n" in text else "\n"
     lines = text.splitlines(keepends=True)
-    has_redaction_table = any(re.fullmatch(r"\s*\[redaction\]\s*", line.strip()) for line in lines)
+    has_redaction_table = any(REDACTION_HEADER_RE.fullmatch(line.strip()) for line in lines)
     if not lines:
         lines = ["[redaction]" + newline]
         has_redaction_table = True
     elif not text.endswith(("\n", "\r")):
         lines[-1] += newline
+    if not has_redaction_table and any(REDACTION_SUBTABLE_RE.match(line.strip()) for line in lines):
+        # A sub-table such as [redaction.aliases] makes `redaction` a table,
+        # and the loader then ignores top-level keys: open an explicit
+        # [redaction] table before the first header for the merged keys.
+        # Sub-tables themselves are never rewritten.
+        first_header = next(index for index, line in enumerate(lines) if TOML_HEADER_RE.fullmatch(line.strip()))
+        lines.insert(first_header, "[redaction]" + newline)
+        has_redaction_table = True
 
     if has_redaction_table:
         header = next(
             index
             for index, line in enumerate(lines)
-            if re.fullmatch(r"\s*\[redaction\]\s*", line.strip())
+            if REDACTION_HEADER_RE.fullmatch(line.strip())
         )
         section_start = header + 1
         section_end = next(
             (
                 index
                 for index in range(section_start, len(lines))
-                if re.fullmatch(r"\s*\[[^\]]+\]\s*", lines[index].strip())
+                if TOML_HEADER_RE.fullmatch(lines[index].strip())
             ),
             len(lines),
         )
@@ -746,7 +762,7 @@ def replace_redaction_assignments(text: str, replacements: dict[str, str]) -> st
             (
                 index
                 for index, line in enumerate(lines)
-                if re.fullmatch(r"\s*\[[^\]]+\]\s*", line.strip())
+                if TOML_HEADER_RE.fullmatch(line.strip())
             ),
             len(lines),
         )

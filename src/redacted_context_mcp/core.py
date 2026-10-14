@@ -35,6 +35,7 @@ from .config import (
     with_protected_paths,
 )
 from .defaults import (
+    ALIAS_FORM_SEPARATOR,
     DEFAULT_DISCOVERY_MAX_CHARS,
     DEFAULT_DISCOVERY_MAX_FILES,
     DEFAULT_DISCOVERY_MODEL,
@@ -138,7 +139,7 @@ from .models import (
     RedactionConfig,
 )
 from .paths import display_ref, path_id, rel_posix, resolve_under_root
-from .redaction import Redactor, compile_literal_pattern, normalize_alias
+from .redaction import Redactor, compile_literal_pattern, normalize_alias, placeholder_digest
 from .regex_safety import (
     QUANTIFIER_REPETITION_FLOOR,
     UNSAFE_REGEX_MESSAGE,
@@ -164,6 +165,9 @@ from .documents import DOCUMENT_EXTENSIONS
 
 
 HEX_QUERY_RE = re.compile(r"[0-9a-fA-F]+")
+# Hex digits around one alias-form separator may be a fragment of a linked
+# placeholder (`<entity>.<form>`), which exists only in redacted text.
+LINKED_HEX_QUERY_RE = re.compile(rf"[0-9a-fA-F]*{re.escape(ALIAS_FORM_SEPARATOR)}[0-9a-fA-F]*")
 PLACEHOLDER_STRUCTURAL_CHARS = frozenset("[]_")
 
 
@@ -185,7 +189,7 @@ def can_use_raw_search_prefilter(query: str, *, regex: bool, ignore_case: bool) 
         return False
     if any(char in PLACEHOLDER_STRUCTURAL_CHARS for char in stripped):
         return False
-    if HEX_QUERY_RE.fullmatch(stripped):
+    if HEX_QUERY_RE.fullmatch(stripped) or LINKED_HEX_QUERY_RE.fullmatch(stripped):
         return False
     if ignore_case:
         folded = stripped.casefold()
@@ -699,6 +703,8 @@ def command_doctor(args: argparse.Namespace, ctx: RedactedContext, redactor: Red
     print(f"organizations: {len(redactor.config.organizations)}")
     print(f"people_terms: {len(redactor.config.people)}")
     print(f"other_terms: {len(redactor.config.terms)}")
+    print(f"alias_groups: {len(redactor.config.alias_groups)}")
+    print(f"aliases: {sum(len(group.aliases) for group in redactor.config.alias_groups)}")
     print(f"allow_terms: {len(redactor.allow_terms)}")
     print(f"excluded_dirs: {len(ctx.exclude_dirs)}")
     print(f"excluded_globs: {len(ctx.exclude_globs)}")
@@ -845,13 +851,29 @@ def audit_checks(
             "detail": "raw write path not reported",
         },
     ]
-    if redactor.detectors:
-        # Keep the configuration checks together: right after the allow-list
-        # check (or at the end if that check is ever renamed).
-        anchor = next(
-            (index + 1 for index, check in enumerate(checks) if check["name"] == "overly broad allow entries"),
-            len(checks),
+    # Keep the configuration checks together: right after the allow-list
+    # check (or at the end if that check is ever renamed).
+    anchor = next(
+        (index + 1 for index, check in enumerate(checks) if check["name"] == "overly broad allow entries"),
+        len(checks),
+    )
+    if redactor.config.alias_groups:
+        groups = redactor.config.alias_groups
+        unlinked = unlinked_alias_forms(redactor)
+        checks.insert(
+            anchor,
+            {
+                "category": "configuration",
+                "name": "alias groups",
+                "status": "WARN" if unlinked else "PASS",
+                "detail": (
+                    f"{len(groups)} groups, {sum(len(group.aliases) for group in groups)} aliases, "
+                    f"{unlinked} forms not redacted as one linked placeholder on their own"
+                ),
+            },
         )
+        anchor += 1
+    if redactor.detectors:
         checks.insert(
             anchor,
             {
@@ -862,6 +884,28 @@ def audit_checks(
             },
         )
     return checks
+
+
+def unlinked_alias_forms(redactor: Redactor) -> int:
+    """Count alias-group forms that do not redact, standing alone, as one linked placeholder.
+
+    Each canonical value must become its ordinary placeholder in the group's
+    category and each alias one placeholder carrying the group's entity hex.
+    A form a built-in stage only partly claims (for example a canonical value
+    that an extended-profile detector matches) is counted. The probe uses the
+    built-in baseline only and reports a count, never a value.
+    """
+    probe = Redactor(redactor.config, mode=redactor.mode)
+    unlinked = 0
+    for group in redactor.config.alias_groups:
+        entity = placeholder_digest(redactor.config.salt, group.category, normalize_alias(group.canonical))
+        if probe.redact(group.canonical) != f"[{group.category}_{entity}]":
+            unlinked += 1
+        for alias in group.aliases:
+            redacted = probe.redact(alias)
+            if not PLACEHOLDER_RE.fullmatch(redacted) or f"_{entity}{ALIAS_FORM_SEPARATOR}" not in redacted:
+                unlinked += 1
+    return unlinked
 
 
 def command_benchmark(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:

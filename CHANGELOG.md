@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+- Adds alias groups. `[redaction.aliases]` maps a canonical value (a
+  configured client, organization, person, or term) to other forms of the same
+  entity, for example `"Avery Example" = ["Avery", "avery@example.com"]`.
+  Each alias is redacted in its own right with configured-term boundaries and
+  gets a linked placeholder that shares the canonical placeholder's entity hex
+  and adds a keyed form suffix, `[PERSON_<entity>.<form>]`, so an agent can
+  tell that the forms belong to one entity. The canonical placeholder is
+  unchanged, and every other placeholder is byte-identical without groups.
+- A linked form keeps the category of whichever built-in stage or plugged
+  detector redacts it (an email alias stays `EMAIL_`), and longest-match
+  ordering still applies. The form suffix is the first 32 bits of an HMAC
+  keyed by the vault salt; two aliases of one group never share one.
+- `redctx rehydrate` and `redctx_submit_doc` restore each form to its own
+  spelling, still from a rescan of the private root, and controlled writes
+  re-redact restored alias forms before publishing. An alias's previous
+  placeholder in the same category still restores it, so documents redacted
+  before the group was declared keep rehydrating. Unresolvable linked
+  placeholders are refused like any other.
+- Invalid groups fail closed with messages that name groups by position and
+  never echo values: unconfigured canonical values or ones a built-in stage
+  redacts before configured terms, aliases that repeat their own or another
+  group's canonical value or another group's alias, allow-listed or reserved
+  aliases, values over 256 characters or 16 words, empty groups, more than 64
+  aliases, and form-suffix clashes. Live policy reload applies group changes.
+- `redctx doctor` reports `alias_groups` and `aliases` counts, and `redctx
+  audit` adds an `alias groups` check that counts forms which do not redact as
+  one linked placeholder on their own. The `redctx_search` description
+  explains how to find every form by the shared hex; the tool output schema
+  and `redctx_doctor` description mention linked forms.
+- Path redaction now leaves whole placeholders untouched before redacting
+  path tokens, the raw-search prefilter is skipped for queries that could be
+  a fragment of a linked placeholder, and `discover-update` keeps
+  `[redaction.aliases]` (and any other `[redaction.*]` sub-table) unchanged,
+  recognizes table headers followed by comments, and adds an explicit
+  `[redaction]` table when a config has only sub-tables.
+
 ## 0.9.0 — 2026-10-10
 
 - Introduces an internal source adapter interface so private data sources

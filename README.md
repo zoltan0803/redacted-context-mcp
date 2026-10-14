@@ -292,6 +292,9 @@ is intended to preserve.
 - Local-salted opaque stable path ids such as `@p_1a2b3c4d5e6f`.
 - Deterministic 128-bit HMAC placeholders such as
   `[PERSON_1a2b3c4d5e6f7890a1b2c3d4e5f60718]`.
+- Optional [alias groups](#alias-groups) that link declared forms of one
+  entity (a full name, a first name, an email address) through a shared
+  placeholder hex, such as `[PERSON_1a2b…0718.5c6d7e8f]`.
 - Bounded operation budgets for traversals, reads, bundles, searches, audits,
   benchmarks, discovery samples, MCP resource listing/reads, and controlled
   write rehydration scans.
@@ -689,7 +692,8 @@ matching is case-insensitive and ignores a small set of common English words.
 Existing literal and regex `search` behavior is unchanged.
 
 Only redacted text is tokenized and scored. Complete placeholders can be used
-as search terms. Retrieval keeps no persistent index, makes no model calls,
+as search terms; each one matches only itself, so to find every form of an
+[alias group](#alias-groups) use `search` with the shared hex. Retrieval keeps no persistent index, makes no model calls,
 and has no additional dependencies. Results contain complete passages within
 the character budget; if none fits, increase `max_chars`. A limit notice marks
 omitted matches. Scan limits fail the request instead of presenting a partial
@@ -753,7 +757,9 @@ redctx --root ../source-private rehydrate ./redacted-folder \
 
 Rehydration is not cryptographic reversal. A redacted file alone is not enough;
 the command needs access to the original private root or equivalent local
-source material to rebuild the mapping.
+source material to rebuild the mapping. Forms of an [alias group](#alias-groups)
+restore to their own spelling: the canonical placeholder to the full value, each
+alias placeholder to that alias.
 
 ## Local Redaction Config
 
@@ -770,6 +776,9 @@ people = ["Person One", "Person Two"]
 terms = ["project codename", "internal programme name"]
 allow = ["Azure", "PostgreSQL", "Kubernetes"]
 term_files = ["private-redaction-terms.txt"]
+
+[redaction.aliases]
+"Person One" = ["P. One", "person.one@example.com"]
 
 [github.repos.context]
 owner = "private-org-or-user"
@@ -793,12 +802,86 @@ use the alias, while the real `owner/repo` stays in this local config. Private
 repos require the named token environment variable in the shell that starts
 `redctx` or `redctx-mcp`.
 
+### Alias Groups
+
+Every distinct value gets its own unrelated placeholder, so an agent cannot
+tell that `Avery Example` in a stakeholder list and the `Avery` who signs an
+email are one person. An alias group declares that link in the local config:
+
+```toml
+[redaction]
+people = ["Avery Example"]
+
+[redaction.aliases]
+"Avery Example" = ["Avery", "avery@example.com"]
+```
+
+The key is the canonical value. It must also be a configured client,
+organization, person, or term; the first of those lists (in that order) that
+holds it sets the group's category. Its placeholder does not change, so
+existing redacted documents still rehydrate. Each alias shares the canonical
+placeholder's 32-hex entity id and adds a `.` and an 8-hex form suffix
+(strict mode, illustrative values):
+
+```text
+Avery Example is Product owner.  ->  [PERSON_391658f4081e3eb49a1b4fe5687d9503] is [ENTITY_…] owner.
+reach me at avery@example.com    ->  reach me at [EMAIL_391658f4081e3eb49a1b4fe5687d9503.234ff3c8]
+Thank you, Avery                 ->  [ENTITY_…] you, [PERSON_391658f4081e3eb49a1b4fe5687d9503.0fdfe119]
+```
+
+- **Matching.** Each alias is redacted in its own right with the same word
+  boundaries and case rules as configured terms, even where no other detector
+  would catch it (a lowercase `avery` in prose, say). Aliases join the
+  configured-term stage in their group's category, so the usual
+  longest-match-wins order applies: `Avery` never splits `Avery Example`.
+- **Category.** A form keeps the category of whatever redacts it, and the link
+  applies whichever stage or detector that is. Built-in stages that run before
+  configured terms (secrets, URLs, emails, ids, IP addresses, card and phone
+  numbers, domains, handles) claim their shapes first, so an email alias is
+  `[EMAIL_<entity>.<form>]`; a plugged detector that nominates an alias the
+  baseline missed uses its own category with the same entity hex.
+- **Form suffix.** The suffix is the first 32 bits of an HMAC keyed by the
+  vault salt over the alias's normalized value, so it can be neither computed
+  nor checked without the salt. Two aliases of one group never share a
+  suffix; the config is refused if they would. The separator is `.` rather
+  than `~` because GitHub-flavored Markdown renders a pair of single tildes as
+  strikethrough, which would garble two linked placeholders in one paragraph.
+- **Search.** A complete placeholder finds one form. Search for
+  `[PERSON_<hex>` without the closing bracket to find every person-typed form,
+  or for the bare `<hex>` to find every form, including email aliases.
+- **Rehydration.** `redctx rehydrate` and `redctx_submit_doc` restore each form
+  to its own spelling: the canonical placeholder to `Avery Example`, the alias
+  placeholders to `Avery` and `avery@example.com`. As for any value, case and
+  whitespace variants of one form share its placeholder and restore to the
+  spelling first seen while rescanning the private root. Documents redacted
+  before an alias was declared still rehydrate: the rebuilt map also restores
+  the alias's previous placeholder in the same category.
+
+Invalid groups fail closed like any invalid config, with messages that name
+groups by position and never echo a value. The config is refused when a
+canonical value is not configured, or is itself something a built-in stage
+redacts before configured terms (use the name as the canonical value and list
+the email address or handle as aliases); when an alias repeats its own
+canonical value, another group's canonical value, or another group's alias;
+when an alias is on the explicit `allow` list or is a reserved placeholder
+word; when a value exceeds 256 characters or 16 words; when a group lists no
+aliases or more than 64; or when two aliases of one group would share a form
+suffix. `redctx doctor` prints `alias_groups` and `aliases` counts, and
+`redctx audit` adds an `alias groups` check that counts forms which do not
+redact as one linked placeholder on their own.
+
+Linking is a deliberate disclosure: the agent learns that these forms belong
+to one entity, and nothing more about the values. Declare only forms you are
+comfortable linking. The alias list lives in this local config, which is never
+served, and no other store of raw values is created. `discover-update` keeps
+the `[redaction.aliases]` table unchanged; `discover` does not propose groups.
+
 ### Updating Rules During an MCP Session
 
 The MCP server automatically checks the local config and its referenced
 `term_files` before each tool call or resource list/read. Save your reviewed
-rules and retry the request: new terms, exclusions, allow-list changes, and
-detector profiles take effect without reconnecting. This also picks up config
+rules and retry the request: new terms, alias groups, exclusions, allow-list
+changes, and detector profiles take effect without reconnecting. This also picks up config
 updates written by `discover-update`.
 
 ```mermaid

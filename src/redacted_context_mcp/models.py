@@ -46,6 +46,21 @@ class GitHubRepoConfig:
 
 
 @dataclass(frozen=True)
+class AliasGroup:
+    """One validated ``[redaction.aliases]`` entry.
+
+    ``canonical`` and ``aliases`` are raw private values from the local
+    config (whitespace-collapsed, case kept). ``category`` is the
+    configured-term category of the canonical value; it keys the entity hex
+    that every form of the group shares.
+    """
+
+    category: str
+    canonical: str
+    aliases: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class RedactionConfig:
     clients: tuple[str, ...] = ()
     organizations: tuple[str, ...] = ()
@@ -66,6 +81,7 @@ class RedactionConfig:
     detector_profile: str = "default"
     term_files: tuple[str, ...] = ()
     protected_paths: tuple[str, ...] = ()
+    alias_groups: tuple[AliasGroup, ...] = ()
 
 
 @dataclass(frozen=True)
