@@ -559,7 +559,7 @@ flowchart TB
 | Mail | `redctx_mail_list` | Messages newest first, one line each, with paging and optional date filters |
 | Mail | `redctx_mail_read` | One message's allow-listed headers, attachment list, and redacted body |
 | Mail | `redctx_mail_thread` | Every indexed message linked to one message, oldest first |
-| Mail | `redctx_mail_attachment` | One attachment's redacted text (`text/*`, or documents with `--documents`) |
+| Mail | `redctx_mail_attachment` | One attachment's redacted text (`text/*`, or documents with `--documents`), or a forwarded message |
 | Write | `redctx_submit_doc` | Rehydrates and writes a drafted document; listed only with `--enable-writes` |
 
 Each tool's MCP description says when to use it instead of its siblings, what
@@ -1437,7 +1437,8 @@ The MCP server exposes the same flow with:
 - `redctx_mail_thread` (`ref`, `max_messages` 1-50, default 20,
   `include_quoted`, `max_body_chars`): the messages linked by Message-ID,
   In-Reply-To, and References, oldest first.
-- `redctx_mail_attachment` (`ref`, `max_chars`, default 30000).
+- `redctx_mail_attachment` (`ref`, `max_chars`, default 30000,
+  `include_quoted` for forwarded messages).
 - `redctx_retrieve` with `source: "mail"`.
 
 Every mail tool is always listed, like the GitHub tools; with no mailbox
@@ -1544,6 +1545,28 @@ salt.
   extracted only with `--documents` (see
   [Optional Document Extraction](#optional-document-extraction)); other
   types are refused with `Unsupported attachment type.`.
+- **Forwarded messages** (`message/rfc822` and `message/global`
+  attachments, base64- or quoted-printable-encoded ones included) render
+  like `redctx_mail_read`, after `attachment: <ref>` and
+  `nested_message_depth: <n>`, without message, mailbox, or thread refs:
+  a forwarded copy's Message-ID is sender-controlled, so it never becomes a
+  ref. Their attachments have refs like `@m_<id>/2/1`, up to three forwarded
+  levels deep; a deeper message fails with `Nested message depth limit
+  exceeded.`. Names and addresses from a forwarded message's headers redact
+  its body for that call only and never join the identity list:
+
+  ```text
+  attachment: @m_f3b825674b21/2
+  nested_message_depth: 1
+  date: 2026-09-30T08:00:00Z
+  from: [PERSON_3c0d1a6e9b5f27a84e61c0f3d9b2a7e5] <[EMAIL_8f14e45fceea167a5a36dedd4bea2543]>
+  untrusted_subject: ledger review
+  attachments: 1
+  attachment 1: @m_f3b825674b21/2/1 type=text/plain size=31 name=[ENTITY_d6c087cb6480f41446351fe89c615ea9].[ENTITY_cb6ea77cd155e0ddd965d049a662b5a7]
+
+  body_untrusted_external:
+  [PERSON_3c0d1a6e9b5f27a84e61c0f3d9b2a7e5] here: the ledger is final.
+  ```
 - **Mail is untrusted external content.** Output uses fixed labels
   (`untrusted_subject`, `body_untrusted_external:`,
   `attachment_untrusted_external:`), retrieval passages carry
@@ -1580,6 +1603,9 @@ message within its mailbox's `max_message_bytes`, and the 30 s deadline (CLI
 - Reads: `max_message_bytes` per message; `limit` and `offset` for lists; at
   most 50 messages per thread call; `max_body_chars` and `max_chars` for
   output; the document extraction limits for document attachments.
+- Forwarded messages: read within their outer message's `max_message_bytes`,
+  at most three levels deep, with at most 256 KiB of headers each. They are
+  not ranked by mail retrieval.
 - Date filters are UTC days (`YYYY-MM-DD`, inclusive) and leave out messages
   without a parseable date.
 

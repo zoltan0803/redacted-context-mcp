@@ -250,6 +250,20 @@ claim of hard OS isolation.
 - Attachment MIME types are redacted as content, and attachment filenames
   are path-redacted with every remaining word token of three or more
   characters in any script redacted too.
+- Forwarded (`message/rfc822` and `message/global`) attachments render with
+  the same header allow-list, structural placeholders, and untrusted labels
+  as top-level messages, under `attachment:` and `nested_message_depth:`.
+  Their Message-ID, In-Reply-To, and References never become refs and never
+  appear in output, and they are addressed only by attachment refs.
+- Nested messages are never indexed, listed, threaded, retrieved, or
+  harvested into the global identity list. A call that reads through one
+  adds the address-header identities of the nested messages on its ref's
+  path as body terms in an uncached, call-local redactor whose links come
+  from the global identities only; no other call's output changes.
+- Nested messages are readable three levels deep, and a nested header block
+  is capped at 256 KiB; exceeding either fails closed with a fixed message.
+  A path through anything but a readable nested message is an unknown
+  reference.
 - A harvested name that contains a configured client or organization term
   is matched before the configured terms, so the term cannot split the name
   and leave the rest of it raw.
