@@ -28,6 +28,11 @@
   Before, `Attendees: Avery, Kim, Al` left `Kim` and `Al` raw in both modes,
   because the identity-line pass only matched capitalized words of four or more
   letters.
+- Fixes a leak of domains at the end of a sentence. A domain directly followed
+  by a period, as in `connect to db01.internal.example.`, was not redacted at
+  all in either mode, because the domain pattern refused any following `.`. It
+  now matches unless another label follows the period, so `a.example.com.au`
+  is treated as before.
 
 ## 0.10.0 — 2026-10-15
 

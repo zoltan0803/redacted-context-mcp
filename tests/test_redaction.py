@@ -74,6 +74,20 @@ Domain: {raw_values[10]}
         self.assertRegex(redacted, r"\[SERVICE_ACCOUNT_[0-9a-f]{32}\]")
 
 
+class DomainBoundaryTest(unittest.TestCase):
+    def test_domain_at_the_end_of_a_sentence_is_redacted(self) -> None:
+        for mode in ("balanced", "strict"):
+            for end in (".", ".\r\n", ". Then", "..", "!"):
+                with self.subTest(mode=mode, end=end):
+                    redactor = Redactor(RedactionConfig(salt="test-salt"), mode=mode)
+                    domain = redactor.placeholder("DOMAIN", "db01.internal.example")
+
+                    self.assertEqual(
+                        redactor.redact(f"connect to db01.internal.example{end}"),
+                        f"connect to {domain}{end}",
+                    )
+
+
 class ProperNameLineBreakTest(unittest.TestCase):
     def test_blank_line_ends_a_proper_name(self) -> None:
         for newline in ("\n", "\r\n", "\r"):
