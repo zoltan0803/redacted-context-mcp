@@ -18,12 +18,16 @@ Contact avery@example.com about PROJECT-LANTERN-042.
 Agent-visible result:
 
 ```text
-Client [ORG_a81f29d4a9c1e672540f68afc10d22c7] uses [DOMAIN_d12c88e1f730065c97d3f82f06d1188c].
-Contact [EMAIL_711ae704108cd6e952dcb27f0d6e999a] about [SENSITIVE_45f80ab22bc94e105a93aa830c7d3b9c].
+Client [ORG_a81f29d4a9c1e672540f68afc10d22c7] uses [DOMAIN_d12c88e1f730065c97d3f82f06d1188c]
+[ENTITY_6775c54c5116ff547754d1ac0ec5c577] [EMAIL_711ae704108cd6e952dcb27f0d6e999a] about [SENSITIVE_45f80ab22bc94e105a93aa830c7d3b9c].
 ```
 
 The placeholder values above are illustrative. Real values are deterministic
 for one local vault salt and will differ.
+
+This is the default `strict` mode, which also redacts capitalized words and
+acronyms that are not on the allow list, such as `Contact` here. `--mode
+balanced` skips those two passes and leaves `Contact` as it is.
 
 ## How It Works
 

@@ -74,6 +74,55 @@ Domain: {raw_values[10]}
         self.assertRegex(redacted, r"\[SERVICE_ACCOUNT_[0-9a-f]{32}\]")
 
 
+class DomainBoundaryTest(unittest.TestCase):
+    def test_domain_at_the_end_of_a_sentence_is_redacted(self) -> None:
+        for mode in ("balanced", "strict"):
+            for end in (".", ".\r\n", ". Then", "..", "!"):
+                with self.subTest(mode=mode, end=end):
+                    redactor = Redactor(RedactionConfig(salt="test-salt"), mode=mode)
+                    domain = redactor.placeholder("DOMAIN", "db01.internal.example")
+
+                    self.assertEqual(
+                        redactor.redact(f"connect to db01.internal.example{end}"),
+                        f"connect to {domain}{end}",
+                    )
+
+    def test_country_code_domains_are_redacted(self) -> None:
+        values = ("ugyfel.hu", "client.co.uk", "db.acme.de", "a.example.com.au", "Acme.it", "firma.pl")
+        for mode in ("balanced", "strict"):
+            for value in values:
+                with self.subTest(mode=mode, value=value):
+                    redactor = Redactor(RedactionConfig(salt="test-salt"), mode=mode)
+                    domain = redactor.placeholder("DOMAIN", value)
+
+                    self.assertEqual(redactor.redact(f"see {value} now"), f"see {domain} now")
+                    self.assertEqual(redactor.redact(f"see {value}."), f"see {domain}.")
+
+    def test_email_and_url_keep_their_category_on_country_code_domains(self) -> None:
+        redactor = Redactor(RedactionConfig(salt="test-salt"), mode="balanced")
+
+        self.assertEqual(
+            redactor.redact("mail me@ugyfel.hu or open https://ugyfel.hu/x"),
+            f"mail {redactor.placeholder('EMAIL', 'me@ugyfel.hu')} or open "
+            f"{redactor.placeholder('URL', 'https://ugyfel.hu/x')}",
+        )
+
+    def test_file_names_and_code_are_not_country_code_domains(self) -> None:
+        texts = (
+            "see README.md and main.rs",
+            "user.id and request.user.id",
+            "model.to(device) then df.at[0]",
+            "done.It was late",
+            "pd.NA here",
+            "app.db and index.js",
+            "e.g. this, i.e. that",
+        )
+        redactor = Redactor(RedactionConfig(salt="test-salt"), mode="balanced")
+        for text in texts:
+            with self.subTest(text=text):
+                self.assertEqual(redactor.redact(text), text)
+
+
 class ProperNameLineBreakTest(unittest.TestCase):
     def test_blank_line_ends_a_proper_name(self) -> None:
         for newline in ("\n", "\r\n", "\r"):
@@ -119,7 +168,7 @@ class HeadingRedactionTest(unittest.TestCase):
         self.assertEqual(HEADING_LINE_RE.findall("a\r## B\r\n# C\nd ## E\n"), ["## B", "# C"])
 
     def test_generic_heading_words_are_kept_in_both_modes(self) -> None:
-        text = "# Project Status Update\n\n## Next Steps\n\n### Open Questions\n\n## Budget\n"
+        text = "# Project Status Update\n\n## Next Steps\n\n### Open Questions\n\n## Budget\n\n# Demo Contacts\n"
         for mode in ("balanced", "strict"):
             with self.subTest(mode=mode):
                 self.assertEqual(Redactor(RedactionConfig(salt="test-salt"), mode=mode).redact(text), text)
