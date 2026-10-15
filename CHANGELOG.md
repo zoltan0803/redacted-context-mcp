@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.0 — 2026-10-15
 
 - Adds alias groups. `[redaction.aliases]` maps a canonical value (a
   configured client, organization, person, or term) to other forms of the same
@@ -76,6 +76,9 @@
   per-file byte limit (and, for search and bundle, its total byte limit) with
   their defaults instead of stating a fixed 5 MB, so agents are not misled when
   `--max-raw-bytes-per-file` or `--max-total-raw-bytes` is changed.
+- The package is now classified as `Development Status :: 4 - Beta` instead
+  of `3 - Alpha`. The configuration format, CLI, and MCP tools are stable
+  enough for everyday use, though they may still change before 1.0.
 
 ## 0.9.0 — 2026-10-10
 
