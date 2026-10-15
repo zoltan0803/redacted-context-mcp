@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.1 — 2026-10-15
 
 - A run of capitalized words redacted as one proper name no longer crosses a
   blank line. Before, `Next Steps`, a blank line, and `Contact the vendor`
