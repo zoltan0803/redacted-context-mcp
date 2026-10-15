@@ -481,7 +481,9 @@ Redaction combines configured exact terms with conservative generic patterns:
 
 - configured clients, organizations, people, and sensitive terms;
 - email addresses, URLs, phone numbers, handles, secrets, tokens, common
-  personal identifiers, IP addresses, UUIDs, and domains;
+  personal identifiers, IP addresses, UUIDs, and domains (a short list of
+  generic endings plus two-letter country codes, without the ones that are
+  mostly file extensions, such as `md` or `rs`);
 - organization suffix patterns;
 - multi-token proper names, whose words may wrap onto the next line but never
   cross a blank line;
