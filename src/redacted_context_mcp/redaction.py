@@ -25,9 +25,12 @@ from .defaults import (
     EMAIL_RE,
     GENERIC_SECRET_RE,
     HANDLE_RE,
+    HEADING_LINE_RE,
+    HEADING_TERMS,
     HEX_SECRET_RE,
     IBAN_RE,
     IDENTITY_LINE_RE,
+    IDENTITY_NAME_RE,
     IP_RE,
     IPV6_RE,
     MAC_RE,
@@ -130,6 +133,27 @@ class RedactionCollisionError(RuntimeError):
 
 def preserved_line_breaks(value: str) -> str:
     return "".join(LINE_BREAK_RE.findall(value))
+
+
+def sub_by_heading(
+    pattern: re.Pattern[str],
+    text: str,
+    replace: Callable[[re.Match[str], bool], str],
+) -> str:
+    """Substitute ``pattern`` in heading lines and in the text between them separately.
+
+    No match spans a markdown heading line and the lines around it, and
+    ``replace`` is told whether its match lies on a heading line.
+    """
+    pieces: list[str] = []
+    position = 0
+    for heading in HEADING_LINE_RE.finditer(text):
+        start, end = heading.span()
+        pieces.append(pattern.sub(lambda match: replace(match, False), text[position:start]))
+        pieces.append(pattern.sub(lambda match: replace(match, True), text[start:end]))
+        position = end
+    pieces.append(pattern.sub(lambda match: replace(match, False), text[position:]))
+    return "".join(pieces)
 
 
 class RedactionSession:
@@ -295,6 +319,9 @@ class Redactor:
         allow_terms = set(DEFAULT_ALLOW_TERMS) | set(MONTHS_AND_DAYS) | set(self.config.allow)
         self.allow_terms = {term for term in allow_terms if term}
         self.allow_lookup = {term.casefold() for term in self.allow_terms}
+        self.heading_lookup = (
+            self.allow_lookup | HEADING_TERMS | {word.casefold() for word in COMMON_CAPITALIZED_WORDS}
+        )
         self.allow_pattern = compile_terms_pattern(self.allow_terms)
         # Declared aliases of an alias group: each normalized alias maps to
         # its group's entity hex (the hex of the canonical value's ordinary
@@ -365,24 +392,29 @@ class Redactor:
             text = self.allow_pattern.sub(lambda match: session.stash_allowed(match.group(0)), text)
 
         text = ORG_SUFFIX_RE.sub(lambda match: stash("ORG", match.group(0)), text)
-        text = MULTI_PROPER_RE.sub(
-            lambda match: self._replace_multi_proper(match, session, preserve_line_count),
+        text = sub_by_heading(
+            MULTI_PROPER_RE,
             text,
+            lambda match, heading: self._replace_multi_proper(match, session, preserve_line_count, heading),
         )
-        text = SPEAKER_LABEL_RE.sub(lambda match: stash("PERSON", match.group(1)), text)
+        # Identity lines go before speaker labels: a label such as "Owner:" at
+        # the start of a line would otherwise be taken for a speaker's name,
+        # and the names after it would never be redacted.
         text = IDENTITY_LINE_RE.sub(
             lambda match: self._redact_identity_line(match, session, preserve_line_count),
             text,
         )
+        text = SPEAKER_LABEL_RE.sub(lambda match: stash("PERSON", match.group(1)), text)
 
         if self.mode == "strict":
             text = ACRONYM_RE.sub(
                 lambda match: self._replace_acronym(match, session, preserve_line_count),
                 text,
             )
-            text = TITLECASE_TOKEN_RE.sub(
-                lambda match: self._replace_titlecase(match, session, preserve_line_count),
+            text = sub_by_heading(
+                TITLECASE_TOKEN_RE,
                 text,
+                lambda match, heading: self._replace_titlecase(match, session, preserve_line_count, heading),
             )
 
         # Plugged-detector nominations apply after every baseline stage, so
@@ -712,22 +744,37 @@ class Redactor:
                 preserve_line_count=preserve_line_count,
             )
 
-        return f"{match.group(1)}{match.group(2)}:{match.group(3)}{TITLECASE_TOKEN_RE.sub(replace_name, match.group(4))}"
+        # The label is generic vocabulary; stashing it keeps the speaker-label
+        # and strict-mode passes from redacting it.
+        label = session.stash_allowed(match.group(1))
+        return f"{label}{match.group(2)}:{match.group(3)}{IDENTITY_NAME_RE.sub(replace_name, match.group(4))}"
 
     def _replace_multi_proper(
         self,
         match: re.Match[str],
         session: RedactionSession,
         preserve_line_count: bool,
+        heading: bool = False,
     ) -> str:
         value = match.group(0)
         if value.casefold() in self.allow_lookup:
             return value
-        return session.stash_placeholder(
-            self.placeholder("PERSON", value),
-            value,
+        start, end = 0, len(value)
+        if heading:
+            # Headings capitalize generic words by convention: keep heading
+            # words at either end of the run and redact from the first other
+            # word to the last.
+            words = [word for word in re.finditer(r"\S+", value) if word.group(0).casefold() not in self.heading_lookup]
+            if not words:
+                return value
+            start, end = words[0].start(), words[-1].end()
+        name = value[start:end]
+        placeholder = session.stash_placeholder(
+            self.placeholder("PERSON", name),
+            name,
             preserve_line_count=preserve_line_count,
         )
+        return f"{value[:start]}{placeholder}{value[end:]}"
 
     def _replace_acronym(
         self,
@@ -749,9 +796,11 @@ class Redactor:
         match: re.Match[str],
         session: RedactionSession,
         preserve_line_count: bool,
+        heading: bool = False,
     ) -> str:
         value = match.group(0)
-        if value.casefold() in self.allow_lookup or value in COMMON_CAPITALIZED_WORDS:
+        lookup = self.heading_lookup if heading else self.allow_lookup
+        if value.casefold() in lookup or value in COMMON_CAPITALIZED_WORDS:
             return value
         return session.stash_placeholder(
             self.placeholder("ENTITY", value),
