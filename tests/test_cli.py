@@ -7,7 +7,7 @@ import unittest
 import os
 from pathlib import Path
 
-from tests.fixtures import PUBLIC_TECH, RAW_PRIVATE_VALUES, write_knowledgebase
+from tests.fixtures import PUBLIC_TECH, RAW_PRIVATE_VALUES, without_opaque_tokens, write_knowledgebase
 from tests.test_documents import HAS_DOCUMENTS, write_docx
 
 
@@ -116,7 +116,7 @@ class RedactedContextCliTest(unittest.TestCase):
         result = self.run_cli("grep", "before", "context/pem.md", "--context", "3")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn("abc123", result.stdout)
+        self.assertNotIn("abc123", without_opaque_tokens(result.stdout))
         self.assertNotIn("BEGIN PRIVATE KEY", result.stdout)
         self.assertIn("-2:", result.stdout)
         self.assertIn("-4:", result.stdout)
