@@ -246,6 +246,115 @@ COMMON_CAPITALIZED_WORDS = {
     "Without",
 }
 
+# Generic words that markdown headings capitalize by convention. On a heading
+# line a run of capitalized words keeps these at either end and redacts the
+# rest, and strict mode keeps them as single words. Words that are common
+# given names or surnames stay out.
+HEADING_TERMS = {
+    "action",
+    "actions",
+    "agenda",
+    "appendix",
+    "approach",
+    "assumptions",
+    "background",
+    "blockers",
+    "budget",
+    "cases",
+    "changed",
+    "changelog",
+    "changes",
+    "checklist",
+    "conclusion",
+    "conclusions",
+    "configuration",
+    "constraints",
+    "contact",
+    "contacts",
+    "contents",
+    "contributing",
+    "costs",
+    "criteria",
+    "dependencies",
+    "deployment",
+    "details",
+    "discussion",
+    "documentation",
+    "examples",
+    "features",
+    "feedback",
+    "findings",
+    "follow-up",
+    "follow-ups",
+    "getting",
+    "glossary",
+    "goals",
+    "highlights",
+    "history",
+    "how",
+    "installation",
+    "introduction",
+    "issues",
+    "items",
+    "key",
+    "known",
+    "learned",
+    "lessons",
+    "license",
+    "limitations",
+    "links",
+    "milestones",
+    "minutes",
+    "mitigations",
+    "next",
+    "non-goals",
+    "notes",
+    "objectives",
+    "open",
+    "options",
+    "outcomes",
+    "owner",
+    "owners",
+    "plan",
+    "points",
+    "prerequisites",
+    "problem",
+    "project",
+    "questions",
+    "quick",
+    "reference",
+    "references",
+    "related",
+    "release",
+    "requirements",
+    "resources",
+    "results",
+    "retrospective",
+    "review",
+    "roadmap",
+    "roles",
+    "rollout",
+    "schedule",
+    "setup",
+    "start",
+    "started",
+    "status",
+    "steps",
+    "success",
+    "support",
+    "table",
+    "tasks",
+    "testing",
+    "timeline",
+    "troubleshooting",
+    "update",
+    "updates",
+    "usage",
+    "use",
+    "what",
+    "why",
+}
+
 PATH_ALLOW_TERMS = {
     "archive",
     "assessment",
@@ -438,6 +547,10 @@ MULTI_PROPER_RE = re.compile(
     r"\b(?:[A-Z][A-Za-z'.-]{2,}|[A-Z]\.)"
     rf"(?:{NAME_GAP}(?:[A-Z][A-Za-z'.-]{{2,}}|[A-Z]\.)){{1,4}}\b"
 )
+# A markdown ATX heading line: up to three spaces of indent, one to six "#",
+# then a space, a tab or the end of the line. Line breaks are the ones line
+# counts use: \r\n, \r and \n.
+HEADING_LINE_RE = re.compile(r"(?:\A|(?<=[\r\n])) {0,3}#{1,6}(?![^ \t\r\n])[^\r\n]*")
 SPEAKER_LABEL_RE = re.compile(r"(?m)^([A-Z][A-Za-z'.-]{2,})(?=[ \t]*:)")
 IDENTITY_LINE_RE = re.compile(
     r"(?im)\b(attendees?|participants?|stakeholders?|owners?|contacts?|authors?|"
@@ -604,6 +717,7 @@ GENERIC_PROBE_STOPWORDS = frozenset(
         DEFAULT_ALLOW_TERMS
         | PATH_ALLOW_TERMS
         | COMMON_CAPITALIZED_WORDS
+        | HEADING_TERMS
         | MONTHS_AND_DAYS
         | GENERIC_ORG_WORDS
         | NON_PERSON_NAME_WORDS

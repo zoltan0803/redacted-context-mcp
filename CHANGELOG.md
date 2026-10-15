@@ -6,6 +6,15 @@
   blank line. Before, `Next Steps`, a blank line, and `Contact the vendor`
   became one `PERSON` placeholder that swallowed the first word of the next
   paragraph. A name wrapped onto the next line is still one placeholder.
+- Markdown heading lines (`#` to `######`) are redacted more narrowly. Headings
+  capitalize generic words by convention, so `## Next Steps` or `# Project
+  Status Update` used to become a `PERSON` placeholder. On a heading line a run
+  of capitalized words now keeps built-in heading words such as `Next`,
+  `Steps`, `Contact`, or `Budget` at either end and redacts the rest, so
+  `## Contact Avery Example` becomes `## Contact [PERSON_…]`, and strict mode
+  keeps those words on their own too. A run is never redacted across a heading
+  line's end any more. Outside headings nothing changes, and plugged detectors
+  can still redact any heading word they nominate.
 
 ## 0.10.0 — 2026-10-15
 

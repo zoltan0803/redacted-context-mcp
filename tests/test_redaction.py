@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import unittest
 
+from redacted_context_mcp.defaults import HEADING_LINE_RE
 from redacted_context_mcp.models import RedactionConfig
 from redacted_context_mcp.paths import path_id
 from redacted_context_mcp.redaction import Redactor
+from tests.fixtures import FakeDetector
 
 
 class RedactionBenchmarkTest(unittest.TestCase):
@@ -102,6 +104,73 @@ class ProperNameLineBreakTest(unittest.TestCase):
         self.assertEqual(
             redactor.redact("We met Avery\nExample today.", preserve_line_count=True),
             f"We met {placeholder}\n today.",
+        )
+
+
+class HeadingRedactionTest(unittest.TestCase):
+    def test_heading_line_pattern(self) -> None:
+        for line in ("# Notes", "###### Notes", "   ## Notes", "##", "## \t", "#\tNotes"):
+            with self.subTest(line=line):
+                self.assertIsNotNone(HEADING_LINE_RE.fullmatch(line))
+        for line in ("#Notes", "####### Notes", "    ## Notes", "\t## Notes", "text ## Notes"):
+            with self.subTest(line=line):
+                self.assertIsNone(HEADING_LINE_RE.fullmatch(line))
+                self.assertEqual(HEADING_LINE_RE.findall(line), [])
+        self.assertEqual(HEADING_LINE_RE.findall("a\r## B\r\n# C\nd ## E\n"), ["## B", "# C"])
+
+    def test_generic_heading_words_are_kept_in_both_modes(self) -> None:
+        text = "# Project Status Update\n\n## Next Steps\n\n### Open Questions\n\n## Budget\n"
+        for mode in ("balanced", "strict"):
+            with self.subTest(mode=mode):
+                self.assertEqual(Redactor(RedactionConfig(salt="test-salt"), mode=mode).redact(text), text)
+
+    def test_proper_name_does_not_leave_a_heading_line(self) -> None:
+        for mode in ("balanced", "strict"):
+            with self.subTest(mode=mode):
+                redactor = Redactor(RedactionConfig(salt="test-salt"), mode=mode)
+                person = redactor.placeholder("PERSON", "Avery Example")
+
+                self.assertEqual(
+                    redactor.redact("### Open Questions\nAvery Example joined late.\n"),
+                    f"### Open Questions\n{person} joined late.\n",
+                )
+
+    def test_names_in_headings_are_still_redacted(self) -> None:
+        for mode in ("balanced", "strict"):
+            with self.subTest(mode=mode):
+                redactor = Redactor(RedactionConfig(salt="test-salt"), mode=mode)
+                person = redactor.placeholder("PERSON", "Avery Example")
+                codename = redactor.placeholder("PERSON", "Harbor")
+
+                self.assertEqual(redactor.redact("## Avery Example\n"), f"## {person}\n")
+                self.assertEqual(redactor.redact("## Contact Avery Example\n"), f"## Contact {person}\n")
+                self.assertEqual(redactor.redact("## Project Harbor Rollout\n"), f"## Project {codename} Rollout\n")
+
+    def test_strict_mode_redacts_single_names_in_headings(self) -> None:
+        redactor = Redactor(RedactionConfig(salt="test-salt"), mode="strict")
+        entity = redactor.placeholder("ENTITY", "Avery")
+
+        self.assertEqual(redactor.redact("## Notes for Avery\n"), f"## Notes for {entity}\n")
+
+    def test_heading_words_stay_redacted_outside_headings(self) -> None:
+        redactor = Redactor(RedactionConfig(salt="test-salt"), mode="balanced")
+        person = redactor.placeholder("PERSON", "Next Steps")
+
+        self.assertEqual(redactor.redact("#Next Steps\n"), f"#{person}\n")
+        self.assertEqual(redactor.redact("    ## Next Steps\n"), f"    ## {person}\n")
+        self.assertEqual(redactor.redact("see Next Steps below.\n"), f"see {person} below.\n")
+
+    def test_detectors_still_redact_kept_heading_words(self) -> None:
+        config = RedactionConfig(salt="test-salt")
+        detector = FakeDetector({"Next Steps": "SENSITIVE", "zorvane": "PERSON"})
+        redactor = Redactor(config, mode="balanced", detectors=(detector,))
+        expected = Redactor(config)
+
+        self.assertEqual(
+            redactor.redact("## Next Steps\n## Contact Avery Example\nask zorvane\n"),
+            f"## {expected.placeholder('SENSITIVE', 'Next Steps')}\n"
+            f"## Contact {expected.placeholder('PERSON', 'Avery Example')}\n"
+            f"ask {expected.placeholder('PERSON', 'zorvane')}\n",
         )
 
 
