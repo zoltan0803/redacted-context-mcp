@@ -232,6 +232,26 @@ class IdentityLabelTest(unittest.TestCase):
                     f"Owner: {avery}\n  contacts : {jordan}\n",
                 )
 
+    def test_label_after_other_capitalized_words_is_kept(self) -> None:
+        cases = (
+            ("Project Owner: Bob\n", "Owner: ", "Bob"),
+            ("Primary Contact: Avery Example\n", "Contact: ", "Avery Example"),
+            ("Key Stakeholders : Kim\n", "Stakeholders : ", "Kim"),
+        )
+        for mode in ("balanced", "strict"):
+            for text, label, name in cases:
+                with self.subTest(mode=mode, text=text):
+                    redactor = Redactor(RedactionConfig(salt="test-salt"), mode=mode)
+                    redacted = redactor.redact(text)
+
+                    self.assertTrue(redacted.endswith(f"{label}{redactor.placeholder('PERSON', name)}\n"), redacted)
+
+        redactor = Redactor(RedactionConfig(salt="test-salt"), mode="balanced")
+        self.assertEqual(
+            redactor.redact("Project Owner: Bob\n"),
+            f"Project Owner: {redactor.placeholder('PERSON', 'Bob')}\n",
+        )
+
     def test_upper_case_label_survives_strict_mode(self) -> None:
         redactor = Redactor(RedactionConfig(salt="test-salt"), mode="strict")
 

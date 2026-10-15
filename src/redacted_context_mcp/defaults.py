@@ -546,11 +546,11 @@ IDENTITY_LABEL = (
 )
 # Whitespace between the words of a proper name: any amount on one line, or one
 # line break so a name wrapped onto the next line still matches. A blank line
-# ends the name, and so does a line that starts with an identity label, which
-# the identity-line pass needs to see.
+# ends the name, and so does an identity label and its colon ("Project Owner:"
+# or a label line after a name), which the identity-line pass needs to see.
 NAME_GAP = (
-    r"(?:[^\S\r\n]+|[^\S\r\n]*(?:\r\n|\r|\n)[^\S\r\n]*"
-    rf"(?!(?i:{IDENTITY_LABEL})\b[ \t]*:))"
+    r"(?:[^\S\r\n]+|[^\S\r\n]*(?:\r\n|\r|\n)[^\S\r\n]*)"
+    rf"(?!(?i:{IDENTITY_LABEL})\b[ \t]*:)"
 )
 MULTI_PROPER_RE = re.compile(
     r"\b(?:[A-Z][A-Za-z'.-]{2,}|[A-Z]\.)"
