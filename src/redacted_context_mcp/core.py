@@ -153,11 +153,21 @@ from .regex_safety import (
     match_regex_lines,
     regex_backtracking_violation,
 )
+from .mail import MAIL_FORMATS, MAIL_LIST_MAX_LIMIT, MAIL_SAFE_MESSAGES, MAIL_THREAD_MAX_MESSAGES, MailSource
 from .rendering import (
+    MAIL_RETRIEVE_MAX_MESSAGES,
+    MAIL_RETRIEVE_MAX_TOTAL_BYTES,
+    MailRedactorCache,
     github_issue_detail_text,
     github_issue_list_text,
     github_issue_search_text,
     github_repos_text,
+    mail_attachment_text,
+    mail_list_text,
+    mail_read_text,
+    mail_retrieve_text,
+    mail_sources_text,
+    mail_thread_text,
     truncate_redacted,
     truncate_text,
 )
@@ -441,6 +451,15 @@ def command_stat(args: argparse.Namespace, ctx: RedactedContext, redactor: Redac
     return 0
 
 def command_retrieve(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
+    if getattr(args, "source", "filesystem") == "mail":
+        # Mail has its own message, byte, and deadline budget; the filesystem
+        # file and byte limits do not apply.
+        print(mail_retrieve_text(
+            mail_source_from_args(args, redactor),
+            redactor, args.query, paths=args.paths, globs=args.glob,
+            max_results=args.max_results, max_chars=args.max_chars, seconds=getattr(args, "max_seconds", None),
+        ), end="")
+        return 0
     print(retrieve(
         ctx, redactor, args.query, paths=args.paths, globs=args.glob,
         budget=operation_budget_from_args(args), max_results=args.max_results, max_chars=args.max_chars,
@@ -710,6 +729,11 @@ def command_doctor(args: argparse.Namespace, ctx: RedactedContext, redactor: Red
     print(f"allow_terms: {len(redactor.allow_terms)}")
     print(f"excluded_dirs: {len(ctx.exclude_dirs)}")
     print(f"excluded_globs: {len(ctx.exclude_globs)}")
+    # Counts only: mailbox aliases and paths are never printed here.
+    mailboxes = list(redactor.config.mail_sources.values())
+    print(f"mail_sources: {len(mailboxes)}")
+    for mail_format in MAIL_FORMATS:
+        print(f"mail_sources_{mail_format}: {sum(1 for mailbox in mailboxes if mailbox.format == mail_format)}")
     if redactor.detectors:
         # Names and versions only: detector arguments may be private paths.
         listed = ", ".join(f"{detector.name} {detector.version}" for detector in redactor.detectors)
@@ -1221,6 +1245,70 @@ def command_github_search(args: argparse.Namespace, ctx: RedactedContext, redact
     return 0 if text else 1
 
 
+def mail_source_from_args(args: argparse.Namespace, redactor: Redactor) -> MailSource | None:
+    return MailSource.from_config(redactor.config, documents=getattr(args, "documents", False))
+
+
+def command_mail_sources(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
+    print(mail_sources_text(mail_source_from_args(args, redactor)), end="")
+    return 0
+
+
+def command_mail_list(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
+    mailbox = args.mailbox
+    if args.mailbox_option is not None:
+        if mailbox is not None and mailbox != args.mailbox_option:
+            raise SystemExit("Pass the mailbox alias once.")
+        mailbox = args.mailbox_option
+    text = mail_list_text(
+        mail_source_from_args(args, redactor),
+        redactor,
+        mailbox=mailbox,
+        limit=args.limit,
+        offset=args.offset,
+        since=args.since,
+        until=args.until,
+    )
+    if not text:
+        print("No matches.")
+        return 1
+    print(text, end="")
+    return 0
+
+
+def command_mail_read(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
+    print(mail_read_text(
+        mail_source_from_args(args, redactor),
+        redactor,
+        ref=args.ref,
+        include_quoted=args.include_quoted,
+        max_body_chars=args.max_body_chars,
+    ), end="")
+    return 0
+
+
+def command_mail_thread(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
+    print(mail_thread_text(
+        mail_source_from_args(args, redactor),
+        redactor,
+        ref=args.ref,
+        max_messages=args.max_messages,
+        include_quoted=args.include_quoted,
+        max_body_chars=args.max_body_chars,
+    ), end="")
+    return 0
+
+
+def command_mail_attachment(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
+    print(mail_attachment_text(
+        mail_source_from_args(args, redactor),
+        redactor,
+        ref=args.ref,
+        max_chars=args.max_chars,
+    ), end="")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Read local knowledgebase context through deterministic redaction.",
@@ -1304,6 +1392,12 @@ def build_parser() -> argparse.ArgumentParser:
     retrieve_parser.add_argument("--glob", action="append", default=[])
     retrieve_parser.add_argument("--max-results", type=int, default=8)
     retrieve_parser.add_argument("--max-chars", type=int, default=12_000)
+    retrieve_parser.add_argument(
+        "--source",
+        choices=("filesystem", "mail"),
+        default="filesystem",
+        help="documents to rank; for mail, paths are mailbox aliases or @m_ refs and --glob is refused",
+    )
     add_budget_arguments(retrieve_parser)
     retrieve_parser.set_defaults(func=command_retrieve, max_files=DEFAULT_MAX_FILES, max_seconds=DEFAULT_MCP_SEARCH_SECONDS)
 
@@ -1487,6 +1581,42 @@ def build_parser() -> argparse.ArgumentParser:
     github_search_parser.add_argument("--state", choices=("open", "closed", "all"), default="open")
     github_search_parser.add_argument("--limit", type=int, default=30)
     github_search_parser.set_defaults(func=command_github_search)
+
+    mail_parser = subparsers.add_parser(
+        "mail",
+        help="read local mailbox exports through configured mailbox aliases and redaction",
+    )
+    mail_subparsers = mail_parser.add_subparsers(dest="mail_command", required=True)
+
+    mail_sources_parser = mail_subparsers.add_parser("sources", help="list configured mailbox aliases and formats")
+    mail_sources_parser.set_defaults(func=command_mail_sources)
+
+    mail_list_parser = mail_subparsers.add_parser("list", help="list redacted messages, newest first")
+    mail_list_parser.add_argument("mailbox", nargs="?", help="configured mailbox alias; default all mailboxes")
+    mail_list_parser.add_argument("--mailbox", dest="mailbox_option", help="configured mailbox alias")
+    mail_list_parser.add_argument("--limit", type=int, default=30)
+    mail_list_parser.add_argument("--offset", type=int, default=0)
+    mail_list_parser.add_argument("--since", default="", help="first UTC day to include, YYYY-MM-DD")
+    mail_list_parser.add_argument("--until", default="", help="last UTC day to include, YYYY-MM-DD")
+    mail_list_parser.set_defaults(func=command_mail_list)
+
+    mail_read_parser = mail_subparsers.add_parser("read", help="read one redacted message by @m_ ref")
+    mail_read_parser.add_argument("ref", help="opaque @m_<hex> message ref")
+    mail_read_parser.add_argument("--include-quoted", action="store_true", help="keep quoted replies and signatures")
+    mail_read_parser.add_argument("--max-body-chars", type=int, default=30_000)
+    mail_read_parser.set_defaults(func=command_mail_read)
+
+    mail_thread_parser = mail_subparsers.add_parser("thread", help="read the redacted thread of one message")
+    mail_thread_parser.add_argument("ref", help="opaque @m_<hex> message ref")
+    mail_thread_parser.add_argument("--max-messages", type=int, default=20)
+    mail_thread_parser.add_argument("--include-quoted", action="store_true", help="keep quoted replies and signatures")
+    mail_thread_parser.add_argument("--max-body-chars", type=int, default=30_000)
+    mail_thread_parser.set_defaults(func=command_mail_thread)
+
+    mail_attachment_parser = mail_subparsers.add_parser("attachment", help="read one redacted text attachment")
+    mail_attachment_parser.add_argument("ref", help="opaque @m_<hex>/<n> attachment ref")
+    mail_attachment_parser.add_argument("--max-chars", type=int, default=30_000)
+    mail_attachment_parser.set_defaults(func=command_mail_attachment)
 
     return parser
 

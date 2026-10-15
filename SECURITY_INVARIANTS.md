@@ -29,10 +29,16 @@ claim of hard OS isolation.
   MCP resources, errors, paths, metadata, or logs.
 - Source adapters return raw content plus opaque references and do not import
   the redaction layer. Every content field they yield (file text and paths,
-  issue titles, bodies, labels, states, and timestamps) is redacted by the
-  CLI/MCP boundary before output; upstream issue numbers and counts are printed
-  only as validated non-negative integers. Source references never contain raw
-  paths, logins, or upstream repository names.
+  issue titles, bodies, labels, states, and timestamps, mail subjects, bodies,
+  display names, addresses, attachment filenames, and attachment text) is
+  redacted by the CLI/MCP boundary before output; upstream issue numbers and
+  counts are printed only as validated non-negative integers, and mail dates
+  only as generated UTC timestamps. Source references never contain raw
+  paths, logins, upstream repository names, Message-IDs, or mailbox storage
+  keys.
+- Text from outside the operator's control (GitHub issues and mail) is
+  labelled as untrusted external content in tool output and in ranked
+  retrieval passages.
 - Multi-line secrets are redacted before search results are split into lines.
 - Dynamic upstream errors are summarized without relaying raw response text.
 - GitHub request errors name only the neutral repo alias and the HTTP status
@@ -203,6 +209,61 @@ claim of hard OS isolation.
   declared still rehydrate. Controlled writes re-redact restored alias forms
   before publication.
 
+## Mail
+
+- Mail access is read-only and local. Mailbox files are opened `rb` only,
+  never through the stdlib `mailbox` classes, and nothing is written, locked,
+  renamed, or flagged; Maildir `new/` messages stay in `new/`. Mailbox bytes,
+  modification times, and directory layout are unchanged by every operation.
+  The mail source makes no network requests.
+- Directory readers skip dot-entries, symlinks, and reparse points, and a
+  mailbox path that is itself a symlink is refused. Unreadable mailboxes fail
+  with input-free messages.
+- Only `Date`, `From`, `Sender`, `Reply-To`, `To`, `Cc`, `Bcc`, and `Subject`
+  are rendered. Every other header value, including `Received`,
+  `Return-Path`, `DKIM-Signature`, `ARC-*`, `Authentication-Results`,
+  `Delivered-To`, `List-*`, and `X-*`, never appears in output; dates are
+  regenerated as UTC.
+- Every display name and address in an address header is replaced by a
+  structural placeholder, whether or not it is configured and whether or not
+  a pattern would match it. A header that does not parse, reports
+  non-obsolete defects, or holds an address without a local part and a
+  domain renders `[unparsed]` and contributes no harvested identity, on
+  every supported Python version.
+- Message, thread, and attachment refs are `@m_<hex>` HMACs over the vault
+  salt. Raw Message-IDs, mailbox paths, storage keys, and filenames never
+  appear in refs or errors, and every mail error is a fixed message.
+- Harvested names and addresses are kept in memory only, in a mail redactor
+  derived per policy with its own placeholder caches. Mail never changes file
+  or GitHub output; configured people, terms, and alias-group links win over
+  harvested links; addresses keep their ordinary `EMAIL` placeholder; and a
+  name seen with more than one address is not linked.
+- Mail content is labelled untrusted (`untrusted_subject`,
+  `body_untrusted_external:`, `attachment_untrusted_external:`, and
+  `untrusted_external` on retrieval passages).
+- Hidden HTML (scripts, styles, `hidden` and inline-hidden elements) and
+  invisible characters (zero-width and bidi format characters, the soft
+  hyphen, the combining grapheme joiner, invisible fillers, variation
+  selectors, and tag characters; the full list is in `ARCHITECTURE.md`) are
+  removed before redaction, so they can neither carry hidden text nor split
+  a name or address.
+- Attachment MIME types are redacted as content, and attachment filenames
+  are path-redacted with every remaining word token of three or more
+  characters in any script redacted too.
+- A harvested name that contains a configured client or organization term
+  is matched before the configured terms, so the term cannot split the name
+  and leave the rest of it raw.
+- Mailbox exports configured under the served root are never listed, read,
+  searched, bundled, or served as resources by the file tools.
+- Each mailbox index is bounded by `max_messages`, a 256 KiB per-message
+  header read, 1 GiB of header bytes, and a deadline; reads by
+  `max_message_bytes`; listing by `limit` and `offset`; threads by a message
+  cap; output by character caps; document attachments by `--documents` and
+  the extraction limits; and mail retrieval by message, byte, and deadline
+  limits. Exceeding a limit fails closed.
+- Live policy reload adds or removes the mail source and drops its indexes
+  and cached mail redactor together with the policy.
+
 ## Write Confinement
 
 - MCP writes are disabled unless explicitly enabled.
@@ -245,6 +306,10 @@ claim of hard OS isolation.
   memory with an unbounded line, including unterminated final lines.
 - GitHub API responses are read up to a fixed byte cap (8 MiB); a larger
   response fails closed with an input-free error.
+- Mail indexes, message reads, lists, threads, bodies, attachments, and mail
+  retrieval are bounded by message counts, byte caps, character caps, and
+  deadlines, and fail closed instead of serving part of a mailbox as if it
+  were complete.
 - MCP resources are cached only after redaction, bounded by bytes, and
   invalidated by file metadata changes, redaction mode/config changes, submit
   writes, or explicit index refresh.

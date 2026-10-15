@@ -9,7 +9,7 @@ import re
 import string
 import threading
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Iterable
 
 from .defaults import (
     ACRONYM_RE,
@@ -23,6 +23,7 @@ from .defaults import (
     DOMAIN_RE,
     DRIVER_ID_RE,
     EMAIL_RE,
+    GENERIC_ORG_WORDS,
     GENERIC_SECRET_RE,
     HANDLE_RE,
     HEADING_LINE_RE,
@@ -34,8 +35,12 @@ from .defaults import (
     IP_RE,
     IPV6_RE,
     MAC_RE,
+    MAX_MAIL_ADDRESS_CHARS,
     MONTHS_AND_DAYS,
     MULTI_PROPER_RE,
+    NON_PERSON_NAME_WORDS,
+    ONE_TIME_CODE_RE,
+    OPAQUE_TOKEN_RE,
     ORG_SUFFIX_RE,
     PASSPORT_RE,
     PATH_ALLOW_TERMS,
@@ -47,6 +52,7 @@ from .defaults import (
     PROMPT_INJECTION_RE,
     RESERVED_PLACEHOLDER_WORDS,
     SALT_ASSIGNMENT_RE,
+    SCHEMELESS_LINK_RE,
     SERVICE_ACCOUNT_RE,
     SPEAKER_LABEL_RE,
     SSN_RE,
@@ -121,10 +127,32 @@ EXTENDED_BASELINE_STAGES: tuple[tuple[re.Pattern[str], str], ...] = (
     (UNICODE_CONTROL_RE, "UNICODE_CONTROL"),
     (PROMPT_INJECTION_RE, "PROMPT_INJECTION"),
 )
+# Stages a mail redactor (``Redactor.for_mail``) runs before the early
+# baseline. Full URLs come first, exactly as the URL stage would redact them,
+# so no mail stage can split a URL; then scheme-less links, one-time codes
+# (only their ``value`` group), opaque tokens, and prompt-injection phrases,
+# whatever the detector profile.
+MAIL_STAGES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (URL_RE, "URL"),
+    (SCHEMELESS_LINK_RE, "URL"),
+    (ONE_TIME_CODE_RE, "SECRET"),
+    (OPAQUE_TOKEN_RE, "SECRET"),
+    (PROMPT_INJECTION_RE, "PROMPT_INJECTION"),
+)
+# The configured-term stage's categories, in pipeline order.
+CONFIGURED_TERM_CATEGORIES = ("CLIENT", "ORG", "PERSON", "SENSITIVE")
+# Casefolded single words that never become harvested mail-name body terms.
+MAIL_NAME_STOPWORDS = frozenset(
+    word.casefold() for word in (*COMMON_CAPITALIZED_WORDS, *NON_PERSON_NAME_WORDS, *GENERIC_ORG_WORDS)
+)
 # Path redaction keeps whole placeholders (including linked alias forms,
 # whose suffix starts after a non-word separator) and redacts the
 # remaining path tokens.
 PATH_REDACTION_RE = re.compile(rf"({PLACEHOLDER_RE.pattern})|{PATH_TOKEN_RE.pattern}")
+# Mail attachment filenames come from senders, so after path redaction every
+# remaining word token of three or more characters that starts with a letter
+# in any script (``PATH_TOKEN_RE`` is ASCII-only) is redacted too.
+MAIL_FILENAME_REDACTION_RE = re.compile(rf"({PLACEHOLDER_RE.pattern})|(?<!\[)\b[^\W\d_][^\W_]{{2,}}\b(?!_\d{{2}}\])")
 
 
 class RedactionCollisionError(RuntimeError):
@@ -313,6 +341,22 @@ class Redactor:
     raw_aliases: dict[str, str] = field(default_factory=dict)
     placeholder_keys: dict[str, tuple[str, str]] = field(default_factory=dict)
     detectors: tuple[Detector, ...] = ()
+    # Extra ``(pattern, category)`` stages run before the early baseline,
+    # right after existing placeholders are stashed. A pattern with a named
+    # group ``value`` redacts only that group and keeps the rest of the match.
+    pre_stages: tuple[tuple[re.Pattern[str], str], ...] = field(default=(), repr=False)
+    # Extra ``(category, terms)`` literal terms for the configured-term stage.
+    # Terms of a configured-term category join that category's pattern;
+    # terms of any other category run first, in the order given. They never
+    # count as configured terms (``configured_categories``).
+    extra_terms: tuple[tuple[str, tuple[str, ...]], ...] = field(default=(), repr=False)
+    # Extra ``(category, terms)`` literal terms that run as their own patterns
+    # after the leading extra terms and before every configured-term
+    # category, in the order given, so a configured term cannot split them.
+    early_terms: tuple[tuple[str, tuple[str, ...]], ...] = field(default=(), repr=False)
+    # Extra ``(normalized value, entity hex, form suffix)`` alias links.
+    # Links from the config's alias groups always win.
+    extra_links: tuple[tuple[str, str, str], ...] = field(default=(), repr=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -340,21 +384,127 @@ class Redactor:
                 normalized = normalize_alias(alias)
                 self.alias_links.setdefault(normalized, (entity, alias_form_suffix(self.config.salt, normalized)))
             alias_terms.setdefault(group.category, []).extend(group.aliases)
-        self.literal_patterns: list[tuple[str, re.Pattern[str]]] = []
-        for category, terms in (
+        # The config's own links, before any extra link joins them.
+        self.configured_alias_links: dict[str, tuple[str, str]] = dict(self.alias_links)
+        for normalized, entity, suffix in self.extra_links:
+            self.alias_links.setdefault(normalized, (entity, suffix))
+        extra_terms: dict[str, list[str]] = {}
+        for category, terms in self.extra_terms:
+            extra_terms.setdefault(category, []).extend(terms)
+        configured_terms = (
             ("CLIENT", self.config.clients),
             ("ORG", self.config.organizations),
             ("PERSON", self.config.people),
             ("SENSITIVE", self.config.terms),
-        ):
-            terms = (*terms, *alias_terms.get(category, ()))
+        )
+        leading_terms = [(category, ()) for category in extra_terms if category not in CONFIGURED_TERM_CATEGORIES]
+        stages = [
+            (category, (*terms, *alias_terms.get(category, ()), *extra_terms.get(category, ())))
+            for category, terms in leading_terms
+        ]
+        stages.extend(self.early_terms)
+        stages.extend(
+            (category, (*terms, *alias_terms.get(category, ()), *extra_terms.get(category, ())))
+            for category, terms in configured_terms
+        )
+        dispatch = bool(extra_terms) or bool(self.early_terms)
+        self.literal_patterns: list[tuple[str, re.Pattern[str]]] = []
+        for category, terms in stages:
             filtered = [term for term in terms if term.casefold() not in RESERVED_PLACEHOLDER_WORDS]
-            pattern = compile_terms_pattern(filtered)
+            pattern = compile_terms_pattern(filtered, dispatch=dispatch)
             if pattern is not None:
                 self.literal_patterns.append((category, pattern))
+        self._configured_categories: dict[str, str] | None = None
         self.detectors = tuple(self.detectors)
         self.detector_counts = [0] * len(self.detectors)
         self.detector_positional = [0] * len(self.detectors)
+
+    def configured_categories(self) -> dict[str, str]:
+        """Each normalized configured value mapped to the category it is redacted as.
+
+        Configured terms take the first configured-term category that holds
+        them (the literal stage's order); alias-group canonical values and
+        aliases take their group's category. Extra terms are not included.
+        """
+        if self._configured_categories is None:
+            categories: dict[str, str] = {}
+            for category, terms in (
+                ("CLIENT", self.config.clients),
+                ("ORG", self.config.organizations),
+                ("PERSON", self.config.people),
+                ("SENSITIVE", self.config.terms),
+            ):
+                for term in terms:
+                    categories.setdefault(normalize_alias(term), category)
+            for group in self.config.alias_groups:
+                for value in (group.canonical, *group.aliases):
+                    categories.setdefault(normalize_alias(value), group.category)
+            self._configured_categories = categories
+        return self._configured_categories
+
+    def for_mail(self, identities: Iterable[tuple[str, str]]) -> Redactor:
+        """A mail redactor derived from this one, with identities harvested from mail headers.
+
+        ``identities`` are raw ``(display name, address)`` pairs (either may
+        be empty). The result keeps this redactor's config, mode, and
+        detectors, and shares its receipt counters, detector counts, and
+        lock, so receipts taken on this redactor include mail redactions.
+        Its placeholder caches are its own: mail never changes what this
+        redactor prints. On top of the usual pipeline it runs
+        ``MAIL_STAGES`` before the early baseline, redacts harvested names as
+        ``PERSON`` terms and harvested addresses as ``EMAIL`` terms, and links
+        each unconfigured name seen with exactly one address to that
+        address's entity (see ``harvest_mail_identities``). The result is a
+        function of the set of pairs, not their order.
+        """
+        names, addresses, links = harvest_mail_identities(self, identities)
+        # A harvested name that contains a configured client or organization
+        # term ("Jordan Brightwater" with the organization "Brightwater")
+        # would be split by that earlier stage and leave the rest of the name
+        # raw, so such names are matched before the configured terms.
+        splitting = [pattern for category, pattern in self.literal_patterns if category in ("CLIENT", "ORG")]
+        early = tuple(name for name in names if any(pattern.search(name) for pattern in splitting))
+        mail = Redactor(
+            self.config,
+            mode=self.mode,
+            counters=self.counters,
+            detectors=self.detectors,
+            pre_stages=MAIL_STAGES,
+            extra_terms=(("EMAIL", addresses), ("PERSON", tuple(name for name in names if name not in early))),
+            early_terms=(("PERSON", early),) if early else (),
+            extra_links=links,
+        )
+        mail.detector_counts = self.detector_counts
+        mail.detector_positional = self.detector_positional
+        mail._lock = self._lock
+        return mail
+
+    def mail_name_placeholder(self, name: str) -> str:
+        """The structural header rendering of a display name.
+
+        Always a placeholder for a name that is not empty once cleaned
+        (``clean_mail_name``), whether or not a pattern would match it or the
+        allow list holds it. A name containing ``@`` is an ``EMAIL``; a
+        configured value keeps its configured category; anything else is a
+        ``PERSON``. Alias links (configured or harvested) apply as usual.
+        """
+        cleaned = clean_mail_name(name)
+        if not cleaned:
+            return ""
+        if "@" in cleaned:
+            return self.placeholder("EMAIL", cleaned)
+        category = self.configured_categories().get(normalize_alias(cleaned), "PERSON")
+        return self.placeholder(category, cleaned)
+
+    def mail_filename(self, filename: str) -> str:
+        """An attachment filename: path-redacted, with word tokens in any script redacted as path tokens."""
+        return MAIL_FILENAME_REDACTION_RE.sub(self._replace_path_token, self.redact_path(filename))
+
+    def mail_address_placeholder(self, address: str) -> str:
+        """The structural header rendering of an address: always its ``EMAIL`` placeholder."""
+        if not address.strip():
+            return ""
+        return self.placeholder("EMAIL", address)
 
     def redact(self, text: str, *, preserve_line_count: bool = False) -> str:
         return self._redact(text, preserve_line_count=preserve_line_count, detect=True)
@@ -378,6 +528,8 @@ class Redactor:
             )
 
         text = PLACEHOLDER_RE.sub(lambda match: session.stash_allowed(match.group(0)), text)
+        for pattern, category in self.pre_stages:
+            text = apply_stage(pattern, category, text, stash)
         for pattern, category in EARLY_BASELINE_STAGES:
             text = pattern.sub(lambda match, cat=category: stash(cat, match.group(0)), text)
 
@@ -868,12 +1020,167 @@ def claimed_before_configured_terms(value: str) -> bool:
     return any(pattern.search(value) for pattern, _category in EARLY_BASELINE_STAGES)
 
 
+def apply_stage(
+    pattern: re.Pattern[str],
+    category: str,
+    text: str,
+    stash: Callable[[str, str], str],
+) -> str:
+    """Redact every match of one stage pattern in ``text``.
+
+    With a named group ``value``, only that group becomes a placeholder and
+    the rest of the match is kept as it is (a match whose ``value`` did not
+    take part is kept whole); otherwise the whole match does.
+    """
+    if "value" not in pattern.groupindex:
+        return pattern.sub(lambda match: stash(category, match.group(0)), text)
+
+    def replace(match: re.Match[str]) -> str:
+        whole = match.group(0)
+        start, end = match.span("value")
+        if start < 0 or start == end:
+            return whole
+        offset = match.start()
+        return whole[: start - offset] + stash(category, match.group("value")) + whole[end - offset :]
+
+    return pattern.sub(replace, text)
+
+
+def clean_mail_name(name: str) -> str:
+    """A display name stripped, without one pair of surrounding double quotes, whitespace-collapsed."""
+    value = name.strip()
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        value = value[1:-1]
+    return " ".join(value.split())
+
+
+def mail_name_variants(name: str) -> tuple[str, ...]:
+    """A cleaned display name, plus "First Last" for a "Last, First" name.
+
+    The reordering applies only with exactly one comma and both sides
+    non-empty and free of ``@``.
+    """
+    if name.count(",") == 1:
+        last, first = (part.strip() for part in name.split(","))
+        if last and first and "@" not in last and "@" not in first:
+            return (name, f"{first} {last}")
+    return (name,)
+
+
+def harvest_mail_identities(
+    redactor: Redactor,
+    identities: Iterable[tuple[str, str]],
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[tuple[str, str, str], ...]]:
+    """Body terms and alias links harvested from raw ``(display name, address)`` pairs.
+
+    Returns ``(names, addresses, links)``: names to redact as ``PERSON``
+    terms, addresses to redact as ``EMAIL`` terms, and
+    ``(normalized name, entity hex, form suffix)`` links. Pairs are
+    deduplicated and processed sorted, so the result depends only on the set
+    of pairs.
+
+    Names are cleaned with ``clean_mail_name``; an empty name, one containing
+    ``@``, or one equal to its own address is no name, and "Last, First" also
+    yields "First Last". A name stays out of the body terms (it is still
+    redacted structurally in headers) when it is configured, allow-listed,
+    a reserved placeholder word, over the alias limits, claimed by an early
+    baseline stage, or a single token shorter than three characters or in the
+    common-word lists. Addresses of at most ``MAX_MAIL_ADDRESS_CHARS``
+    characters become body terms unless reserved or allow-listed.
+
+    Links are anchored on the address: an unconfigured name paired with
+    exactly one distinct address (across all pairs) gets that address's
+    configured group entity, or else the hex of its ordinary ``EMAIL``
+    placeholder, with the form suffix ``alias_form_suffix(salt, name)``.
+    Addresses themselves are never linked, so a name equal to a harvested
+    address is not linked either. A link whose ``(entity, suffix)`` a
+    configured link or an earlier name (in sorted order) already holds is
+    dropped rather than failing.
+    """
+    salt = redactor.config.salt
+    configured = redactor.configured_categories()
+    configured_links = redactor.configured_alias_links
+    names: dict[str, str] = {}
+    addresses: dict[str, str] = {}
+    address_keys: set[str] = set()
+    paired: dict[str, set[str]] = {}
+    for raw_name, raw_address in sorted({(str(name), str(address)) for name, address in identities}):
+        address = raw_address.strip()
+        address_key = normalize_alias(address)
+        if address_key:
+            address_keys.add(address_key)
+            if (
+                len(address) <= MAX_MAIL_ADDRESS_CHARS
+                and address_key not in RESERVED_PLACEHOLDER_WORDS
+                and address_key not in redactor.allow_lookup
+            ):
+                addresses.setdefault(address_key, address)
+        name = clean_mail_name(raw_name)
+        if not name or "@" in name or normalize_alias(name) == address_key:
+            continue
+        for variant in mail_name_variants(name):
+            key = normalize_alias(variant)
+            names.setdefault(key, variant)
+            bucket = paired.setdefault(key, set())
+            if address_key:
+                bucket.add(address_key)
+
+    body_names = tuple(
+        value
+        for key, value in sorted(names.items())
+        if key not in configured and harvested_name_is_body_term(redactor, key, value)
+    )
+
+    used = set(configured_links.values())
+    links: list[tuple[str, str, str]] = []
+    for key in sorted(paired):
+        linked = paired[key]
+        if len(linked) != 1 or key in configured or key in address_keys:
+            continue
+        (address_key,) = linked
+        configured_link = configured_links.get(address_key)
+        if configured_link is not None:
+            entity = configured_link[0]
+        else:
+            entity = placeholder_digest(salt, "EMAIL", address_key)
+        link = (entity, alias_form_suffix(salt, key))
+        if link in used:
+            continue
+        used.add(link)
+        links.append((key, *link))
+    return body_names, tuple(addresses[key] for key in sorted(addresses)), tuple(links)
+
+
+def harvested_name_is_body_term(redactor: Redactor, key: str, value: str) -> bool:
+    """Whether an unconfigured harvested name (``key`` normalized) joins the body terms."""
+    if key in redactor.allow_lookup or key in RESERVED_PLACEHOLDER_WORDS:
+        return False
+    tokens = value.split()
+    if len(value) > MAX_NOMINATED_VALUE_CHARS or len(tokens) > MAX_NOMINATED_VALUE_TOKENS:
+        return False
+    if len(tokens) == 1 and (len(value) < 3 or key in MAIL_NAME_STOPWORDS):
+        return False
+    return not claimed_before_configured_terms(value)
+
+
 def compile_literal_pattern(term: str) -> re.Pattern[str] | None:
     return compile_terms_pattern([term])
 
 
-def compile_terms_pattern(terms: object) -> re.Pattern[str] | None:
-    parts: list[str] = []
+def compile_terms_pattern(terms: object, *, dispatch: bool = False) -> re.Pattern[str] | None:
+    """Compile one case-insensitive, word-bounded matcher for literal terms, longest first.
+
+    With ``dispatch``, alternatives are grouped by the lower-case form of
+    their first character behind a lookahead on those characters, so each
+    position tries only the alternatives that can start there. That keeps
+    thousands of terms (harvested mail identities) fast; the regex engine
+    otherwise enters every case-insensitive alternative at every position.
+    Within a group the longest-first order is kept, so the matches are the
+    same except where case-insensitive matching equates first characters
+    whose lower-case forms differ (``ſ`` and ``s``): another term may then
+    win there, and the text is redacted either way.
+    """
+    parts: list[tuple[str, str]] = []
     seen: set[str] = set()
     for term in terms:
         cleaned = str(term).strip()
@@ -883,13 +1190,25 @@ def compile_terms_pattern(terms: object) -> re.Pattern[str] | None:
         if key in seen:
             continue
         seen.add(key)
-        tokens = [re.escape(part) for part in re.split(r"[ \t_-]+", cleaned) if part]
-        if tokens:
-            parts.append(r"[ \t_-]+".join(tokens))
+        raw_tokens = [part for part in re.split(r"[ \t_-]+", cleaned) if part]
+        if raw_tokens:
+            parts.append((r"[ \t_-]+".join(re.escape(token) for token in raw_tokens), raw_tokens[0][0]))
     if not parts:
         return None
-    parts.sort(key=len, reverse=True)
-    body = "|".join(f"(?:{part})" for part in parts)
+    parts.sort(key=lambda part: len(part[0]), reverse=True)
+    if dispatch:
+        groups: dict[str, tuple[set[str], list[str]]] = {}
+        for part, first in parts:
+            starts, members = groups.setdefault(first.lower(), (set(), []))
+            starts.add(first)
+            members.append(part)
+        body = "|".join(
+            f"(?=(?:{'|'.join(re.escape(first) for first in sorted(starts))}))"
+            f"(?:{'|'.join(f'(?:{part})' for part in members)})"
+            for starts, members in groups.values()
+        )
+    else:
+        body = "|".join(f"(?:{part})" for part, _first in parts)
     return re.compile(rf"(?<![A-Za-z0-9])(?:{body})(?![A-Za-z0-9])", re.IGNORECASE)
 
 

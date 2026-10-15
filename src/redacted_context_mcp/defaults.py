@@ -526,6 +526,50 @@ UUID_RE = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
     re.IGNORECASE,
 )
+# Mail-only stages (``Redactor.for_mail``). Each one stays linear in practice:
+# every quantifier and lookahead is bounded, except a single character-class
+# run that ends the pattern or is followed only by a guard on that same class,
+# which can neither nest nor backtrack beyond its own run.
+#
+# A one-time code after a code keyword on the same line. Only the named group
+# ``value`` is redacted, so the keyword stays visible. Values are 4-8 digits,
+# groups of 3-4 digits (``123-456``, ``123 456``), or 6-10 upper-case letters
+# and digits with at least one digit. A value never continues or starts a
+# date, time, or version string (``2026-10-15``, ``1.2.3``, ``10:30``).
+ONE_TIME_CODE_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9])"
+    r"(?:one[ \t-]{0,3}time|pass[ \t]{0,3}code|security[ \t]{1,3}code|login[ \t]{1,3}code|"
+    r"sign[ \t-]{0,3}in[ \t]{1,3}code|confirmation[ \t]{1,3}code|verification|code|otp|pin|2fa|mfa)"
+    r"(?![A-Za-z0-9])"
+    r"[^\r\n]{0,40}?"
+    r"(?<![A-Za-z0-9])(?<!\d[-./:])"
+    r"(?P<value>\d{3,4}(?:[- ]\d{3,4}){1,2}|(?-i:(?=[A-Z]{0,9}\d)[A-Z0-9]{6,10})|\d{4,8})"
+    r"(?![A-Za-z0-9])(?![-./:]\d)"
+)
+# A link without a scheme that carries a path or query, such as
+# ``example.com/reset?token=...``: a host with at least one dot and an
+# alphabetic top-level label, an optional port, then ``/`` or ``?`` and the
+# rest up to whitespace, a quote, an angle or square bracket, or a closing
+# parenthesis. The host may not continue a word, path, address, or URL, so
+# full URLs stay with ``URL_RE`` and addresses with the e-mail stages.
+SCHEMELESS_LINK_RE = re.compile(
+    r"(?<![\w.@/:%+-])"
+    r"(?:[A-Za-z0-9][A-Za-z0-9-]{0,62}\.){1,10}[A-Za-z]{2,63}"
+    r"(?::\d{1,5})?"
+    r"[/?][^\s\"'<>\[\])]+"
+)
+# An opaque token: a maximal run of 24 or more ``[A-Za-z0-9_-]`` characters
+# with a letter and a digit among its first 513, not touching ``@`` (address
+# parts are left to the e-mail stages) and not a UUID (left to ``UUID_RE``).
+OPAQUE_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_@-])"
+    r"(?![0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}(?![A-Za-z0-9_-]))"
+    r"(?=[A-Za-z_-]{0,512}[0-9])(?=[0-9_-]{0,512}[A-Za-z])"
+    r"[A-Za-z0-9_-]{24,}"
+    r"(?![A-Za-z0-9_@-])"
+)
+# Addresses longer than this (the SMTP path limit) never join the body terms.
+MAX_MAIL_ADDRESS_CHARS = 254
 # Generic top-level domains a bare domain is recognized by, in any case.
 GENERIC_TLDS = ("com", "dev", "io", "net", "org", "app", "cloud", "local", "internal", "invalid", "example")
 # Two-letter country-code top-level domains, plus "eu".

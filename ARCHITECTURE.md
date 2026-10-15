@@ -15,18 +15,20 @@ agent workspace
       -> source registry
         -> filesystem source (private root)    -> raw text + @p_<id> refs
         -> GitHub source (configured aliases)  -> raw issue records + alias#N refs
+        -> mail source (configured mailboxes)  -> raw message records + @m_<id>
   <- redacted text plus opaque references
 ```
 
 The agent should start from a neutral workspace that does not contain the raw
 private context files. The MCP server receives tool calls: file tools use the
 filesystem source directly, which resolves paths inside the configured root and
-reads allowed text files, and GitHub tools call the GitHub source, which
-fetches issues for configured aliases. Sources return raw text plus opaque
-references, and the server or CLI redacts every content field before returning
-only the redacted result. If controlled writes are enabled, generated redacted text
-can be rehydrated locally and written under a configured private-root
-subdirectory.
+reads allowed text files, GitHub tools call the GitHub source, which fetches
+issues for configured aliases, and mail tools call the mail source, which reads
+local mailbox exports for configured aliases. Sources return raw text plus
+opaque references, and the server or CLI redacts every content field before
+returning only the redacted result. If controlled writes are enabled,
+generated redacted text can be rehydrated locally and written under a
+configured private-root subdirectory.
 
 ## Core Boundaries
 
@@ -50,7 +52,7 @@ subdirectory.
   protocol-session state. In-memory path and content indexes are reconstructable
   caches; the persistent vault salt is durable server configuration.
 - Redaction happens before file content, file paths, search results, bundles,
-  and GitHub issue text are returned.
+  GitHub issue text, and mail are returned.
 
 ## Source Adapters
 
@@ -59,22 +61,24 @@ Every private data source implements the small `ContextSource` protocol in
 
 - **Sources own identity and reference opaqueness.** A source decides how its
   private identifiers become neutral references (`@p_<id>` / `redctx://p_<id>`
-  path ids, `<alias>#<number>` issue refs, `user_<hex>` author aliases) and
-  enforces its own containment, exclusion, and never-serve policy.
+  path ids, `<alias>#<number>` issue refs, `user_<hex>` author aliases,
+  `@m_<id>` message refs) and enforces its own containment, exclusion, and
+  never-serve policy.
 - **The redaction boundary owns content redaction.** Sources never redact.
   Everything a source yields (file text, file paths used as locators, issue
-  titles, bodies, labels, timestamps) is raw and is redacted by the CLI/MCP
-  layer (`Redactor`, `rendering.py`, the command functions in `core.py`)
-  before it leaves the process.
+  titles, bodies, labels, timestamps, mail headers, bodies, and attachments)
+  is raw and is redacted by the CLI/MCP layer (`Redactor`, `rendering.py`,
+  the command functions in `core.py`) before it leaves the process.
 
 The protocol surface is deliberately small:
 
-- `name`: stable registry key (`"filesystem"`, `"github"`).
+- `name`: stable registry key (`"filesystem"`, `"github"`, `"mail"`).
 - `untrusted_content`: true for text outside the operator's control, such as
-  GitHub issues. Ranked retrieval appends `untrusted_external` to the passage
-  header of every passage from such a source. GitHub rendering does not read
-  the flag; it labels issue text with fixed field names (`untrusted_title=`,
-  `body_untrusted_external:`, `comment_untrusted_external:`).
+  GitHub issues and mail. Ranked retrieval appends `untrusted_external` to the
+  passage header of every passage from such a source. GitHub and mail
+  rendering do not read the flag; they label external text with fixed field
+  names (`untrusted_title=`, `untrusted_subject`, `body_untrusted_external:`,
+  `comment_untrusted_external:`, `attachment_untrusted_external:`).
 - `supports_document_iteration`: whether `iter_documents` yields documents for
   source-agnostic scans such as ranked retrieval. (This is unrelated to
   `RedactedContext.documents`, which enables Office/PDF extraction.)
@@ -92,10 +96,14 @@ The protocol surface is deliberately small:
 `RedactedContext` is the filesystem source. `GitHubSource` serves GitHub
 issues as structured `GitHubIssue` / `GitHubComment` records whose authors are
 already opaque aliases; it does not offer document iteration, so it cannot be
-crawled by ranked retrieval. `build_sources` assembles a `SourceRegistry`:
-the filesystem source is always present and GitHub appears only when the
-config defines `[github.repos.<alias>]`. The MCP server rebuilds the registry
-together with the `Redactor` on every accepted policy reload.
+crawled by ranked retrieval. `MailSource` serves local mailbox exports as
+structured `MailSummary` / `MailMessage` records with raw header values and
+opaque refs, and iterates messages as documents (see
+[Mail Access](#mail-access)). `build_sources` assembles a `SourceRegistry`:
+the filesystem source is always present, GitHub appears only when the config
+defines `[github.repos.<alias>]`, and mail only when it defines
+`[mail.sources.<alias>]`. The MCP server rebuilds the registry together with
+the `Redactor` on every accepted policy reload.
 
 Ranked retrieval consumes `iter_documents` from any source, so it does not
 walk the filesystem itself. The controlled-write rehydration scan and Ollama
@@ -117,10 +125,10 @@ write-subdirectory pruning, and operator-only raw output.
    `OperationBudget` (`consume_entry`, `consume_file`, `consume_document`,
    `check_deadline`) and fail closed when a limit is exceeded.
    `consume_document` is the hook for documents that are not standalone files
-   (the in-memory test source uses it); the filesystem source uses
-   `consume_file`. GitHub does not iterate documents: its fetches are bounded
-   by the response-size cap and per-request page and result limits rather than
-   `OperationBudget`.
+   (the mail source and the in-memory test source use it); the filesystem
+   source uses `consume_file`. GitHub does not iterate documents: its fetches
+   are bounded by the response-size cap and per-request page and result
+   limits rather than `OperationBudget`.
 5. Register it in `build_sources` so live policy reload rebuilds it with the
    redactor, and render its output through the redaction boundary.
 6. Add it to `tests/test_sources.py` by subclassing `SourceConformance`, and
@@ -404,7 +412,9 @@ bridge lives in `discovery.py` so `detectors.py` stays a leaf module that
 - `sources.py`: `ContextSource` protocol, `SourceRegistry`, and
   `build_sources`.
 - `rendering.py`: redaction boundary for structured source records (GitHub
-  issue summaries and details), shared by the CLI and MCP server.
+  issue summaries and details; mail lists, messages, threads, attachments,
+  and mail retrieval through the mail redactor and its cache), shared by the
+  CLI and MCP server.
 - `defaults.py`: default limits, allow lists, exclude lists, and compiled
   patterns.
 - `models.py`: shared dataclasses.
@@ -435,6 +445,9 @@ bridge lives in `discovery.py` so `detectors.py` stays a leaf module that
 - `discovery.py`: local Ollama discovery workflow and post-processing.
 - `github.py`: GitHub source (`GitHubSource`): read-only issue fetching
   through neutral aliases, structured records, and author aliases.
+- `mail.py`: mail source (`MailSource`): read-only mbox, Maildir, and `.eml`
+  readers, the bounded header index, `@m_` refs, the header allow-list, HTML
+  to text, quote and signature collapsing, and attachment extraction.
 
 ## Retrieval and Documents
 
@@ -448,11 +461,13 @@ and worker duration are bounded. No raw extraction cache or persistent index is
 created. Plain-text reads do not import MarkItDown.
 
 `redctx_retrieve` scans the filesystem source's documents under existing
-traversal/read budgets, redacts whole documents while preserving line counts, and splits the result
-into bounded passages. It orders matches by query-term coverage, then BM25,
-with deterministic opaque-reference/line tie-breaking. Only matching redacted
-passages and query statistics are retained for the request. Result count and
-character limits bound the returned context; exhausted scan budgets fail closed.
+traversal/read budgets (or, with `source` `mail`, the mail source's messages
+under the mail budget), redacts whole documents while preserving line counts,
+and splits the result into bounded passages. It orders matches by query-term
+coverage, then BM25, with deterministic opaque-reference/line tie-breaking.
+Only matching redacted passages and query statistics are retained for the
+request. Result count and character limits bound the returned context;
+exhausted scan budgets fail closed.
 
 ## Controlled Write Path
 
@@ -579,8 +594,9 @@ resource listing/reads. Unchanged requests keep the existing policy and cache.
 Changed inputs are loaded twice around dependency snapshots, including newly
 referenced term files. A validated policy replaces the source registry and
 redactor together and clears cached content, path indexes, and rehydration
-state. Adding or removing `[github.repos.<alias>]` tables therefore adds or
-removes the GitHub source on the next request.
+state. Adding or removing `[github.repos.<alias>]` or `[mail.sources.<alias>]`
+tables therefore adds or removes the GitHub or mail source on the next request;
+a reload also drops the mail indexes and the cached mail redactor.
 Invalid, unreadable, unstable, or removed previously loaded inputs block
 context requests and clear the content cache; the next request retries. Public
 protocol discovery and tool schemas remain available during recovery.
@@ -606,6 +622,264 @@ MCP tools, which share the same code path. Issue numbers and comment counts
 are kept only when upstream sends non-negative integers (otherwise they print
 as `?` and `0`). Each upstream response body is capped at 8 MiB; larger
 responses fail with an input-free error.
+
+## Mail Access
+
+The mail source (`mail.py`, `MailSource`, registry name `"mail"`) serves local
+mailbox exports read-only: mbox files, Maildir directories, and loose `.eml`
+files. There is no IMAP, OAuth, network access, or send capability. It is
+additive: without `[mail.sources.*]` tables nothing is registered, and file
+and GitHub output is byte-identical whether or not mail is configured.
+
+### Configuration
+
+```toml
+[mail.sources.inbox]
+path = "exports/inbox.mbox"   # absolute, ~-relative, or relative to the root
+format = "mbox"               # mbox | maildir | eml
+max_messages = 50000          # optional index cap per mailbox
+max_message_bytes = 26214400  # optional per-message read cap (25 MiB)
+```
+
+The table key is the neutral mailbox alias that the agent sees; it must match
+`[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`. `format` is required (no sniffing). `eml`
+accepts one `.eml` file or a directory walked recursively for `*.eml`.
+Invalid tables fail closed with messages that never echo a path. A mailbox
+path inside the served root is added to `protected_paths`, so file tools never
+list, read, search, or bundle the raw export; a mailbox path equal to the root
+is refused. Mailbox paths are never printed, so they are not added as terms.
+
+### Reading
+
+Parsing uses the stdlib `email` package (`BytesParser`, `policy.default`,
+`headerregistry`). The stdlib `mailbox` classes are not used for I/O:
+`mailbox.mbox` opens the file `rb+`, and neither class can charge a budget
+before reading or refuse symlinks. Instead a small reader opens files `rb`
+only and never locks, renames, flags, or writes anything (Maildir `new/`
+messages are not moved to `cur/`):
+
+- mbox: messages split at `From ` lines like the stdlib reader; `>From `
+  body lines are unescaped one level.
+- Maildir: regular files directly in `cur/` and `new/` (never `tmp/`),
+  sorted by name. A missing `cur/` or `new/` counts as empty.
+- eml: the file, or `*.eml` files under the directory, sorted by relative
+  path.
+
+Directory readers skip dot-entries, symlinks, and reparse points, and a
+mailbox path that is itself a symlink or reparse point is refused with
+`Mailbox could not be read.`.
+
+Each mailbox has an in-memory header index built by reading at most 256 KiB
+of each message's header block. An entry holds the raw storage locator
+(offset and length, or file path), size, parsed date, Message-ID,
+In-Reply-To, References, address pairs, and subject. Building it charges one
+entry per message against `max_messages`, the header bytes against a 1 GiB
+total, and a 120 s deadline (plus the caller's deadline, if any), and fails
+closed with `Mailbox message limit exceeded.`, `Mailbox header byte limit
+exceeded.`, or `Operation deadline exceeded.` rather than indexing part of a
+mailbox. The index is cached on the source under a metadata fingerprint (mbox
+size and mtime; Maildir and eml entry names, sizes, and mtimes), rebuilt when
+the fingerprint changes, and dropped with the source on policy reload. It is
+never persisted. Every operation probes the fingerprint of every configured
+mailbox first, because identity harvesting needs all of them, so any
+unreadable mailbox fails every mail call. Reading a message re-checks that
+file's size, mtime, and identity before and after the read and refuses
+messages over `max_message_bytes`.
+
+### References
+
+- Message: `@m_<12 hex>` = `HMAC(salt, "mail-message:" + Message-ID)`, with
+  the Message-ID stripped of whitespace and angle brackets. A message without
+  a usable Message-ID uses `HMAC(salt, "mail-message-headers:" +
+  sha256(header block))` instead, with CRLF line endings normalized to LF
+  first, so the same message stored with either line ending keeps its ref.
+  The same message in two mailboxes has one ref and resolves to the first in
+  config order, then storage order. Two Message-IDs with one ref fail closed
+  with `Mail reference collision.`.
+- Threads: `In-Reply-To` and `References` are rendered as `@m_` refs through
+  the same HMAC, whether or not the target message is in a mailbox. At most
+  256 ids are kept per header (the first 255 and the last, so the root and
+  the direct parent survive). `thread: @m_<hex>` is the ref of the thread
+  root as the message records it (first References id, else In-Reply-To,
+  else its own id). `redctx_mail_thread` returns the connected component of
+  Message-ID, In-Reply-To, and References links in the index, ordered by date
+  then ref, with undated messages last.
+- Attachment: `@m_<12 hex>/<n>`, the 1-based position among the message's
+  attachment parts in MIME walk order. An attachment ref resolves by reading
+  its message and checking that the part exists.
+
+Raw Message-IDs, mailbox paths, storage keys, and filenames never appear in
+refs or errors. Refs are keyed by the vault salt, so they are unlinkable
+across vaults.
+
+### Header Policy
+
+Only an allow-list is rendered: `Date`, `From`, `Sender`, `Reply-To`, `To`,
+`Cc`, `Bcc`, and `Subject`. Every other header is dropped, including
+`Received`, `Return-Path`, `DKIM-Signature`, `ARC-*`,
+`Authentication-Results`, `Delivered-To`, `List-*` (including
+`List-Unsubscribe`), and all `X-*` headers. `Message-ID`, `In-Reply-To`, and
+`References` appear only as refs.
+
+- `Date` is parsed and printed as generated UTC ISO 8601
+  (`2026-10-01T08:15:00Z`), so neither the raw string nor the sender's UTC
+  offset is shown; unparseable dates print `?`.
+- Address headers are redacted structurally. Each display name and address
+  becomes a placeholder minted directly with `Redactor.placeholder`, not by
+  pattern matching, whether or not it is configured and whether or not an
+  e-mail pattern would match it (`root@localhost` included). A display name
+  that is a configured term keeps that term's category and placeholder;
+  others are `PERSON`. Group names are display names. A header that does not
+  parse prints `[unparsed]` and is not harvested. Because the stdlib parser
+  recovers from malformed input differently across Python versions, a header
+  counts as parsed only when it reports no defects other than obsolete
+  syntax and every address has a local part and a domain; group labels such
+  as `undisclosed-recipients:;` still parse.
+- `Subject` is decoded (RFC 2047), redacted as content, and labelled
+  `untrusted_subject`.
+
+### Identity Harvesting and Linking
+
+Every mail operation redacts with a mail redactor derived from the active
+`Redactor` (`Redactor.for_mail`). It keeps the config, mode, and detectors,
+shares the receipt counters, and has its own placeholder caches, so mail
+never changes what file or GitHub tools print. On top of the base pipeline it
+adds:
+
+- The `(display name, address)` pairs from `From`, `Sender`, `Reply-To`,
+  `To`, `Cc`, and `Bcc` of every indexed message in every configured mailbox.
+  Harvesting the whole index rather than the messages a call returns makes
+  the result a function of the mailboxes, config, and salt, and redacts a
+  correspondent's name in every message body, not only in their own
+  messages. Harvested values live only in memory.
+- Harvested names join the configured-term stage as `PERSON` terms, with
+  "Last, First" also added as "First Last". A name is not harvested as a
+  body term when it is already configured, allow-listed, reserved, longer
+  than the alias limits (256 characters or 16 words), claimed by an early
+  baseline stage (it contains an address or URL), or a single token shorter
+  than three characters or in the common-word lists. It is still redacted
+  structurally in headers. A harvested name that contains a configured
+  client or organization term ("Jordan Brightwater" with the organization
+  "Brightwater") is matched in its own `PERSON` pattern before the
+  configured terms, so that term cannot split it and leave the rest raw.
+- Harvested addresses join the same stage as `EMAIL` terms, so an address
+  that the e-mail pattern misses is still caught in bodies. A redactor with
+  such extra terms compiles each term pattern with a first-character
+  dispatch (alternatives grouped behind a lookahead on their first
+  character), which keeps thousands of identities fast; redactors without
+  extra terms compile exactly as before. Building a mail redactor for
+  thousands of identities still takes a noticeable fraction of a second, so
+  the MCP server caches one per policy and identity set (`MailRedactorCache`
+  in `rendering.py`) and drops it on reload; the CLI builds one per call.
+- Links are anchored on the address. The entity of an unconfigured harvested
+  name is its address's ordinary `EMAIL` hex (or that address's configured
+  group entity), and its form suffix is `alias_form_suffix(salt, name)`, so
+  `From: Jordan Lee <jordan@example.com>` renders as `[PERSON_<e>.<f>]
+  <[EMAIL_<e>]>`, and "Jordan Lee" in any body is the same `[PERSON_<e>.<f>]`.
+  Addresses are never re-anchored: they keep their ordinary placeholder
+  unless a configured alias group links them, configured people keep their
+  configured placeholder, and configured links always win. A name seen with
+  more than one address is not linked; it is still redacted as a `PERSON`
+  term.
+- Mail stages run before the early baseline, in this order: full URLs,
+  including every query string, redacted whole as `URL` exactly as the `URL`
+  stage would, so no later mail stage can split one; scheme-less links with a
+  path or query (`example.com/reset?token=...`) as `URL`; one-time codes after
+  a code keyword on the same line (`code`, `passcode`, `OTP`, `PIN`,
+  `verification`, `2FA`, ...), redacted as `SECRET` without the keyword;
+  opaque tokens of 24 or more `[A-Za-z0-9_-]` characters that mix letters
+  and digits as `SECRET`; and prompt-injection phrases as
+  `PROMPT_INJECTION`, whatever the detector profile.
+
+Anchoring on the address rather than the name is deliberate. Addresses are
+the unique, stable key of a mail identity, while display names vary between
+clients and messages; a name-anchored entity would give one address a
+different placeholder from message to message and a different placeholder
+from the one files and GitHub produce. Rehydration for controlled writes
+still scans only the private root, so mail-only placeholders are not
+restorable there.
+
+### Bodies and Attachments
+
+- `multipart/alternative` prefers `text/plain`. HTML-only bodies are
+  converted with a `html.parser.HTMLParser` subclass: `script`, `style`,
+  `head`, `title`, `template`, `noscript`, comments, and elements hidden with
+  the `hidden` attribute or an inline `display:none` or `visibility:hidden`
+  are dropped; block elements become line breaks, `li` becomes `- `, links
+  keep their text plus an `http(s)` or `mailto` target in angle brackets,
+  images keep their `alt` text, and `blockquote` and quote containers become
+  `> ` lines. Parts are decoded with their declared charset and
+  `errors="replace"`. Invisible characters (`U+00AD`, `U+034F`, `U+061C`,
+  `U+115F`, `U+1160`, `U+17B4`, `U+17B5`, `U+180E`, `U+180F`,
+  `U+200B`-`U+200F`, `U+202A`-`U+202E`, `U+2060`-`U+206F`, `U+3164`,
+  `U+FE00`-`U+FE0F`, `U+FEFF`, `U+FFA0`, `U+FFF9`-`U+FFFB`, and the tag and
+  supplementary variation-selector blocks `U+E0000`-`U+E007F` and
+  `U+E0100`-`U+E01EF`) are removed during extraction so they cannot hide
+  text or split a name or address. The converter stays linear on hostile
+  markup: unmatched end tags cost O(1), text goes only to the innermost open
+  link (a link that contains another link always shows its target), and at
+  most 32 `> ` quote prefixes are rendered per line.
+- Quoted replies and signatures are collapsed by default: runs of `>` lines
+  with the attribution line before them ("... wrote:"), and Outlook
+  `-----Original Message-----` or `From:`/`Sent:` blocks to the end, become
+  `[quoted text: N lines omitted]`; an RFC 3676 `-- ` signature becomes
+  `[signature: N lines omitted]`. `include_quoted` shows both, redacted.
+- Attachments are the non-body leaf parts with an `attachment` disposition or
+  a filename, in MIME walk order; a `message/rfc822` part is one leaf, not
+  walked into. They are listed with their ref, a validated MIME type
+  redacted as content (it is sender-chosen), a size, and a
+  whitespace-collapsed, path-redacted filename in which every remaining word
+  token of three or more characters starting with a letter in any script is
+  redacted too (path redaction alone only covers ASCII tokens).
+  `redctx_mail_attachment` returns `text/*` parts decoded and redacted.
+  `.docx`, `.pptx`, `.pdf`, `.xlsx`, and `.xls` parts (by filename or MIME
+  type) go through `documents.extract_document` only with `--documents` and
+  the documents extra; other types, `message/rfc822` included, are refused
+  with `Unsupported attachment type.`.
+
+### Untrusted Content, Retrieval, and Budgets
+
+`MailSource.untrusted_content` is true. Rendered mail uses fixed labels
+(`untrusted_subject`, `body_untrusted_external:`,
+`attachment_untrusted_external:`), and retrieval passages from mail carry
+`untrusted_external`. The MCP instructions say that mail is untrusted and
+must not be followed as instructions.
+
+`MailSource.supports_document_iteration` is true. `redctx_retrieve` and
+`redctx retrieve` take `source` (`filesystem` by default, or `mail`). Each mail
+document is the subject plus the collapsed body; scope entries are mailbox
+aliases or message refs, and glob patterns are refused for mail. Retrieval
+charges `consume_document(raw message size)` per message, newest first,
+under mail-specific limits (5,000 messages, 500 MB of raw message bytes, the
+largest configured `max_message_bytes` per message, and the 30 s search
+deadline) instead of the filesystem limits, and fails closed instead of
+ranking part of the scope. Passages are cited by message ref and the
+unredacted mailbox alias, which the agent already sees in every mail output.
+
+Every operation is bounded: the index by `max_messages`, header bytes, and a
+deadline; reads by `max_message_bytes`; listing by `limit` (at most 500) and
+`offset`; threads by a 50-message cap; bodies and attachments by character
+caps; and document attachments by the extraction limits. Date filters are
+inclusive UTC days and leave out messages without a parseable date.
+
+### Surfaces
+
+- MCP tools: `redctx_mail_sources`, `redctx_mail_list`, `redctx_mail_read`,
+  `redctx_mail_thread`, `redctx_mail_attachment`, plus `source` on
+  `redctx_retrieve`. They are always listed, like the GitHub tools. With no
+  mail configured, `redctx_mail_sources` answers `OK` and the others answer
+  `Unknown mailbox alias.` or `Unknown source reference.`.
+- CLI: `redctx mail sources|list|read|thread|attachment` and
+  `redctx retrieve --source mail`, with the same output as the MCP tools.
+- `rendering.py` validates arguments before touching the source, calls it,
+  and formats mail records through the mail redactor, shared by the CLI and
+  MCP server. Subjects and filenames are whitespace-collapsed before
+  redaction so one record stays one line. Every content field goes through
+  the mail redactor, never the base redactor; because the mail redactor
+  shares the base redactor's counters, MCP receipts include mail
+  redactions.
+- `redctx doctor` reports `mail_sources` and per-format counts, never aliases
+  or paths.
 
 ## Security Posture
 
