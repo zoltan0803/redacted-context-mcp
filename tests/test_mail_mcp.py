@@ -112,6 +112,113 @@ def loose_message() -> bytes:
     )
 
 
+FORWARDS_REL = "exports/private-forwards.mbox"
+FORWARD_OUTER_ID = "fwd-outer-priv3391@example.test"
+NESTED_IDS = (
+    "fwd-l1-priv6620@example.test",
+    "fwd-l2-priv7742@example.test",
+    "fwd-l3-priv3303@example.test",
+    "fwd-l4-priv4404@example.test",
+    "fwd-parent-priv8812@example.test",
+)
+# Raw values from forwarded messages that must never appear in any output.
+NESTED_RAW_VALUES = (
+    *(value for pair in mail_fixtures.CHAIN_IDENTITIES for value in pair),
+    "Relayford",
+    "Deepwell",
+    "Innermost",
+    "Bottomley",
+    "quinn.relay",
+    "morgan.deep",
+    "taylor.inner",
+    "reese.bottom",
+    "relaydesk",
+    "wellspring",
+    "coreline",
+    "floorplan",
+    "fwd-outer-priv3391",
+    "fwd-l1-priv6620",
+    "fwd-l2-priv7742",
+    "fwd-l3-priv3303",
+    "fwd-l4-priv4404",
+    "fwd-parent-priv8812",
+    "zephyrnotes",
+    "obsidianleaf",
+    "quartzfold",
+    "private-forwards",
+    "fwdrelay-tq52",
+    "192.0.2.143",
+    "fwdbounce-ka28",
+    "fwddkim3390",
+    "fwdauth6604",
+    "fwddelivered-pp19",
+    "fwdlisttok2258",
+    "FwdMailerGadget",
+    "198.51.100.187",
+)
+
+
+def forwards_message() -> bytes:
+    """An outer message forwarding a chain four levels deep.
+
+    ``/1`` is level 1 (Quinn, with a text attachment ``/1/1``), ``/1/2`` level
+    2 (Morgan), ``/1/2/1`` level 3 (Taylor, base64-encoded), ``/1/2/1/1`` its
+    text attachment, and ``/1/2/1/2`` level 4 (Reese), past the depth limit.
+    Bodies name nested senders in lower case, which strict mode's
+    capitalized-name pass misses, so only the call-local terms catch them.
+    """
+    mf = mail_fixtures
+    level4 = mf.forwarded_message(
+        message_id=f"<{NESTED_IDS[3]}>", sender=f"{mf.REESE} <{mf.REESE_ADDRESS}>", to=None, subject="Bottom",
+        body=f"{mf.REESE} at the bottom.\n",
+    )
+    level3 = mf.forwarded_message(
+        message_id=f"<{NESTED_IDS[2]}>", sender=f"{mf.TAYLOR} <{mf.TAYLOR_ADDRESS}>",
+        to=f"{mf.QUINN} <{mf.QUINN_ADDRESS}>", subject="Core", body=f"{mf.TAYLOR.lower()} signed off.\n",
+        attachments=[
+            mf.attachment_part("obsidianleaf.txt", "text/plain", f"{mf.TAYLOR.lower()} and {mf.MORGAN.lower()} signed.\n".encode()),
+            mf.forwarded_part(level4, filename="quartzfold.eml"),
+        ],
+        boundary="b-l3",
+    )
+    level2 = mf.forwarded_message(
+        message_id=f"<{NESTED_IDS[1]}>", sender=f"{mf.MORGAN} <{mf.MORGAN_ADDRESS}>", to=None, subject="Well",
+        body=f"{mf.MORGAN} confirms.\n",
+        attachments=[mf.forwarded_part(level3, filename="quartzfold.eml", encoding="base64")],
+        boundary="b-l2",
+    )
+    level1 = mf.forwarded_message(
+        message_id=f"<{NESTED_IDS[0]}>",
+        sender=f"{mf.QUINN} <{mf.QUINN_ADDRESS}>",
+        to=f"{JORDAN} <{JORDAN_ADDRESS}>",
+        subject="Ledger review",
+        headers=(
+            ("Cc", "Group:;;;"),
+            ("In-Reply-To", f"<{NESTED_IDS[4]}>"),
+            ("References", f"<{NESTED_IDS[4]}>"),
+            *mf.NESTED_DROPPED_HEADER_VALUES.items(),
+        ),
+        body=(
+            f"{mf.QUINN.lower()} here; {JORDAN} asked for the ledger.\n"
+            "\n"
+            f"On Mon, {mf.MORGAN} wrote:\n"
+            "> nested quoted line\n"
+            "-- \n"
+            f"{mf.QUINN}\n"
+        ),
+        attachments=[
+            mf.attachment_part("zephyrnotes.txt", "text/plain", f"Ledger notes from {mf.QUINN.lower()}.\n".encode()),
+            mf.forwarded_part(level2, filename="quartzfold.eml"),
+        ],
+        boundary="b-l1",
+    )
+    return mf.multipart(
+        [mf.text_part("Forwarding the thread below.\n"), mf.forwarded_part(level1, filename="quartzfold.eml")],
+        message_id=f"<{FORWARD_OUTER_ID}>",
+        subject="Fwd: Ledger review",
+    )
+
+
 def mail_tables(outside: Path, *, archive_only: bool = False) -> str:
     archive = f"[mail.sources.archive]\npath = '{(outside / 'Maildir-private').as_posix()}'\nformat = \"maildir\"\n"
     if archive_only:
@@ -187,6 +294,19 @@ class MailTestBase(unittest.TestCase):
 
     def ref(self, mcp: server.RedactedContextMcp, message_id: str) -> str:
         return message_ref(mcp.redactor.config.salt, message_id)
+
+    def run_cli(self, *args: str) -> tuple[int, str, str]:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            try:
+                code = core.main(["--root", str(self.root), *args])
+            except SystemExit as exc:
+                if isinstance(exc.code, int):
+                    code = exc.code
+                else:
+                    code = 1
+                    stderr.write(str(exc.code))
+        return code, stdout.getvalue(), stderr.getvalue()
 
 
 class MailMcpTest(MailTestBase):
@@ -430,6 +550,177 @@ class MailMcpTest(MailTestBase):
         self.assertIsNot(self.mcp.mail_redactors._mail, first)
 
 
+class MailNestedMcpTest(MailTestBase):
+    """Forwarded messages through ``redctx_mail_attachment`` and ``redctx mail attachment``."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        mail_fixtures.write_mbox(self.root / FORWARDS_REL, [forwards_message()])
+        self.write_config(mail_tables(self.outside) + f'[mail.sources.forwards]\npath = "{FORWARDS_REL}"\nformat = "mbox"\n')
+        self.mcp = self.make_mcp()
+        self.outer = self.ref(self.mcp, FORWARD_OUTER_ID)
+        self.level1 = f"{self.outer}/1"
+        self.level2 = f"{self.outer}/1/2"
+        self.level3 = f"{self.outer}/1/2/1"
+        self.leaf = f"{self.outer}/1/2/1/1"
+        self.level4 = f"{self.outer}/1/2/1/2"
+
+    def assert_no_nested_raw(self, output: str) -> None:
+        self.assert_no_raw(output)
+        for value in (*NESTED_RAW_VALUES, *(self.ref(self.mcp, message_id) for message_id in NESTED_IDS)):
+            self.assertNotIn(value.casefold(), output.casefold())
+
+    def attachment(self, ref: str, **arguments: Any) -> str:
+        text = self.text(self.mcp, "redctx_mail_attachment", ref=ref, **arguments)
+        self.assert_no_nested_raw(text)
+        return text
+
+    @staticmethod
+    def sender(text: str) -> str:
+        match = re.search(r"^from: (\[PERSON_[0-9a-f.]+\]) <\[EMAIL_[0-9a-f]+\]>$", text, re.MULTILINE)
+        assert match is not None, text
+        return match.group(1)
+
+    def test_nested_message_renders_like_a_read_with_attachment_ref_and_depth(self) -> None:
+        text = self.attachment(self.level1)
+        header, body = text.split("\n\nbody_untrusted_external:\n", 1)
+        lines = header.splitlines()
+        self.assertEqual([line.split(":", 1)[0] for line in lines], [
+            "attachment", "nested_message_depth", "date", "from", "to", "cc", "untrusted_subject", "attachments",
+            "attachment 1", "attachment 2",
+        ])
+        self.assertEqual(lines[:3], [f"attachment: {self.level1}", "nested_message_depth: 1", "date: 2026-09-30T08:00:00Z"])
+        self.assertEqual(lines[5], "cc: [unparsed]")
+        self.assertRegex(lines[6], r"^untrusted_subject: \S")
+        self.assertRegex(lines[8], rf"^attachment 1: {re.escape(self.level1)}/1 type=text/plain size=\d+ name=\S+$")
+        self.assertRegex(lines[9], rf"^attachment 2: {re.escape(self.level2)} type=message/rfc822 size=\d+ name=\S+$")
+        # Only the outer message's hex appears: no refs are minted from nested ids.
+        self.assertEqual(set(re.findall(r"@m_[0-9a-f]{12}", text)), {self.outer})
+        for label in ("message:", "mailbox:", "thread:", "in_reply_to:", "references:"):
+            self.assertNotIn(label, text)
+        self.assertIn("[quoted text: 2 lines omitted]", body)
+        self.assertIn("[signature: 2 lines omitted]", body)
+        for depth, ref in ((2, self.level2), (3, self.level3)):
+            with self.subTest(depth=depth):
+                nested = self.attachment(ref)
+                self.assertTrue(nested.startswith(f"attachment: {ref}\nnested_message_depth: {depth}\ndate: "), nested)
+                self.assertIn("\nbody_untrusted_external:\n", nested)
+        leaf = self.attachment(self.leaf)
+        self.assertTrue(leaf.startswith(f"attachment: {self.leaf}\n\nattachment_untrusted_external:\n"), leaf)
+
+    def test_nested_placeholders_match_bodies_and_keep_global_links(self) -> None:
+        level1 = self.attachment(self.level1)
+        quinn = self.sender(level1)
+        # Quinn appears only in forwarded copies: a plain placeholder, unlinked.
+        self.assertRegex(quinn, r"^\[PERSON_[0-9a-f]+\]$")
+        body = level1.split("body_untrusted_external:\n", 1)[1]
+        self.assertTrue(body.startswith(f"{quinn} here; "), body)
+        # Jordan is linked globally and keeps that linked placeholder.
+        jordan = LINKED_FROM_RE.search(self.text(self.mcp, "redctx_mail_read", ref=self.ref(self.mcp, LINK_ID)))
+        assert jordan is not None
+        self.assertIn(f"\nto: {jordan.group(1)} <{jordan.group(3)}>\n", level1)
+        self.assertIn(f"; {jordan.group(1)} asked for", body)
+        self.assertIn(f" notes from {quinn}.", self.attachment(f"{self.level1}/1"))
+        morgan = self.sender(self.attachment(self.level2))
+        level3 = self.attachment(self.level3)
+        taylor = self.sender(level3)
+        self.assertIn(f"\nto: {quinn} <", level3)
+        self.assertIn(f"{taylor} signed off.", level3)
+        self.assertIn(f"{taylor} and {morgan} signed.", self.attachment(self.leaf))
+        self.assertEqual(len({quinn, morgan, taylor, jordan.group(1)}), 4)
+
+    def test_nested_reads_never_change_other_output(self) -> None:
+        calls: list[tuple[str, dict[str, Any]]] = [
+            ("redctx_mail_read", {"ref": self.ref(self.mcp, LINK_ID)}),
+            ("redctx_mail_read", {"ref": self.outer}),
+            ("redctx_mail_list", {"limit": 500}),
+            ("redctx_mail_thread", {"ref": self.ref(self.mcp, "reply-b@example.test")}),
+            ("redctx_mail_attachment", {"ref": f"{self.ref(self.mcp, 'attach@example.test')}/1"}),
+            ("redctx_retrieve", {"query": "ledger review budget", "source": "mail"}),
+        ]
+        before = [self.text(self.mcp, name, **arguments) for name, arguments in calls]
+        cached = self.mcp.mail_redactors._mail
+        self.assertIsNotNone(cached)
+        for ref in (self.level1, self.level2, self.level3, self.leaf, f"{self.level1}/1"):
+            self.attachment(ref)
+            self.assertIs(self.mcp.mail_redactors._mail, cached)
+        self.assertEqual([self.text(self.mcp, name, **arguments) for name, arguments in calls], before)
+        self.assertEqual([self.text(self.make_mcp(), name, **arguments) for name, arguments in calls], before)
+        # The outer message lists the forward as one attachment; nothing nested is indexed.
+        self.assertIn(f"\nattachments: 1\nattachment 1: {self.level1} type=message/rfc822 ", before[1])
+        self.assertEqual(len(before[2].splitlines()), 12)
+
+    def test_include_quoted_applies_to_nested_bodies(self) -> None:
+        collapsed = self.attachment(self.level1)
+        quoted = self.attachment(self.level1, include_quoted=True)
+        self.assertNotIn("> nested quoted line", collapsed)
+        self.assertIn(" wrote:\n> nested quoted line\n-- \n", quoted)
+        self.assertEqual(collapsed.split("\n\n", 1)[0], quoted.split("\n\n", 1)[0])
+        leaf = self.attachment(self.leaf)
+        self.assertEqual(self.attachment(self.leaf, include_quoted=True), leaf)
+        self.assertIn("[TRUNCATED]", self.attachment(self.level1, max_chars=8))
+
+    def test_errors_are_fixed_messages(self) -> None:
+        cases = [
+            (self.level4, mail.NESTED_DEPTH_MESSAGE),
+            (f"{self.level4}/1", "Unknown source reference."),
+            (f"{self.level1}/1/1", "Unknown source reference."),
+            (f"{self.level1}/3", "Unknown source reference."),
+            (f"{self.outer}/2/1", "Unknown source reference."),
+            (f"{self.level4}/1/1", "Unknown source reference."),
+        ]
+        for ref, expected in cases:
+            with self.subTest(ref=ref):
+                self.assertEqual(self.error(self.mcp, "redctx_mail_attachment", ref=ref), expected)
+        self.assertEqual(self.error(self.mcp, "redctx_mail_read", ref=self.level1), "Unknown source reference.")
+        self.assertEqual(
+            self.error(self.mcp, "redctx_retrieve", query="ledger", source="mail", paths=[self.level1]),
+            "Unknown source reference.",
+        )
+        # Warm the index first: the header read limit also bounds index builds.
+        self.text(self.mcp, "redctx_mail_list")
+        with patch.object(mail, "MAIL_HEADER_READ_BYTES", 64):
+            for ref in (self.level1, f"{self.level1}/1", self.level3):
+                with self.subTest(ref=ref, limit="headers"):
+                    self.assertEqual(self.error(self.mcp, "redctx_mail_attachment", ref=ref), mail.NESTED_HEADER_MESSAGE)
+            self.assertIn("attachment_untrusted_external:", self.text(self.mcp, "redctx_mail_attachment", ref=f"{self.ref(self.mcp, 'attach@example.test')}/1"))
+
+    def test_leak_sweep_over_every_nested_output(self) -> None:
+        outputs: list[dict[str, Any]] = []
+        for ref in (self.level1, f"{self.level1}/1", self.level2, self.level3, self.leaf, self.level4):
+            for include_quoted in (False, True):
+                outputs.append(self.call(self.mcp, "redctx_mail_attachment", ref=ref, include_quoted=include_quoted))
+        outputs.append(self.call(self.mcp, "redctx_mail_read", ref=self.outer, include_quoted=True))
+        outputs.append(self.call(self.mcp, "redctx_mail_list", mailbox="forwards"))
+        outputs.append(self.call(self.mcp, "redctx_retrieve", query="forwarding thread ledger", source="mail"))
+        for output in outputs:
+            self.assert_no_nested_raw(json.dumps(output, ensure_ascii=False))
+        combined = "\n".join(output["content"][0]["text"] for output in outputs)
+        for label in ("untrusted_subject: ", "body_untrusted_external:", "attachment_untrusted_external:"):
+            self.assertIn(label, combined)
+        self.assertIn(mail.NESTED_DEPTH_MESSAGE, combined)
+
+    def test_cli_matches_mcp_for_nested_messages(self) -> None:
+        pairs = [
+            (("mail", "attachment", self.level1), {"ref": self.level1}),
+            (("mail", "attachment", self.level1, "--include-quoted"), {"ref": self.level1, "include_quoted": True}),
+            (
+                ("mail", "attachment", self.level3, "--include-quoted", "--max-chars", "12"),
+                {"ref": self.level3, "include_quoted": True, "max_chars": 12},
+            ),
+            (("mail", "attachment", self.leaf), {"ref": self.leaf}),
+        ]
+        for cli_args, arguments in pairs:
+            with self.subTest(cli=cli_args):
+                code, stdout, stderr = self.run_cli(*cli_args)
+                self.assertEqual(code, 0, stderr)
+                self.assertEqual(stdout, self.text(self.mcp, "redctx_mail_attachment", **arguments))
+                self.assert_no_nested_raw(stdout + stderr)
+        for ref, expected in ((self.level4, mail.NESTED_DEPTH_MESSAGE), (f"{self.level4}/1", "Unknown source reference.")):
+            with self.subTest(ref=ref):
+                self.assertEqual(self.run_cli("mail", "attachment", ref), (1, "", expected))
+
+
 class MailSurfaceTest(unittest.TestCase):
     def test_mail_source_imports_no_network_modules(self) -> None:
         tree = ast.parse((PROJECT_ROOT / "src" / "redacted_context_mcp" / "mail.py").read_text(encoding="utf-8"))
@@ -563,19 +854,6 @@ class MailCliTest(MailTestBase):
     def setUp(self) -> None:
         super().setUp()
         self.write_config(mail_tables(self.outside))
-
-    def run_cli(self, *args: str) -> tuple[int, str, str]:
-        stdout, stderr = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            try:
-                code = core.main(["--root", str(self.root), *args])
-            except SystemExit as exc:
-                if isinstance(exc.code, int):
-                    code = exc.code
-                else:
-                    code = 1
-                    stderr.write(str(exc.code))
-        return code, stdout.getvalue(), stderr.getvalue()
 
     def test_cli_matches_mcp_output(self) -> None:
         mcp = self.make_mcp()

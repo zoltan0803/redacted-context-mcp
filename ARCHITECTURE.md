@@ -695,6 +695,18 @@ messages over `max_message_bytes`.
 - Attachment: `@m_<12 hex>/<n>`, the 1-based position among the message's
   attachment parts in MIME walk order. An attachment ref resolves by reading
   its message and checking that the part exists.
+- Nested attachment: a forwarded message's attachments extend the path.
+  `@m_<hex>/2/1` is attachment 1 of the forwarded message that is attachment
+  2 of `@m_<hex>`; a ref holds one to four segments (three nested levels plus
+  a leaf). Every segment but the last must name a readable nested message
+  within range, and anything else is `Unknown source reference.`. Listing and
+  numbering are unchanged, so top-level attachment refs stay stable.
+- A nested message gets no `@m_` message ref. Its Message-ID, In-Reply-To,
+  and References are never hashed into refs or rendered, and it never enters
+  the header index, lists, threads, or retrieval; it is addressed only by its
+  attachment ref. A forwarded copy is sender-controlled: minting refs from
+  its Message-ID would let a forwarder make the copy pose as, or thread
+  into, an indexed message.
 
 Raw Message-IDs, mailbox paths, storage keys, and filenames never appear in
 refs or errors. Refs are keyed by the vault salt, so they are unlinkable
@@ -725,6 +737,10 @@ Only an allow-list is rendered: `Date`, `From`, `Sender`, `Reply-To`, `To`,
   as `undisclosed-recipients:;` still parse.
 - `Subject` is decoded (RFC 2047), redacted as content, and labelled
   `untrusted_subject`.
+
+Nested (forwarded) messages go through the same allow-list: index entries
+and nested records take their fields from one helper (`header_fields`), so
+the two cannot drift apart.
 
 ### Identity Harvesting and Linking
 
@@ -779,6 +795,22 @@ adds:
   and digits as `SECRET`; and prompt-injection phrases as
   `PROMPT_INJECTION`, whatever the detector profile.
 
+Nested message headers never join the global harvest:
+`MailSource.identities()` covers top-level header blocks only. Walking every
+attachment would mean reading every full message, and a forwarded copy is
+sender-controlled, so it must not alter the links every other call uses.
+Instead, a call whose ref passes through nested messages (rendering one, or
+reading a leaf attachment inside one) collects the address-header pairs of
+every nested message on the ref's path and redacts with a call-local mail
+redactor (`Redactor.for_mail(identities, unlinked=pairs)`): names and
+addresses are harvested from both sets, links from the global pairs only. So
+the forwarded sender's name in the forwarded body gets the same placeholder
+as in its nested header, a globally linked name keeps its global
+`[PERSON_<e>.<f>]`, and a name seen only in forwarded copies gets its plain
+`PERSON` placeholder. The call-local redactor is never cached, and when the
+nested pairs add nothing new the cached mail redactor is used, so a nested
+read never changes another call's output.
+
 Anchoring on the address rather than the name is deliberate. Addresses are
 the unique, stable key of a mail identity, while display names vary between
 clients and messages; a name-anchored entity would give one address a
@@ -822,16 +854,34 @@ restorable there.
   `redctx_mail_attachment` returns `text/*` parts decoded and redacted.
   `.docx`, `.pptx`, `.pdf`, `.xlsx`, and `.xls` parts (by filename or MIME
   type) go through `documents.extract_document` only with `--documents` and
-  the documents extra; other types, `message/rfc822` included, are refused
-  with `Unsupported attachment type.`.
+  the documents extra; other types, including `message/*` types other than
+  the two below, are refused with `Unsupported attachment type.`.
+- A listed `message/rfc822` or `message/global` part is a nested (forwarded)
+  message. `redctx_mail_attachment` renders it through the same
+  `render_mail_message` path as `redctx_mail_read`: `attachment: <ref>`,
+  `nested_message_depth: <n>` (the number of segments in its ref), then the
+  top-level lines without `message:`, `mailbox:`, `thread:`,
+  `in_reply_to:`, and `references:`. Its body is selected, converted, and
+  collapsed like a top-level body (`include_quoted` shows quotes and
+  signatures and affects nothing else), and its attachments are listed with
+  `<ref>/<k>` refs. Inline forwards without a filename stay unlisted.
+- RFC 2046 forbids base64 and quoted-printable on `message/rfc822`, but some
+  clients emit it, and the stdlib parser would then parse the still-encoded
+  text as a message without headers. `parse_message` uses an `EmailMessage`
+  subclass that reports such a part's main type as `application`, so the
+  parser keeps the encoded text, and `nested_message` decodes it and parses
+  the result. Reading and path resolution share `nested_message`, so refs
+  into a decoded message resolve against what it renders. A part that does
+  not decode to a message is `Unsupported attachment type.` as the last
+  segment and `Unknown source reference.` as an intermediate one.
 
 ### Untrusted Content, Retrieval, and Budgets
 
 `MailSource.untrusted_content` is true. Rendered mail uses fixed labels
 (`untrusted_subject`, `body_untrusted_external:`,
-`attachment_untrusted_external:`), and retrieval passages from mail carry
-`untrusted_external`. The MCP instructions say that mail is untrusted and
-must not be followed as instructions.
+`attachment_untrusted_external:`), nested messages included, and retrieval
+passages from mail carry `untrusted_external`. The MCP instructions say that
+mail is untrusted and must not be followed as instructions.
 
 `MailSource.supports_document_iteration` is true. `redctx_retrieve` and
 `redctx retrieve` take `source` (`filesystem` by default, or `mail`). Each mail
@@ -843,12 +893,23 @@ largest configured `max_message_bytes` per message, and the 30 s search
 deadline) instead of the filesystem limits, and fails closed instead of
 ranking part of the scope. Passages are cited by message ref and the
 unredacted mailbox alias, which the agent already sees in every mail output.
+Nested messages are not retrieval documents, and attachment refs are refused
+as retrieval scope.
 
 Every operation is bounded: the index by `max_messages`, header bytes, and a
 deadline; reads by `max_message_bytes`; listing by `limit` (at most 500) and
 `offset`; threads by a 50-message cap; bodies and attachments by character
-caps; and document attachments by the extraction limits. Date filters are
-inclusive UTC days and leave out messages without a parseable date.
+caps; and document attachments by the extraction limits. A nested message is
+read as part of its outer message, so that mailbox's `max_message_bytes`
+bounds it, and its attachment list has the top-level 9,999-part cap. Nested
+messages are readable three levels deep (`MAIL_MAX_NESTED_DEPTH`); a deeper
+one fails with `Nested message depth limit exceeded.`, while a depth-3
+message still lists its attachments and its non-message ones stay readable.
+Top-level headers are bounded by the 256 KiB index read, but nested headers
+come from the full parse, so a nested message on a ref's path whose header
+block (raw header name and value bytes) exceeds 256 KiB fails with `Nested
+message header limit exceeded.`. Date filters are inclusive UTC days and
+leave out messages without a parseable date.
 
 ### Surfaces
 
@@ -857,6 +918,8 @@ inclusive UTC days and leave out messages without a parseable date.
   `redctx_retrieve`. They are always listed, like the GitHub tools. With no
   mail configured, `redctx_mail_sources` answers `OK` and the others answer
   `Unknown mailbox alias.` or `Unknown source reference.`.
+- `redctx_mail_attachment` takes `ref`, `max_chars`, and `include_quoted`
+  (CLI `--include-quoted`), which only affects nested messages.
 - CLI: `redctx mail sources|list|read|thread|attachment` and
   `redctx retrieve --source mail`, with the same output as the MCP tools.
 - `rendering.py` validates arguments before touching the source, calls it,
