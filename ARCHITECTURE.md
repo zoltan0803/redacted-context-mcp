@@ -595,6 +595,214 @@ are kept only when upstream sends non-negative integers (otherwise they print
 as `?` and `0`). Each upstream response body is capped at 8 MiB; larger
 responses fail with an input-free error.
 
+## Mail Access
+
+The mail source (`mail.py`, `MailSource`, registry name `"mail"`) serves local
+mailbox exports read-only: mbox files, Maildir directories, and loose `.eml`
+files. There is no IMAP, OAuth, network access, or send capability. It is
+additive: without `[mail.sources.*]` tables nothing is registered, and file
+and GitHub output is byte-identical whether or not mail is configured.
+
+### Configuration
+
+```toml
+[mail.sources.inbox]
+path = "exports/inbox.mbox"   # absolute, ~-relative, or relative to the root
+format = "mbox"               # mbox | maildir | eml
+max_messages = 50000          # optional index cap per mailbox
+max_message_bytes = 26214400  # optional per-message read cap (25 MiB)
+```
+
+The table key is the neutral mailbox alias that the agent sees; it must match
+`[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`. `format` is required (no sniffing). `eml`
+accepts one `.eml` file or a directory walked recursively for `*.eml`.
+Invalid tables fail closed with messages that never echo a path. A mailbox
+path inside the served root is added to `protected_paths`, so file tools never
+list, read, search, or bundle the raw export; a mailbox path equal to the root
+is refused. Mailbox paths are never printed, so they are not added as terms.
+
+### Reading
+
+Parsing uses the stdlib `email` package (`BytesParser`, `policy.default`,
+`headerregistry`). The stdlib `mailbox` classes are not used for I/O:
+`mailbox.mbox` opens the file `rb+`, and neither class can charge a budget
+before reading or refuse symlinks. Instead a small reader opens files `rb`
+only and never locks, renames, flags, or writes anything (Maildir `new/`
+messages are not moved to `cur/`):
+
+- mbox: messages split at `From ` lines like the stdlib reader; `>From `
+  body lines are unescaped one level.
+- Maildir: regular files directly in `cur/` and `new/` (never `tmp/`),
+  sorted by name.
+- eml: the file, or `*.eml` files under the directory, sorted by relative
+  path.
+
+Directory readers skip dot-entries, symlinks, and reparse points.
+
+Each mailbox has an in-memory header index built by reading at most 256 KiB
+of each message's header block. An entry holds the raw storage locator
+(offset and length, or file path), size, parsed date, Message-ID,
+In-Reply-To, References, address pairs, and subject. Building it charges one
+entry per message against `max_messages` plus the header bytes and a fixed
+deadline, and fails closed with `Mailbox message limit exceeded.` rather than
+indexing part of a mailbox. The index is cached on the source under a
+metadata fingerprint (mbox size and mtime; Maildir and eml entry names,
+sizes, and mtimes), rebuilt when the fingerprint changes, and dropped with
+the source on policy reload. It is never persisted. Reading a message
+re-checks the fingerprint first and charges `max_message_bytes`.
+
+### References
+
+- Message: `@m_<12 hex>` = `HMAC(salt, "mail-message:" + Message-ID)`, with
+  the Message-ID stripped of whitespace and angle brackets. A message without
+  a usable Message-ID uses `HMAC(salt, "mail-message-headers:" +
+  sha256(header block))` instead. The same message in two mailboxes has one
+  ref and resolves to the first in config order, then storage order. Two
+  Message-IDs with one ref fail closed with `Mail reference collision.`.
+- Threads: `In-Reply-To` and `References` are rendered as `@m_` refs through
+  the same HMAC, whether or not the target message is in a mailbox.
+  `thread: @m_<hex>` is the ref of the thread root as the message records it
+  (first References id, else In-Reply-To, else its own id).
+  `redctx_mail_thread` returns the connected component of Message-ID,
+  In-Reply-To, and References links in the index, ordered by date then ref.
+- Attachment: `@m_<12 hex>/<n>`, the 1-based position among the message's
+  attachment parts in MIME walk order.
+
+Raw Message-IDs, mailbox paths, storage keys, and filenames never appear in
+refs or errors. Refs are keyed by the vault salt, so they are unlinkable
+across vaults.
+
+### Header Policy
+
+Only an allow-list is rendered: `Date`, `From`, `Sender`, `Reply-To`, `To`,
+`Cc`, `Bcc`, and `Subject`. Every other header is dropped, including
+`Received`, `Return-Path`, `DKIM-Signature`, `ARC-*`,
+`Authentication-Results`, `Delivered-To`, `List-*` (including
+`List-Unsubscribe`), and all `X-*` headers. `Message-ID`, `In-Reply-To`, and
+`References` appear only as refs.
+
+- `Date` is parsed and printed as generated UTC ISO 8601
+  (`2026-10-01T08:15:00Z`), so neither the raw string nor the sender's UTC
+  offset is shown; unparseable dates print `?`.
+- Address headers are redacted structurally. Each display name and address
+  becomes a placeholder minted directly with `Redactor.placeholder`, not by
+  pattern matching, whether or not it is configured and whether or not an
+  e-mail pattern would match it (`root@localhost` included). A display name
+  that is a configured term keeps that term's category and placeholder;
+  others are `PERSON`. Group names are display names. A header that does not
+  parse prints `[unparsed]` and is not harvested.
+- `Subject` is decoded (RFC 2047), redacted as content, and labelled
+  `untrusted_subject`.
+
+### Identity Harvesting and Linking
+
+Every mail operation redacts with a mail redactor derived from the active
+`Redactor` (`Redactor.for_mail`). It keeps the config, mode, and detectors,
+shares the receipt counters, and has its own placeholder caches, so mail
+never changes what file or GitHub tools print. On top of the base pipeline it
+adds:
+
+- The `(display name, address)` pairs from `From`, `Sender`, `Reply-To`,
+  `To`, `Cc`, and `Bcc` of every indexed message in every configured mailbox.
+  Harvesting the whole index rather than the messages a call returns makes
+  the result a function of the mailboxes, config, and salt, and redacts a
+  correspondent's name in every message body, not only in their own
+  messages. Harvested values live only in memory.
+- Harvested names join the configured-term stage as `PERSON` terms, with
+  "Last, First" also added as "First Last". A name is not harvested as a
+  body term when it is already configured, allow-listed, reserved, longer
+  than the alias limits (256 characters or 16 words), claimed by an early
+  baseline stage (it contains an address or URL), or a single token shorter
+  than three characters or in the common-word lists. It is still redacted
+  structurally in headers.
+- Harvested addresses join the same stage as `EMAIL` terms, so an address
+  that the e-mail pattern misses is still caught in bodies.
+- Links are anchored on the address. The entity of an unconfigured harvested
+  name is its address's ordinary `EMAIL` hex (or that address's configured
+  group entity), and its form suffix is `alias_form_suffix(salt, name)`, so
+  `From: Jordan Lee <jordan@example.com>` renders as `[PERSON_<e>.<f>]
+  <[EMAIL_<e>]>`, and "Jordan Lee" in any body is the same `[PERSON_<e>.<f>]`.
+  Addresses are never re-anchored: they keep their ordinary placeholder
+  unless a configured alias group links them, configured people keep their
+  configured placeholder, and configured links always win. A name seen with
+  more than one address is not linked; it is still redacted as a `PERSON`
+  term.
+- Mail stages run before the early baseline: one-time codes after a code
+  keyword on the same line (`code`, `passcode`, `OTP`, `PIN`,
+  `verification`, `2FA`, ...), redacted as `SECRET` without the keyword;
+  scheme-less links with a path or query (`example.com/reset?token=...`) as
+  `URL`; and opaque tokens of 24 or more `[A-Za-z0-9_-]` characters that mix
+  letters and digits as `SECRET`. Full URLs, including every query string,
+  are already redacted whole by the `URL` stage. The `PROMPT_INJECTION` stage
+  always runs on mail, whatever the detector profile.
+
+Anchoring on the address rather than the name is deliberate. Addresses are
+the unique, stable key of a mail identity, while display names vary between
+clients and messages; a name-anchored entity would give one address a
+different placeholder from message to message and a different placeholder
+from the one files and GitHub produce. Rehydration for controlled writes
+still scans only the private root, so mail-only placeholders are not
+restorable there.
+
+### Bodies and Attachments
+
+- `multipart/alternative` prefers `text/plain`. HTML-only bodies are
+  converted with a `html.parser.HTMLParser` subclass: `script`, `style`,
+  `head`, `title`, `template`, `noscript`, comments, and elements hidden with
+  the `hidden` attribute or an inline `display:none` or `visibility:hidden`
+  are dropped; block elements become line breaks, `li` becomes `- `, links
+  keep their text plus an `http(s)` or `mailto` target in angle brackets,
+  images keep their `alt` text, and `blockquote` and quote containers become
+  `> ` lines. Parts are decoded with their declared charset and
+  `errors="replace"`. Invisible format characters (`U+200B`-`U+200F`,
+  `U+202A`-`U+202E`, `U+2060`-`U+206F`, `U+FEFF`) are removed during
+  extraction so they cannot split a name or address.
+- Quoted replies and signatures are collapsed by default: runs of `>` lines
+  with the attribution line before them ("... wrote:"), and Outlook
+  `-----Original Message-----` or `From:`/`Sent:` blocks to the end, become
+  `[quoted text: N lines omitted]`; an RFC 3676 `-- ` signature becomes
+  `[signature: N lines omitted]`. `include_quoted` shows both, redacted.
+- Attachments are listed with their ref, a validated MIME type, a size, and a
+  path-redacted filename. `redctx_mail_attachment` returns `text/*` parts
+  decoded and redacted. `.docx`, `.pptx`, `.pdf`, `.xlsx`, and `.xls` parts go
+  through `documents.extract_document` only with `--documents` and the
+  documents extra; other types are refused with
+  `Unsupported attachment type.`.
+
+### Untrusted Content, Retrieval, and Budgets
+
+`MailSource.untrusted_content` is true. Rendered mail uses fixed labels
+(`untrusted_subject`, `body_untrusted_external:`,
+`attachment_untrusted_external:`), and retrieval passages from mail carry
+`untrusted_external`. The MCP instructions say that mail is untrusted and
+must not be followed as instructions.
+
+`MailSource.supports_document_iteration` is true. `redctx_retrieve` and
+`redctx retrieve` take `source` (`filesystem` by default, or `mail`). Each mail
+document is the subject plus the collapsed body; scope entries are mailbox
+aliases or message refs, and glob patterns are refused for mail. Retrieval
+charges `consume_document(raw message size)` per message, newest first,
+under mail-specific message, byte, and deadline limits, and fails closed
+instead of ranking part of the scope.
+
+Every operation is bounded: the index by `max_messages`, header bytes, and a
+deadline; reads by `max_message_bytes`; listing by `limit` and `offset`;
+threads by a message cap; bodies and attachments by character caps; and
+document attachments by the extraction limits.
+
+### Surfaces
+
+- MCP tools: `redctx_mail_sources`, `redctx_mail_list`, `redctx_mail_read`,
+  `redctx_mail_thread`, `redctx_mail_attachment`, plus `source` on
+  `redctx_retrieve`. They are always listed, like the GitHub tools, and
+  answer `Unknown mailbox alias.` or `Unknown source reference.` when no
+  mail is configured.
+- CLI: `redctx mail sources|list|read|thread|attachment` and
+  `redctx retrieve --source mail`.
+- `rendering.py` formats mail records through the mail redactor, shared by
+  the CLI and MCP server. `redctx doctor` reports mailbox counts and formats,
+  never paths.
+
 ## Security Posture
 
 This project is a privacy guardrail, not a hard isolation boundary. If the agent
