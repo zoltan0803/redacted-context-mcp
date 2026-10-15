@@ -87,6 +87,41 @@ class DomainBoundaryTest(unittest.TestCase):
                         f"connect to {domain}{end}",
                     )
 
+    def test_country_code_domains_are_redacted(self) -> None:
+        values = ("ugyfel.hu", "client.co.uk", "db.acme.de", "a.example.com.au", "Acme.it", "firma.pl")
+        for mode in ("balanced", "strict"):
+            for value in values:
+                with self.subTest(mode=mode, value=value):
+                    redactor = Redactor(RedactionConfig(salt="test-salt"), mode=mode)
+                    domain = redactor.placeholder("DOMAIN", value)
+
+                    self.assertEqual(redactor.redact(f"see {value} now"), f"see {domain} now")
+                    self.assertEqual(redactor.redact(f"see {value}."), f"see {domain}.")
+
+    def test_email_and_url_keep_their_category_on_country_code_domains(self) -> None:
+        redactor = Redactor(RedactionConfig(salt="test-salt"), mode="balanced")
+
+        self.assertEqual(
+            redactor.redact("mail me@ugyfel.hu or open https://ugyfel.hu/x"),
+            f"mail {redactor.placeholder('EMAIL', 'me@ugyfel.hu')} or open "
+            f"{redactor.placeholder('URL', 'https://ugyfel.hu/x')}",
+        )
+
+    def test_file_names_and_code_are_not_country_code_domains(self) -> None:
+        texts = (
+            "see README.md and main.rs",
+            "user.id and request.user.id",
+            "model.to(device) then df.at[0]",
+            "done.It was late",
+            "pd.NA here",
+            "app.db and index.js",
+            "e.g. this, i.e. that",
+        )
+        redactor = Redactor(RedactionConfig(salt="test-salt"), mode="balanced")
+        for text in texts:
+            with self.subTest(text=text):
+                self.assertEqual(redactor.redact(text), text)
+
 
 class ProperNameLineBreakTest(unittest.TestCase):
     def test_blank_line_ends_a_proper_name(self) -> None:

@@ -526,11 +526,36 @@ UUID_RE = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
     re.IGNORECASE,
 )
+# Generic top-level domains a bare domain is recognized by, in any case.
+GENERIC_TLDS = ("com", "dev", "io", "net", "org", "app", "cloud", "local", "internal", "invalid", "example")
+# Two-letter country-code top-level domains, plus "eu".
+COUNTRY_TLDS = frozenset(
+    """
+    ac ad ae af ag ai al am ao aq ar as at au aw ax az ba bb bd be bf bg bh bi
+    bj bm bn bo bq br bs bt bw by bz ca cc cd cf cg ch ci ck cl cm cn co cr cu
+    cv cw cx cy cz de dj dk dm do dz ec ee eg er es et eu fi fj fk fm fo fr ga
+    gd ge gf gg gh gi gl gm gn gp gq gr gs gt gu gw gy hk hm hn hr ht hu id ie
+    il im in io iq ir is it je jm jo jp ke kg kh ki km kn kp kr kw ky kz la lb
+    lc li lk lr ls lt lu lv ly ma mc md me mg mh mk ml mm mn mo mp mq mr ms mt
+    mu mv mw mx my mz na nc ne nf ng ni nl no np nr nu nz om pa pe pf pg ph pk
+    pl pm pn pr ps pt pw py qa re ro rs ru rw sa sb sc sd se sg sh si sk sl sm
+    sn so sr ss st sv sx sy sz tc td tf tg th tj tk tl tm tn to tr tt tv tw tz
+    ua ug uk us uy uz va vc ve vg vi vn vu wf ws ye yt za zm zw
+    """.split()
+)
+# Country codes that are far more often a file extension or a code attribute
+# than a domain ("README.md", "main.rs", "user.id") are not recognized.
+FILE_LIKE_TLDS = frozenset({"cc", "id", "md", "mk", "pm", "ps", "py", "rs", "sh", "so", "tf"})
+_GENERIC_TLD_PATTERN = "|".join(GENERIC_TLDS)
+_COUNTRY_TLD_PATTERN = "|".join(sorted(COUNTRY_TLDS - FILE_LIKE_TLDS))
 # A domain may end a sentence: a following "." still matches unless another
-# label starts right after it.
+# label starts right after it. A country code matches only in lower case and
+# never right before "(" or "[", so a typo such as "done.It" or code such as
+# "model.to(device)" or "df.at[0]" is left alone.
 DOMAIN_RE = re.compile(
     r"(?<![@/\w.-])(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
-    r"(?:com|dev|io|net|org|app|cloud|local|internal|invalid|example)(?![\w-]|\.[\w-])",
+    rf"(?:(?:{_GENERIC_TLD_PATTERN})|(?-i:{_COUNTRY_TLD_PATTERN})(?![(\[]))"
+    r"(?![\w-]|\.[\w-])",
     re.IGNORECASE,
 )
 PHONE_RE = re.compile(
