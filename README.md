@@ -28,9 +28,9 @@ for one local vault salt and will differ.
 ## How It Works
 
 The agent never opens the private folder itself. It calls `redctx_*` tools,
-the server reads the raw files or configured GitHub issues, redacts every
-content field at one boundary, and returns only redacted text with opaque
-references such as `@p_1a2b3c4d5e6f`.
+the server reads the raw files, configured GitHub issues, or configured local
+mailbox exports, redacts every content field at one boundary, and returns only
+redacted text with opaque references such as `@p_1a2b3c4d5e6f`.
 
 In the diagrams, blue is the agent side, purple is processing inside redctx,
 amber is a check, green is redacted output or success, red is raw private data
@@ -49,12 +49,14 @@ flowchart TB
         direction TB
         FS["Filesystem source<br/>containment, exclusions,<br/>@p_ ids"]
         GH["GitHub source<br/>only if repos are configured"]
+        MS["Mail source<br/>only if mailboxes are configured"]
         RT["Raw text in memory<br/>never returned as is"]
         BL["Built-in baseline<br/>always on: terms, emails,<br/>URLs, secrets, names"]
         PD["Plugged detectors<br/>optional, --detector,<br/>add spans only"]
         PH["Deterministic placeholders<br/>[EMAIL_711a…]"]
         FS --> RT
         GH --> RT
+        MS --> RT
         RT --> BL
         RT -->|"original text"| PD
         BL --> PH
@@ -64,20 +66,21 @@ flowchart TB
         direction TB
         SRC[("Private source folder<br/>raw files")]
         API[("GitHub API<br/>raw issues")]
+        MBX[("Mailbox exports<br/>mbox, Maildir, .eml")]
         CONF[(".agent-context-redactor.toml<br/>+ term files")]
         SALT[("Vault salt<br/>HMAC key")]
     end
     AGS <==>|"down: tool call with @p_ id<br/>up: redacted text + opaque refs only"| SRV
-    SRV -->|"reads raw files and issues,<br/>loads terms and salt"| PRIV
+    SRV -->|"reads raw files, issues, and mail,<br/>loads terms and salt"| PRIV
 
     classDef agent fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
     classDef step fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
     classDef safe fill:#dcfce7,stroke:#16a34a,color:#14532d
     classDef raw fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
     class AG,CL agent
-    class FS,GH,BL,PD step
+    class FS,GH,MS,BL,PD step
     class PH safe
-    class SRC,CONF,SALT,API,RT raw
+    class SRC,CONF,SALT,API,MBX,RT raw
 ```
 
 Placeholders and path ids are deterministic for one vault salt, so the agent
@@ -309,6 +312,10 @@ is intended to preserve.
 - No runtime Python dependencies.
 - Optional local DOCX, PPTX, PDF, XLSX, and XLS extraction using Microsoft MarkItDown.
 - Ranked multi-word passage retrieval with opaque references and line citations.
+- Optional read-only access to local mailbox exports (mbox, Maildir, `.eml`)
+  with allow-listed headers, structural redaction of every name and address,
+  and names linked to their address's placeholder; see
+  [Redacted Mail](#redacted-mail).
 - Works well with a neutral agent workspace that does not contain raw context
   files.
 
@@ -322,7 +329,8 @@ Good fits:
 - consulting or client delivery knowledgebases;
 - internal project notes, stakeholder notes, and transcripts;
 - architecture or governance documentation with private names mixed in;
-- private GitHub issues that should be summarized through neutral aliases.
+- private GitHub issues that should be summarized through neutral aliases;
+- exported project mailboxes whose correspondents must stay anonymous.
 
 Do not treat this as a formal anonymization or data-loss-prevention system.
 
@@ -510,12 +518,23 @@ flowchart TB
         REPOS -->|"alias: context"| GLIST
         GLIST -->|"context#123"| GREAD
     end
+    subgraph MAILT["Mail tools (configured mailbox aliases)"]
+        direction LR
+        MSRC["redctx_mail_sources"]
+        MLIST["redctx_mail_list"]
+        MREAD["redctx_mail_read<br/>redctx_mail_thread"]
+        MATT["redctx_mail_attachment"]
+        MSRC -->|"alias: inbox"| MLIST
+        MLIST -->|"@m_1a2b3c4d5e6f"| MREAD
+        MREAD -->|"@m_1a2b3c4d5e6f/1"| MATT
+    end
     FILES ~~~ GHUB
+    GHUB ~~~ MAILT
 
     classDef step fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
     classDef safe fill:#dcfce7,stroke:#16a34a,color:#14532d
     classDef human fill:#ffedd5,stroke:#ea580c,color:#7c2d12
-    class TREE,SEARCH,RETR,RD,BUN,STAT,RES,REPOS,GLIST,GREAD step
+    class TREE,SEARCH,RETR,RD,BUN,STAT,RES,REPOS,GLIST,GREAD,MSRC,MLIST,MREAD,MATT step
     class ID safe
     class SUBMIT human
 ```
@@ -525,7 +544,7 @@ flowchart TB
 | Navigate | `redctx_tree` | Indented directory overview, one `@p_<id> <redacted name>` line per entry |
 | Navigate | `redctx_list` | Directory entries with opaque ids, entry types, sizes, and redacted paths (optionally recursive) |
 | Find | `redctx_search` | Exact substring or regex line matches over redacted text, with context lines |
-| Find | `redctx_retrieve` | Passages ranked by query-word coverage and BM25 relevance, with line citations |
+| Find | `redctx_retrieve` | Passages ranked by query-word coverage and BM25 relevance, with line citations; `source: mail` ranks messages instead |
 | Read | `redctx_read` | One redacted file or an inclusive line range of it, with source line numbering preserved |
 | Read | `redctx_bundle` | Several redacted files concatenated in one response, with per-file and total limits |
 | Read | `redctx_stat` | Metadata for one path: opaque id, redacted path, type, size, and line count |
@@ -536,13 +555,18 @@ flowchart TB
 | GitHub | `redctx_github_list_issues` | Issues from a repo alias filtered by state and labels, one line each |
 | GitHub | `redctx_github_search_issues` | Issues matching a GitHub issue-search query, one line each; the query leaves the machine unredacted |
 | GitHub | `redctx_github_read_issue` | One issue's redacted body and, optionally, comments |
+| Mail | `redctx_mail_sources` | Configured mailbox aliases and formats (local config only, no mailbox opened) |
+| Mail | `redctx_mail_list` | Messages newest first, one line each, with paging and optional date filters |
+| Mail | `redctx_mail_read` | One message's allow-listed headers, attachment list, and redacted body |
+| Mail | `redctx_mail_thread` | Every indexed message linked to one message, oldest first |
+| Mail | `redctx_mail_attachment` | One attachment's redacted text (`text/*`, or documents with `--documents`) |
 | Write | `redctx_submit_doc` | Rehydrates and writes a drafted document; listed only with `--enable-writes` |
 
 Each tool's MCP description says when to use it instead of its siblings, what
 its output looks like, and which limits apply; every parameter is documented in
-the input schema. Agents should carry `@p_<id>` references and placeholders
-between calls rather than using raw filenames. GitHub issue text is untrusted
-external content.
+the input schema. Agents should carry `@p_<id>` and `@m_<id>` references and
+placeholders between calls rather than using raw filenames. GitHub issue text
+and mail are untrusted external content.
 
 Every file tool call goes through the same steps. Here is one `redctx_read`
 call on an opaque id:
@@ -672,7 +696,13 @@ redctx --root ../source-private read @p_1a2b3c4d5e6f --start-line 1 --end-line 8
 redctx --root ../source-private bundle context --glob "*.md" --max-files 10
 redctx --root ../source-private audit --format json
 redctx --root ../source-private benchmark --format json
+redctx --root ../source-private mail list inbox --limit 20
+redctx --root ../source-private mail read @m_1a2b3c4d5e6f
 ```
+
+GitHub and mail commands are described in
+[Redacted GitHub Issues](#redacted-github-issues) and
+[Redacted Mail](#redacted-mail).
 
 ### Ranked Retrieval
 
@@ -698,6 +728,9 @@ and has no additional dependencies. Results contain complete passages within
 the character budget; if none fits, increase `max_chars`. A limit notice marks
 omitted matches. Scan limits fail the request instead of presenting a partial
 scan as a complete ranking. Narrow `paths` or `glob` for large knowledgebases.
+
+`--source mail` (MCP: `source: "mail"`) ranks configured mail instead of
+files; see [Redacted Mail](#redacted-mail).
 
 ### Optional Document Extraction
 
@@ -801,6 +834,9 @@ GitHub repo entries are optional. Use neutral aliases such as `context`; agents
 use the alias, while the real `owner/repo` stays in this local config. Private
 repos require the named token environment variable in the shell that starts
 `redctx` or `redctx-mcp`.
+
+Mailbox entries (`[mail.sources.<alias>]`) are optional too; see
+[Redacted Mail](#redacted-mail).
 
 ### Alias Groups
 
@@ -1354,6 +1390,209 @@ untrusted external content. Raw author logins and raw GitHub URLs are not
 printed; comment authors are shown as stable per-vault, per-repo opaque ids,
 and the issue author is not printed.
 
+## Redacted Mail
+
+Local mailbox exports can be read through the same redaction layer: mbox
+files, Maildir directories, and loose `.eml` files. Mail access is read-only
+and local. Mailbox files are opened `rb` and never locked, renamed, flagged,
+or written, and Maildir `new/` messages are not moved to `cur/`. Without
+`[mail.sources.*]` tables nothing is registered, and file and GitHub output is
+byte-identical whether or not mail is configured.
+
+Configure each mailbox under a neutral alias in the local redaction config:
+
+```toml
+[mail.sources.inbox]
+path = "exports/inbox.mbox"   # absolute, ~-relative, or relative to the root
+format = "mbox"               # mbox | maildir | eml
+max_messages = 50000          # optional index cap per mailbox
+max_message_bytes = 26214400  # optional per-message read cap (25 MiB)
+```
+
+The alias is what the agent sees; it must match
+`[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`. `format` is required. `eml` accepts one
+`.eml` file or a directory searched recursively for `*.eml`. Mailbox paths
+are never printed, and a mailbox under the served root is protected like the
+config: file tools never list, read, search, bundle, or serve it as a
+resource. Adding or removing mail tables takes effect on the next MCP request,
+like any other policy change.
+
+```sh
+redctx --root ../source-private mail sources
+redctx --root ../source-private mail list inbox --limit 20 --since 2026-10-01
+redctx --root ../source-private mail read @m_f3b825674b21
+redctx --root ../source-private mail thread @m_f3b825674b21 --max-messages 10
+redctx --root ../source-private mail attachment @m_f3b825674b21/1
+redctx --root ../source-private retrieve "rollout plan" inbox --source mail
+```
+
+The MCP server exposes the same flow with:
+
+- `redctx_mail_sources`: `<alias>  format=<format>` per mailbox.
+- `redctx_mail_list` (`mailbox`, `limit` 1-500, default 30, `offset`,
+  `since`, `until`): one tab-separated line per message, newest first, then
+  `[more: N messages; next offset=<n>]` when more match.
+- `redctx_mail_read` (`ref`, `include_quoted`, `max_body_chars`, default
+  30000).
+- `redctx_mail_thread` (`ref`, `max_messages` 1-50, default 20,
+  `include_quoted`, `max_body_chars`): the messages linked by Message-ID,
+  In-Reply-To, and References, oldest first.
+- `redctx_mail_attachment` (`ref`, `max_chars`, default 30000).
+- `redctx_retrieve` with `source: "mail"`.
+
+Every mail tool is always listed, like the GitHub tools; with no mailbox
+configured they answer `Unknown mailbox alias.` or `Unknown source
+reference.`.
+
+### What the Agent Sees
+
+A synthetic message:
+
+```text
+From: Jordan Lee <jordan@example.com>
+To: Avery Example <avery@example.org>
+Subject: rollout plan
+Message-ID: <plan-1@example.test>
+In-Reply-To: <ask-1@example.test>
+Received: from relay.example.test (relay.example.test [192.0.2.7]) ...
+DKIM-Signature: v=1; a=rsa-sha256; d=example.test; ...
+List-Unsubscribe: <https://lists.example.test/unsub?token=...>
+
+hi team,
+
+Jordan Lee here: the rollout plan is attached.
+your verification code is 482913.
+
+On Tue, Avery Example wrote:
+> can you send the plan?
+
+--
+Jordan Lee
+sales lead
+```
+
+`redctx_mail_list` returns one line for it (tabs shown as two spaces):
+
+```text
+@m_f3b825674b21  mailbox=inbox  date=2026-10-01T08:15:00Z  from=[PERSON_de9a55798e690aada8a8e233f5963479.afcd7d69] <[EMAIL_de9a55798e690aada8a8e233f5963479]>  thread=@m_deb2f91de40e  untrusted_subject=rollout plan
+```
+
+and `redctx_mail_read` returns:
+
+```text
+message: @m_f3b825674b21
+mailbox: inbox
+date: 2026-10-01T08:15:00Z
+from: [PERSON_de9a55798e690aada8a8e233f5963479.afcd7d69] <[EMAIL_de9a55798e690aada8a8e233f5963479]>
+to: [PERSON_0906374bdcd77f9c7fdb1e3f88943810.d34669c5] <[EMAIL_0906374bdcd77f9c7fdb1e3f88943810]>
+thread: @m_deb2f91de40e
+in_reply_to: @m_deb2f91de40e
+references: @m_deb2f91de40e
+untrusted_subject: rollout plan
+attachments: 1
+attachment 1: @m_f3b825674b21/1 type=text/plain size=31 name=[ENTITY_d6c087cb6480f41446351fe89c615ea9]-[ENTITY_3ef7a8ea9421f116db2dbf4df4ef900e].[ENTITY_cb6ea77cd155e0ddd965d049a662b5a7]
+
+body_untrusted_external:
+hi team,
+
+[PERSON_de9a55798e690aada8a8e233f5963479.afcd7d69] here: the rollout plan is attached.
+your verification code is [SECRET_0164bfb81520b702e7a10dbaa5c46391].
+
+[quoted text: 2 lines omitted]
+
+[signature: 3 lines omitted]
+```
+
+The values are illustrative; real placeholders and refs depend on the vault
+salt.
+
+- **Headers are allow-listed.** Only `Date`, `From`, `Sender`, `Reply-To`,
+  `To`, `Cc`, `Bcc`, and `Subject` are rendered. `Received`, `Return-Path`,
+  `DKIM-Signature`, `ARC-*`, `Authentication-Results`, `Delivered-To`,
+  `List-*`, every `X-*` header, and anything else are dropped. Message-ID,
+  In-Reply-To, and References appear only as salted `@m_<id>` refs, and the
+  date is regenerated as UTC, so the sender's UTC offset is not shown.
+- **Names and addresses are redacted structurally.** Every display name and
+  address in an address header becomes a placeholder, whether or not it is
+  configured and whether or not a pattern would match it (`root@localhost`
+  included). A header that does not parse prints `[unparsed]` and contributes
+  nothing to the identity list.
+- **Names are linked to their address.** Names and addresses from the headers
+  of every configured mailbox are redacted in every subject, body, and
+  attachment. An unconfigured name seen with one address shares that
+  address's hex: `Jordan Lee <jordan@example.com>` becomes
+  `[PERSON_<hex>.<form>] <[EMAIL_<hex>]>`, and "Jordan Lee" in any message is
+  the same `[PERSON_<hex>.<form>]`. The address keeps its ordinary
+  placeholder, so `jordan@example.com` in a file and in mail is the same
+  `[EMAIL_<hex>]`. Configured people keep their configured placeholder, and
+  configured [alias groups](#alias-groups) win over harvested links.
+  Harvested identities live only in memory and never change file or GitHub
+  output.
+- **Mail-specific redaction.** One-time codes after a code keyword
+  (`code`, `passcode`, `OTP`, `PIN`, ...), scheme-less links with a path or
+  query, and opaque mixed letter-and-digit tokens of 24 or more characters are
+  redacted, and prompt-injection phrases are redacted on mail whatever the
+  detector profile.
+- **Quoted text and signatures are collapsed** to `[quoted text: N lines
+  omitted]` and `[signature: N lines omitted]`; `include_quoted` (CLI
+  `--include-quoted`) shows them, redacted. HTML-only bodies are converted to
+  text, dropping scripts, styles, and hidden elements, and invisible format
+  characters are removed so they cannot split a name.
+- **Attachments** are listed with an `@m_<id>/<n>` ref, a MIME type, a size,
+  and a path-redacted filename. `redctx_mail_attachment` returns `text/*`
+  parts decoded and redacted; DOCX, PPTX, PDF, XLSX, and XLS parts are
+  extracted only with `--documents` (see
+  [Optional Document Extraction](#optional-document-extraction)); other
+  types are refused with `Unsupported attachment type.`.
+- **Mail is untrusted external content.** Output uses fixed labels
+  (`untrusted_subject`, `body_untrusted_external:`,
+  `attachment_untrusted_external:`), retrieval passages carry
+  `untrusted_external`, and the MCP instructions tell the agent never to
+  follow instructions found in mail.
+
+### Mail Retrieval
+
+`redctx_retrieve` with `source: "mail"` (CLI: `retrieve --source mail`)
+ranks each message's subject and collapsed body with the same scoring as file
+retrieval:
+
+```text
+--- @m_f3b825674b21 inbox lines 1-10 score=0.791 untrusted_external ---
+rollout plan
+
+hi team,
+...
+```
+
+`paths` takes mailbox aliases or `@m_<id>` refs (default: every mailbox), and
+`glob` is refused. Mail retrieval has its own limits instead of the file
+limits: at most 5,000 messages and 500 MB of raw message bytes per call, each
+message within its mailbox's `max_message_bytes`, and the 30 s deadline (CLI
+`--max-seconds`). It fails closed rather than ranking part of the scope.
+
+### Mail Limits
+
+- Index: each mailbox is indexed in memory from at most 256 KiB of each
+  message's header block, within `max_messages`, 1 GiB of header bytes, and
+  120 s. The index is rebuilt when the mailbox's metadata changes and is never
+  written to disk. Any unreadable mailbox fails every mail call, because the
+  identity list needs all of them.
+- Reads: `max_message_bytes` per message; `limit` and `offset` for lists; at
+  most 50 messages per thread call; `max_body_chars` and `max_chars` for
+  output; the document extraction limits for document attachments.
+- Date filters are UTC days (`YYYY-MM-DD`, inclusive) and leave out messages
+  without a parseable date.
+
+### Mail Non-Goals
+
+- No IMAP, POP, JMAP, OAuth, network access, or sending; export mail locally
+  first.
+- No flag, folder, or read-state changes.
+- Mail placeholders are not rehydrated: `redctx rehydrate` and
+  `redctx_submit_doc` rebuild their map from the private root only, so a
+  placeholder that only mail produced (such as a linked name) cannot be
+  restored and a draft that uses it fails with an unresolved-token error.
+
 ## Discover Terms With A Local LLM
 
 `redctx discover` can draft `.agent-context-redactor.toml` using a local
@@ -1592,8 +1831,10 @@ It helps because:
 
 - the agent starts in a neutral folder with no raw context files;
 - the useful operations are exposed as redacted MCP tools;
-- filenames can be navigated through opaque ids;
-- raw names, emails, URLs, phones, and configured terms are redacted.
+- filenames can be navigated through opaque ids, and mail through salted
+  `@m_<id>` refs;
+- raw names, emails, URLs, phones, and configured terms are redacted, and
+  every mail display name and address is replaced structurally.
 
 The `rehydrate` command intentionally reverses redacted exports for the local
 operator. `redctx_submit_doc` can also rehydrate generated redacted text, but
@@ -1608,7 +1849,10 @@ Additional guardrails:
 - The redaction config (default or explicit `--config`), configured term
   files, `.env*`, `*.key`, `*.pem`, and `*.crt` files are never served through
   redacted tools, even with `--include-private`, with case-folded matching so
-  `.ENV` and `server.PEM` variants are refused too.
+  `.ENV` and `server.PEM` variants are refused too. Configured mailbox
+  exports under the root are refused the same way.
+- GitHub issue text and mail are labelled untrusted external content; mail
+  keeps only allow-listed headers.
 - Bare long hex strings (the vault-salt shape), salt-keyed assignments, and
   underscore-qualified secrets such as `DB_PASSWORD=...` are redacted by
   default.

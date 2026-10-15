@@ -161,6 +161,20 @@ export GITHUB_TOKEN="<github-token>"
 redctx --root /work/source-private github issues context --limit 10
 ```
 
+Local mailbox exports are optional too. Add a `[mail.sources.<alias>]` table
+per mbox file, Maildir directory, or `.eml` folder; see "Redacted Mail" in the
+README:
+
+```toml
+[mail.sources.inbox]
+path = "exports/inbox.mbox"
+format = "mbox"
+```
+
+```sh
+redctx --root /work/source-private mail list inbox --limit 10
+```
+
 You can draft this file with a local Ollama model instead of writing all names
 manually:
 
