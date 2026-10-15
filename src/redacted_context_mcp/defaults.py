@@ -539,10 +539,19 @@ ORG_SUFFIX_RE = re.compile(
     r"[A-Z][A-Za-z0-9&'.-]+\s+"
     r"(?:AG|BV|Corp(?:oration)?|GmbH|Holdings|Inc|Limited|LLC|Ltd|NV|PLC|SA|SAS)\b"
 )
+# Labels that introduce a list of people, as in "Attendees: Avery, Jordan".
+IDENTITY_LABEL = (
+    r"(?:attendees?|participants?|stakeholders?|owners?|contacts?|authors?|"
+    r"reviewers?|approvers?|speakers?|presenters?)"
+)
 # Whitespace between the words of a proper name: any amount on one line, or one
 # line break so a name wrapped onto the next line still matches. A blank line
-# ends the name.
-NAME_GAP = r"(?:[^\S\r\n]+|[^\S\r\n]*(?:\r\n|\r|\n)[^\S\r\n]*)"
+# ends the name, and so does a line that starts with an identity label, which
+# the identity-line pass needs to see.
+NAME_GAP = (
+    r"(?:[^\S\r\n]+|[^\S\r\n]*(?:\r\n|\r|\n)[^\S\r\n]*"
+    rf"(?!(?i:{IDENTITY_LABEL})\b[ \t]*:))"
+)
 MULTI_PROPER_RE = re.compile(
     r"\b(?:[A-Z][A-Za-z'.-]{2,}|[A-Z]\.)"
     rf"(?:{NAME_GAP}(?:[A-Z][A-Za-z'.-]{{2,}}|[A-Z]\.)){{1,4}}\b"
@@ -552,10 +561,7 @@ MULTI_PROPER_RE = re.compile(
 # counts use: \r\n, \r and \n.
 HEADING_LINE_RE = re.compile(r"(?:\A|(?<=[\r\n])) {0,3}#{1,6}(?![^ \t\r\n])[^\r\n]*")
 SPEAKER_LABEL_RE = re.compile(r"(?m)^([A-Z][A-Za-z'.-]{2,})(?=[ \t]*:)")
-IDENTITY_LINE_RE = re.compile(
-    r"(?im)\b(attendees?|participants?|stakeholders?|owners?|contacts?|authors?|"
-    r"reviewers?|approvers?|speakers?|presenters?)\b([ \t]*):([ \t]*)([^\r\n]*)"
-)
+IDENTITY_LINE_RE = re.compile(rf"(?im)\b({IDENTITY_LABEL})\b([ \t]*):([ \t]*)([^\r\n]*)")
 # A name in an identity line's value. It is looser than TITLECASE_TOKEN_RE so
 # that two- and three-letter names are caught as well.
 IDENTITY_NAME_RE = re.compile(r"\b[A-Z][a-z][A-Za-z'.-]*\b")

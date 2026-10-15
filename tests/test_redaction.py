@@ -215,6 +215,23 @@ class IdentityLabelTest(unittest.TestCase):
 
                     self.assertEqual(redactor.redact(f"{label}: Avery, Kim, Al\n"), f"{label}: {names}\n")
 
+    def test_label_on_the_next_line_is_not_joined_to_a_name(self) -> None:
+        for mode in ("balanced", "strict"):
+            with self.subTest(mode=mode):
+                redactor = Redactor(RedactionConfig(salt="test-salt"), mode=mode)
+                avery = redactor.placeholder("PERSON", "Avery Example")
+                kim = redactor.placeholder("PERSON", "Kim")
+                jordan = redactor.placeholder("PERSON", "Jordan")
+
+                self.assertEqual(
+                    redactor.redact("Attendees: Avery Example, Kim\nOwner: Jordan\n"),
+                    f"Attendees: {avery}, {kim}\nOwner: {jordan}\n",
+                )
+                self.assertEqual(
+                    redactor.redact("Owner: Avery Example\n  contacts : Jordan\n"),
+                    f"Owner: {avery}\n  contacts : {jordan}\n",
+                )
+
     def test_upper_case_label_survives_strict_mode(self) -> None:
         redactor = Redactor(RedactionConfig(salt="test-salt"), mode="strict")
 

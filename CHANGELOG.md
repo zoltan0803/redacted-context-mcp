@@ -21,6 +21,8 @@
   and, in balanced mode, the names after it stayed raw. Identity lines are now
   handled first, and their label (`Attendees`, `Owner`, `Contact`, and the
   other built-in labels) is kept in both modes while the names are redacted.
+  A proper name that ends one line also no longer runs on into a label at the
+  start of the next, which hid the label the same way.
 - Names of two or three letters after an identity label are redacted too.
   Before, `Attendees: Avery, Kim, Al` left `Kim` and `Al` raw in both modes,
   because the identity-line pass only matched capitalized words of four or more
