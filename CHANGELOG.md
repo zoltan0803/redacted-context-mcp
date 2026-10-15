@@ -33,6 +33,9 @@
   all in either mode, because the domain pattern refused any following `.`. It
   now matches unless another label follows the period, so `a.example.com.au`
   is treated as before.
+- The README's first example now shows the output of the default `strict`
+  mode, and says what `--mode balanced` changes. It used to show balanced
+  output without naming the mode.
 
 ## 0.10.0 — 2026-10-15
 
