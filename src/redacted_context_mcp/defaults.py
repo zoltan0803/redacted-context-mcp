@@ -556,6 +556,9 @@ IDENTITY_LINE_RE = re.compile(
     r"(?im)\b(attendees?|participants?|stakeholders?|owners?|contacts?|authors?|"
     r"reviewers?|approvers?|speakers?|presenters?)\b([ \t]*):([ \t]*)([^\r\n]*)"
 )
+# A name in an identity line's value. It is looser than TITLECASE_TOKEN_RE so
+# that two- and three-letter names are caught as well.
+IDENTITY_NAME_RE = re.compile(r"\b[A-Z][a-z][A-Za-z'.-]*\b")
 TITLECASE_TOKEN_RE = re.compile(r"\b[A-Z][a-z][A-Za-z'.-]{2,}\b")
 ACRONYM_RE = re.compile(r"\b[A-Z][A-Z0-9]{2,}\b")
 PATH_TOKEN_RE = re.compile(r"(?<!\[)\b[A-Za-z][A-Za-z0-9]{2,}\b(?!_\d{2}\])")

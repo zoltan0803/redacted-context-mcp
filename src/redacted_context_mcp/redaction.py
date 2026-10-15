@@ -30,6 +30,7 @@ from .defaults import (
     HEX_SECRET_RE,
     IBAN_RE,
     IDENTITY_LINE_RE,
+    IDENTITY_NAME_RE,
     IP_RE,
     IPV6_RE,
     MAC_RE,
@@ -746,7 +747,7 @@ class Redactor:
         # The label is generic vocabulary; stashing it keeps the speaker-label
         # and strict-mode passes from redacting it.
         label = session.stash_allowed(match.group(1))
-        return f"{label}{match.group(2)}:{match.group(3)}{TITLECASE_TOKEN_RE.sub(replace_name, match.group(4))}"
+        return f"{label}{match.group(2)}:{match.group(3)}{IDENTITY_NAME_RE.sub(replace_name, match.group(4))}"
 
     def _replace_multi_proper(
         self,

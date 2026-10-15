@@ -206,6 +206,15 @@ class IdentityLabelTest(unittest.TestCase):
 
                 self.assertEqual(redactor.redact("Owner: Avery Example\n"), f"Owner: {person}\n")
 
+    def test_short_names_after_a_label_are_redacted(self) -> None:
+        for mode in ("balanced", "strict"):
+            for label in ("Attendees", "attendees"):
+                with self.subTest(mode=mode, label=label):
+                    redactor = Redactor(RedactionConfig(salt="test-salt"), mode=mode)
+                    names = ", ".join(redactor.placeholder("PERSON", name) for name in ("Avery", "Kim", "Al"))
+
+                    self.assertEqual(redactor.redact(f"{label}: Avery, Kim, Al\n"), f"{label}: {names}\n")
+
     def test_upper_case_label_survives_strict_mode(self) -> None:
         redactor = Redactor(RedactionConfig(salt="test-salt"), mode="strict")
 
