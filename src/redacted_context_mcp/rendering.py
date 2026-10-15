@@ -5,12 +5,21 @@ records into output text and redacts every content field on the way out. It
 is shared by the ``redctx`` CLI and the MCP server so both surfaces render
 identical, already-redacted text.
 
-The ``*_text`` entry points validate every argument before any upstream
-request, make one ``GitHubSource`` call, and format the returned records.
-The ``render_*`` functions only format.
+The ``*_text`` entry points validate every argument before touching the
+source, make the source call, and format the returned records. The
+``render_*`` functions only format.
+
+Mail content is always redacted with a mail redactor derived from the active
+``Redactor`` (``Redactor.for_mail``) over every identity harvested from the
+configured mailboxes, never with the base redactor, so a correspondent's name
+is caught wherever it appears. ``MailRedactorCache`` lets a long-running
+server reuse one mail redactor until the identities or the policy change.
 """
 
 from __future__ import annotations
+
+import threading
+from typing import Sequence
 
 from .defaults import PLACEHOLDER_RE
 from .github import (
@@ -22,7 +31,32 @@ from .github import (
     validate_nonnegative_limit,
     validate_positive_limit,
 )
+from .limits import OperationBudget
+from .mail import (
+    GLOB_MESSAGE,
+    LIMIT_MAX_MESSAGE,
+    LIMIT_MIN_MESSAGE,
+    MAIL_LIST_MAX_LIMIT,
+    MAIL_THREAD_MAX_MESSAGES,
+    OFFSET_MESSAGE,
+    THREAD_MAX_MESSAGE,
+    THREAD_MIN_MESSAGE,
+    UNKNOWN_MAILBOX_MESSAGE,
+    MailAddress,
+    MailMessage,
+    MailSource,
+    MailSummary,
+    parse_date_filter,
+)
+from .models import UNKNOWN_REFERENCE_MESSAGE
 from .redaction import Redactor
+from .retrieval import retrieve, validate_retrieval_arguments
+
+# Mail retrieval limits: messages and total raw bytes read per call. The
+# per-message cap is the largest configured ``max_message_bytes``; each
+# mailbox still enforces its own cap when a message is read.
+MAIL_RETRIEVE_MAX_MESSAGES = 5_000
+MAIL_RETRIEVE_MAX_TOTAL_BYTES = 500_000_000
 
 
 def truncate_redacted(text: str, max_chars: int) -> str:
@@ -158,3 +192,279 @@ def github_issue_detail_text(
         repo_alias, number, comments=comments, max_comments=max_comments
     )
     return render_github_issue_detail(issue, comment_records, redactor, max_body_chars=max_body_chars)
+
+
+# Mail -------------------------------------------------------------------------
+
+
+class MailRedactorCache:
+    """One mail redactor per (base redactor, harvested identities).
+
+    Building a mail redactor compiles a pattern over every harvested identity,
+    which is slow for large mailboxes. The MCP server keeps one cache and
+    clears it whenever the policy reloads; the CLI builds one per call.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._base: Redactor | None = None
+        self._identities: tuple[tuple[str, str], ...] | None = None
+        self._mail: Redactor | None = None
+
+    def get(self, redactor: Redactor, identities: tuple[tuple[str, str], ...]) -> Redactor:
+        with self._lock:
+            if self._mail is not None and self._base is redactor and self._identities == identities:
+                return self._mail
+        mail = redactor.for_mail(identities)
+        with self._lock:
+            self._base, self._identities, self._mail = redactor, identities, mail
+        return mail
+
+    def clear(self) -> None:
+        with self._lock:
+            self._base = self._identities = self._mail = None
+
+
+def mail_redactor(
+    source: MailSource,
+    redactor: Redactor,
+    cache: MailRedactorCache | None = None,
+    budget: OperationBudget | None = None,
+) -> Redactor:
+    """The mail redactor over every identity in every configured mailbox."""
+    identities = source.identities(budget)
+    if cache is None:
+        return redactor.for_mail(identities)
+    return cache.get(redactor, identities)
+
+
+def collapse_whitespace(value: str) -> str:
+    """Join whitespace runs (newlines and tabs included) into single spaces."""
+    return " ".join(value.split())
+
+
+def render_mail_identity(identity: MailAddress, redactor: Redactor) -> str:
+    """``<name> <<address>>`` from structural placeholders; either part may be absent."""
+    name = redactor.mail_name_placeholder(identity.name) if identity.name else ""
+    address = redactor.mail_address_placeholder(identity.address) if identity.address else ""
+    if name and address:
+        return f"{name} <{address}>"
+    if address:
+        return f"<{address}>"
+    return name
+
+
+def render_mail_identities(value: tuple[MailAddress, ...] | None, redactor: Redactor) -> str:
+    """Comma-separated identities, ``[unparsed]`` for a header that did not parse, ``-`` for none."""
+    if value is None:
+        return "[unparsed]"
+    rendered = [text for text in (render_mail_identity(identity, redactor) for identity in value) if text]
+    return ", ".join(rendered) if rendered else "-"
+
+
+def render_mail_subject(subject: str, redactor: Redactor) -> str:
+    # Collapse first so a folded or hostile subject stays on one line.
+    return redactor.redact(collapse_whitespace(subject))
+
+
+def render_mail_summary(summary: MailSummary, redactor: Redactor) -> str:
+    sender = render_mail_identities(summary.sender, redactor)
+    subject = render_mail_subject(summary.subject, redactor)
+    return (
+        f"{summary.ref}\tmailbox={summary.mailbox}\tdate={summary.date}\tfrom={sender}"
+        f"\tthread={summary.thread}\tuntrusted_subject={subject}"
+    )
+
+
+def render_mail_message(message: MailMessage, redactor: Redactor, *, max_body_chars: int) -> str:
+    lines = [
+        f"message: {message.ref}",
+        f"mailbox: {message.mailbox}",
+        f"date: {message.date}",
+    ]
+    for field_name, value in message.addresses:
+        lines.append(f"{field_name}: {render_mail_identities(value, redactor)}")
+    lines.append(f"thread: {message.thread}")
+    if message.in_reply_to:
+        lines.append(f"in_reply_to: {', '.join(message.in_reply_to)}")
+    if message.references:
+        lines.append(f"references: {', '.join(message.references)}")
+    lines.append(f"untrusted_subject: {render_mail_subject(message.subject, redactor)}")
+    lines.append(f"attachments: {len(message.attachments)}")
+    for number, attachment in enumerate(message.attachments, start=1):
+        filename = collapse_whitespace(attachment.filename)
+        name = redactor.redact_path(filename) if filename else "-"
+        lines.append(
+            f"attachment {number}: {attachment.ref} type={attachment.content_type} "
+            f"size={attachment.size} name={name}"
+        )
+    body = truncate_redacted(redactor.redact(message.body), max_body_chars)
+    lines.extend(["", "body_untrusted_external:", body])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_mail_thread(messages: list[MailMessage], total: int, redactor: Redactor, *, max_body_chars: int) -> str:
+    parts = [f"thread_messages: {len(messages)} of {total}\n"]
+    for index, message in enumerate(messages, start=1):
+        parts.append(f"--- message {index} ---\n")
+        parts.append(render_mail_message(message, redactor, max_body_chars=max_body_chars))
+    if total > len(messages):
+        parts.append(f"[more: {total - len(messages)} messages in thread; increase max_messages]\n")
+    return "".join(parts)
+
+
+def require_mail_source(source: MailSource | None, message: str) -> MailSource:
+    # With no configured mailboxes every alias and ref is unknown; keep the
+    # messages the per-alias and per-ref lookups use.
+    if source is None:
+        raise SystemExit(message)
+    return source
+
+
+def validate_mail_list_arguments(limit: int, offset: int, since: str, until: str) -> None:
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        raise SystemExit(LIMIT_MIN_MESSAGE)
+    if limit > MAIL_LIST_MAX_LIMIT:
+        raise SystemExit(LIMIT_MAX_MESSAGE)
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        raise SystemExit(OFFSET_MESSAGE)
+    parse_date_filter(since)
+    parse_date_filter(until)
+
+
+def validate_mail_thread_limit(max_messages: int) -> None:
+    if not isinstance(max_messages, int) or isinstance(max_messages, bool) or max_messages < 1:
+        raise SystemExit(THREAD_MIN_MESSAGE)
+    if max_messages > MAIL_THREAD_MAX_MESSAGES:
+        raise SystemExit(THREAD_MAX_MESSAGE)
+
+
+def mail_sources_text(source: MailSource | None) -> str:
+    """``<alias>\\tformat=<format>`` per configured mailbox, or ``""`` when none."""
+    if source is None:
+        return ""
+    return "".join(f"{alias}\tformat={mail_format}\n" for alias, mail_format in source.mailboxes())
+
+
+def mail_list_text(
+    source: MailSource | None,
+    redactor: Redactor,
+    *,
+    mailbox: str | None,
+    limit: int,
+    offset: int,
+    since: str = "",
+    until: str = "",
+    cache: MailRedactorCache | None = None,
+) -> str:
+    """Redacted message summaries, newest first, or ``""`` when the page is empty."""
+    validate_mail_list_arguments(limit, offset, since, until)
+    source = require_mail_source(source, UNKNOWN_MAILBOX_MESSAGE)
+    page, total = source.list_messages(mailbox, limit=limit, offset=offset, since=since, until=until)
+    if not page:
+        return ""
+    mail = mail_redactor(source, redactor, cache)
+    lines = [render_mail_summary(summary, mail) + "\n" for summary in page]
+    shown = offset + len(page)
+    if total > shown:
+        lines.append(f"[more: {total - shown} messages; next offset={shown}]\n")
+    return "".join(lines)
+
+
+def mail_read_text(
+    source: MailSource | None,
+    redactor: Redactor,
+    *,
+    ref: str,
+    include_quoted: bool = False,
+    max_body_chars: int,
+    cache: MailRedactorCache | None = None,
+) -> str:
+    max_body_chars = validate_positive_limit(max_body_chars, "--max-body-chars")
+    source = require_mail_source(source, UNKNOWN_REFERENCE_MESSAGE)
+    message = source.read_message(ref, include_quoted=include_quoted)
+    return render_mail_message(message, mail_redactor(source, redactor, cache), max_body_chars=max_body_chars)
+
+
+def mail_thread_text(
+    source: MailSource | None,
+    redactor: Redactor,
+    *,
+    ref: str,
+    max_messages: int,
+    include_quoted: bool = False,
+    max_body_chars: int,
+    cache: MailRedactorCache | None = None,
+) -> str:
+    validate_mail_thread_limit(max_messages)
+    max_body_chars = validate_positive_limit(max_body_chars, "--max-body-chars")
+    source = require_mail_source(source, UNKNOWN_REFERENCE_MESSAGE)
+    messages, total = source.thread_messages(ref, max_messages=max_messages, include_quoted=include_quoted)
+    mail = mail_redactor(source, redactor, cache)
+    return render_mail_thread(messages, total, mail, max_body_chars=max_body_chars)
+
+
+def mail_attachment_text(
+    source: MailSource | None,
+    redactor: Redactor,
+    *,
+    ref: str,
+    max_chars: int,
+    cache: MailRedactorCache | None = None,
+) -> str:
+    max_chars = validate_positive_limit(max_chars, "--max-chars")
+    source = require_mail_source(source, UNKNOWN_REFERENCE_MESSAGE)
+    text = source.read_attachment(ref)
+    redacted = truncate_redacted(mail_redactor(source, redactor, cache).redact(text), max_chars)
+    # ``ref`` resolved above, so it is a well-formed opaque attachment ref.
+    return f"attachment: {ref}\n\nattachment_untrusted_external:\n{redacted}".rstrip() + "\n"
+
+
+def mail_retrieval_budget(source: MailSource, seconds: float | None) -> OperationBudget:
+    caps = [mailbox.max_message_bytes for mailbox in source.config.mail_sources.values()]
+    return OperationBudget.from_seconds(
+        max_files=MAIL_RETRIEVE_MAX_MESSAGES,
+        max_raw_bytes_per_file=max(caps) if caps else None,
+        max_total_raw_bytes=MAIL_RETRIEVE_MAX_TOTAL_BYTES,
+        seconds=seconds,
+    )
+
+
+def mail_retrieve_text(
+    source: MailSource | None,
+    redactor: Redactor,
+    query: str,
+    *,
+    paths: Sequence[str],
+    globs: Sequence[str],
+    max_results: int,
+    max_chars: int,
+    seconds: float | None,
+    cache: MailRedactorCache | None = None,
+) -> str:
+    """Ranked retrieval over mail, redacted with the mail redactor.
+
+    ``paths`` are mailbox aliases or ``@m_`` message refs (default: every
+    mailbox); glob patterns are refused. The scan is charged to the mail
+    retrieval budget and fails closed when it is exceeded.
+    """
+    validate_retrieval_arguments(query, max_results=max_results, max_chars=max_chars)
+    if globs:
+        raise SystemExit(GLOB_MESSAGE)
+    source = require_mail_source(source, UNKNOWN_MAILBOX_MESSAGE)
+    for item in paths:
+        if not isinstance(item, str) or not (item in source.config.mail_sources or item.startswith("@m_")):
+            raise SystemExit(UNKNOWN_MAILBOX_MESSAGE)
+    budget = mail_retrieval_budget(source, seconds)
+    mail = mail_redactor(source, redactor, cache, budget)
+    aliases = source.config.mail_sources
+
+    def mailbox_alias(locator: str) -> str:
+        # Mail locators are the configured aliases the agent already sees;
+        # anything else is path-redacted like a file locator.
+        return locator if locator in aliases else mail.redact_path(locator)
+
+    return retrieve(
+        source, mail, query, paths=list(paths), globs=[], budget=budget,
+        max_results=max_results, max_chars=max_chars, display_locator=mailbox_alias,
+    )

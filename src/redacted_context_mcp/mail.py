@@ -115,7 +115,7 @@ DOCUMENT_CONTENT_TYPES = {
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
     "application/vnd.ms-excel": ".xls",
 }
-INVISIBLE_RE = re.compile("[​-‏‪-‮⁠-⁯﻿]")
+INVISIBLE_RE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
 MESSAGE_ID_RE = re.compile(r"<([^<>]*)>")
 DATE_FILTER_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 MBOXRD_ESCAPE_RE = re.compile(rb"^>(>*From )", re.MULTILINE)

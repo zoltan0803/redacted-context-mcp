@@ -10,7 +10,7 @@ from collections import Counter
 from dataclasses import dataclass
 import math
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from .defaults import PLACEHOLDER_RE
 from .limits import OperationBudget, OperationLimitError
@@ -75,18 +75,8 @@ def passages(text: str):
         yield start, end, "\n".join(block)
 
 
-def retrieve(
-    source: ContextSource, redactor: Redactor, query: str, *,
-    paths: list[str], globs: list[str], budget: OperationBudget,
-    max_results: int = 8, max_chars: int = 12_000,
-) -> str:
-    """Rank redacted passages from ``source``'s documents.
-
-    ``paths`` and ``globs`` are passed to the source as its document scope and
-    patterns. The source charges traversal and reads to ``budget``. Passages
-    from a source with ``untrusted_content`` carry an ``untrusted_external``
-    marker as the last header field.
-    """
+def validate_retrieval_arguments(query: str, *, max_results: int, max_chars: int) -> set[str]:
+    """Check retrieval arguments without any I/O and return the searchable query terms."""
     if not 1 <= max_results <= 50 or not 256 <= max_chars <= 100_000:
         raise SystemExit("Retrieval requires max_results between 1 and 50 and max_chars between 256 and 100000.")
     if len(query) > 2000:
@@ -94,6 +84,25 @@ def retrieve(
     terms = set(tokens(query)) - STOP_WORDS
     if not terms or len(terms) > 64:
         raise SystemExit("Retrieval requires 1 to 64 searchable query terms.")
+    return terms
+
+
+def retrieve(
+    source: ContextSource, redactor: Redactor, query: str, *,
+    paths: list[str], globs: list[str], budget: OperationBudget,
+    max_results: int = 8, max_chars: int = 12_000,
+    display_locator: Callable[[str], str] | None = None,
+) -> str:
+    """Rank redacted passages from ``source``'s documents.
+
+    ``paths`` and ``globs`` are passed to the source as its document scope and
+    patterns. The source charges traversal and reads to ``budget``. Passages
+    from a source with ``untrusted_content`` carry an ``untrusted_external``
+    marker as the last header field. Locators are path-redacted unless the
+    caller supplies ``display_locator`` for a source whose locators are
+    neutral names (mailbox aliases).
+    """
+    terms = validate_retrieval_arguments(query, max_results=max_results, max_chars=max_chars)
     if not source.supports_document_iteration:
         raise SystemExit(DOCUMENTS_UNSUPPORTED_MESSAGE)
     candidates: list[tuple[Passage, Counter[str], int]] = []
@@ -101,7 +110,8 @@ def retrieve(
     count = total_length = 0
     for document in source.iter_documents(budget, scope=paths, patterns=globs):
         redacted = redactor.redact(document.text, preserve_line_count=True)
-        ref, safe_path = document.ref, redactor.redact_path(document.locator)
+        locator = display_locator or redactor.redact_path
+        ref, safe_path = document.ref, locator(document.locator)
         for start, end, text in passages(redacted):
             budget.check_deadline()
             count += 1
