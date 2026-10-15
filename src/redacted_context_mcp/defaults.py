@@ -430,9 +430,13 @@ ORG_SUFFIX_RE = re.compile(
     r"[A-Z][A-Za-z0-9&'.-]+\s+"
     r"(?:AG|BV|Corp(?:oration)?|GmbH|Holdings|Inc|Limited|LLC|Ltd|NV|PLC|SA|SAS)\b"
 )
+# Whitespace between the words of a proper name: any amount on one line, or one
+# line break so a name wrapped onto the next line still matches. A blank line
+# ends the name.
+NAME_GAP = r"(?:[^\S\r\n]+|[^\S\r\n]*(?:\r\n|\r|\n)[^\S\r\n]*)"
 MULTI_PROPER_RE = re.compile(
     r"\b(?:[A-Z][A-Za-z'.-]{2,}|[A-Z]\.)"
-    r"(?:\s+(?:[A-Z][A-Za-z'.-]{2,}|[A-Z]\.)){1,4}\b"
+    rf"(?:{NAME_GAP}(?:[A-Z][A-Za-z'.-]{{2,}}|[A-Z]\.)){{1,4}}\b"
 )
 SPEAKER_LABEL_RE = re.compile(r"(?m)^([A-Z][A-Za-z'.-]{2,})(?=[ \t]*:)")
 IDENTITY_LINE_RE = re.compile(

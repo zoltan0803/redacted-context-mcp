@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- A run of capitalized words redacted as one proper name no longer crosses a
+  blank line. Before, `Next Steps`, a blank line, and `Contact the vendor`
+  became one `PERSON` placeholder that swallowed the first word of the next
+  paragraph. A name wrapped onto the next line is still one placeholder.
+
 ## 0.10.0 — 2026-10-15
 
 - Adds alias groups. `[redaction.aliases]` maps a canonical value (a

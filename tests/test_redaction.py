@@ -72,5 +72,38 @@ Domain: {raw_values[10]}
         self.assertRegex(redacted, r"\[SERVICE_ACCOUNT_[0-9a-f]{32}\]")
 
 
+class ProperNameLineBreakTest(unittest.TestCase):
+    def test_blank_line_ends_a_proper_name(self) -> None:
+        for newline in ("\n", "\r\n", "\r"):
+            with self.subTest(newline=repr(newline)):
+                redactor = Redactor(RedactionConfig(salt="test-salt"), mode="balanced")
+                text = f"Avery Example{newline}{newline}Jordan Sample met here."
+
+                self.assertEqual(
+                    redactor.redact(text),
+                    f"{redactor.placeholder('PERSON', 'Avery Example')}{newline}{newline}"
+                    f"{redactor.placeholder('PERSON', 'Jordan Sample')} met here.",
+                )
+
+    def test_whitespace_only_line_ends_a_proper_name(self) -> None:
+        redactor = Redactor(RedactionConfig(salt="test-salt"), mode="balanced")
+
+        self.assertEqual(
+            redactor.redact("Avery Example\n \t\nJordan Sample"),
+            f"{redactor.placeholder('PERSON', 'Avery Example')}\n \t\n"
+            f"{redactor.placeholder('PERSON', 'Jordan Sample')}",
+        )
+
+    def test_name_wrapped_onto_the_next_line_is_one_placeholder(self) -> None:
+        redactor = Redactor(RedactionConfig(salt="test-salt"), mode="balanced")
+        placeholder = redactor.placeholder("PERSON", "Avery\nExample")
+
+        self.assertEqual(redactor.redact("We met Avery\nExample today."), f"We met {placeholder} today.")
+        self.assertEqual(
+            redactor.redact("We met Avery\nExample today.", preserve_line_count=True),
+            f"We met {placeholder}\n today.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
