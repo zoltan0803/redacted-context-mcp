@@ -401,6 +401,25 @@ class MailHeaderPolicyTest(MailTestCase):
         self.assertIsNone(page[0].sender)
         self.assertEqual(source.identities(), ((mf.JORDAN, mf.JORDAN_ADDRESS),))
 
+    def test_defective_address_headers_are_unparsed_on_every_python_version(self) -> None:
+        # The stdlib raises for some of these on one Python version and
+        # returns ``<>`` placeholder addresses on another.
+        unparsed = ('"', "Group:;;;", "<>", "Avery Example <>", "jordan", "@example.org", "Avery Example", ":;")
+        for value in unparsed:
+            with self.subTest(value=value):
+                self.assertEqual(mail.parse_address_header(mail.parse_headers(f"From: {value}\n".encode()), "From"), (True, None))
+        parsed = {
+            "undisclosed-recipients:;": (MailAddress("undisclosed-recipients", ""),),
+            "Sender <@route.example:s@example.test>": (MailAddress("Sender", "s@example.test"),),
+            "a@example.test, , c@example.test": (MailAddress("", "a@example.test"), MailAddress("", "c@example.test")),
+            "root@localhost": (MailAddress("", "root@localhost"),),
+        }
+        for value, expected in parsed.items():
+            with self.subTest(value=value):
+                self.assertEqual(
+                    mail.parse_address_header(mail.parse_headers(f"From: {value}\n".encode()), "From"), (True, expected)
+                )
+
     def test_dates_are_generated_utc_strings(self) -> None:
         cases = (
             ("Thu, 01 Oct 2026 10:15:00 +0200", "2026-10-01T08:15:00Z"),
@@ -426,6 +445,13 @@ class MailHeaderPolicyTest(MailTestCase):
         message = self.mbox_source([raw]).read_message(expected_ref("m1@example.test"))
         self.assertEqual(message.subject, "Quarterly plan")
         self.assertEqual(message.body, "Avery Example\nnext line\n")
+
+    def test_other_invisible_characters_cannot_split_names(self) -> None:
+        body = "Av­ery Ex͏ample, Av\U000e0061ery️ Exam؜ple, Avㅤery Example\n"
+        raw = mf.message(subject="Quar­terly\U000e0070 plan", body=body)
+        message = self.mbox_source([raw]).read_message(expected_ref("m1@example.test"))
+        self.assertEqual(message.subject, "Quarterly plan")
+        self.assertEqual(message.body, "Avery Example, Avery Example, Avery Example\n")
 
     def test_identities_cover_every_mailbox_sorted_and_deduplicated(self) -> None:
         mbox = mf.write_mbox(self.dir / "inbox.mbox", mf.standard_messages())
@@ -500,6 +526,26 @@ class MailBodyTest(MailTestCase):
 
     def test_unclosed_head_does_not_hide_the_body(self) -> None:
         self.assertEqual(html_to_text("<html><head><meta charset='utf-8'><body><p>Body text</p>"), "Body text")
+
+    def test_hostile_nesting_stays_linear_and_bounded(self) -> None:
+        count = 20_000
+        for markup in (
+            "<div>" * count + "</span>" * count,
+            "<div>" * count + "<body>" * count,
+            '<a href="https://example.test/x">' * count + "w<br>" * count + "</a>" * count,
+        ):
+            started = time.monotonic()
+            html_to_text(markup)
+            self.assertLess(time.monotonic() - started, 5.0)
+        deep = html_to_text("<blockquote>x" * 200)
+        self.assertEqual(max(len(line) for line in deep.split("\n")), len("> " * mail.MAX_HTML_QUOTE_DEPTH) + 1)
+
+    def test_nested_links_keep_their_targets(self) -> None:
+        markup = (
+            '<p><a href="https://example.test/outer">see <a href="https://example.test/inner">'
+            "https://example.test/inner</a></a> now</p>"
+        )
+        self.assertEqual(html_to_text(markup), "see https://example.test/inner <https://example.test/outer> now")
 
     def test_blank_line_runs_collapse(self) -> None:
         self.assertEqual(html_to_text("<p>a</p><p></p><p></p><div><br><br><br></div><p>b</p>"), "a\n\nb")

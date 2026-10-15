@@ -21,6 +21,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from email import policy
+from email.errors import ObsoleteHeaderDefect
 from email.message import Message
 from email.parser import BytesParser
 from email.utils import parsedate_to_datetime
@@ -115,7 +116,15 @@ DOCUMENT_CONTENT_TYPES = {
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
     "application/vnd.ms-excel": ".xls",
 }
-INVISIBLE_RE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
+# Invisible characters that could hide text or split a name or address:
+# zero-width and bidi format characters, the soft hyphen, the combining
+# grapheme joiner, the Arabic letter mark, invisible fillers, the Mongolian
+# vowel separator, variation selectors, interlinear annotation characters,
+# and tag characters.
+INVISIBLE_RE = re.compile(
+    "[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180e\u180f\u200b-\u200f\u202a-\u202e"
+    "\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff9-\ufffb\U000e0000-\U000e007f\U000e0100-\U000e01ef]"
+)
 MESSAGE_ID_RE = re.compile(r"<([^<>]*)>")
 DATE_FILTER_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 MBOXRD_ESCAPE_RE = re.compile(rb"^>(>*From )", re.MULTILINE)
@@ -1013,7 +1022,14 @@ def normalize_datetime(when: object) -> tuple[float | None, str]:
 
 
 def parse_address_header(message: Message, name: str) -> tuple[bool, tuple[MailAddress, ...] | None]:
-    """Return ``(present, identities)``; identities are ``None`` when the header did not parse."""
+    """Return ``(present, identities)``; identities are ``None`` when the header did not parse.
+
+    The stdlib parser recovers from malformed input differently across
+    Python versions (raising on one, returning ``<>`` placeholders on
+    another), so a header counts as parsed only when it reports no defects
+    other than obsolete syntax and every address has a local part and a
+    domain. Valid group labels such as ``undisclosed-recipients:;`` stay.
+    """
     try:
         values = message.get_all(name)
     except Exception:
@@ -1023,14 +1039,17 @@ def parse_address_header(message: Message, name: str) -> tuple[bool, tuple[MailA
     try:
         found: list[MailAddress] = []
         for value in values:
+            if any(not isinstance(defect, ObsoleteHeaderDefect) for defect in value.defects):
+                return True, None
             for group in value.groups:
                 if group.display_name:
                     found.append(MailAddress(name=clean_text(group.display_name), address=""))
                 for address in group.addresses:
+                    if not address.username or not address.domain or address.addr_spec in ("", "<>"):
+                        return True, None
                     display = clean_text(address.display_name or "")
-                    spec = clean_text(address.addr_spec or "")
-                    if display or spec:
-                        found.append(MailAddress(name=display, address=spec))
+                    spec = clean_text(address.addr_spec)
+                    found.append(MailAddress(name=display, address=spec))
         return True, tuple(found)
     except Exception:
         return True, None
@@ -1194,6 +1213,8 @@ PARAGRAPH_ELEMENTS = frozenset({"p", "h1", "h2", "h3", "h4", "h5", "h6"})
 HIDDEN_STYLE_RE = re.compile(r"display:none|visibility:hidden")
 WHITESPACE_RE = re.compile(r"\s+")
 LINK_SCHEMES = ("http://", "https://", "mailto:")
+# Rendered ``> `` prefixes per line; deeper HTML quote nesting is flattened.
+MAX_HTML_QUOTE_DEPTH = 32
 
 
 @dataclass
@@ -1205,6 +1226,9 @@ class _OpenElement:
     block: bool
     href: str = ""
     text: list[str] = field(default_factory=list)
+    # A link that contains another link (invalid HTML) keeps no text of its
+    # own, so emitted text only ever goes to the innermost open link.
+    nested: bool = False
 
 
 class _HtmlText(HTMLParser):
@@ -1213,6 +1237,9 @@ class _HtmlText(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.stack: list[_OpenElement] = []
+        # Open elements per tag name, so an end tag or ``<body>`` with no
+        # matching open element costs O(1) instead of a scan of a deep stack.
+        self.open_tags: dict[str, int] = {}
         self.links: list[_OpenElement] = []
         self.hidden = 0
         self.quote = 0
@@ -1229,6 +1256,8 @@ class _HtmlText(HTMLParser):
         self._start(tag, attrs, push=False)
 
     def handle_endtag(self, tag: str) -> None:
+        if not self.open_tags.get(tag):
+            return
         for index in range(len(self.stack) - 1, -1, -1):
             if self.stack[index].tag == tag:
                 while len(self.stack) > index:
@@ -1247,7 +1276,7 @@ class _HtmlText(HTMLParser):
             self._emit(WHITESPACE_RE.sub(" ", data))
 
     def _start(self, tag: str, attrs: list[tuple[str, str | None]], *, push: bool) -> None:
-        if tag == "body":
+        if tag == "body" and self.open_tags.get("head"):
             # An unclosed <head> must not hide the whole body.
             for index, element in enumerate(self.stack):
                 if element.tag == "head":
@@ -1276,19 +1305,24 @@ class _HtmlText(HTMLParser):
         href = values.get("href", "").strip() if tag == "a" else ""
         element = _OpenElement(tag=tag, hidden=hidden, quote=quote, pre=tag == "pre", block=block, href=href)
         self.stack.append(element)
+        self.open_tags[tag] = self.open_tags.get(tag, 0) + 1
         self.hidden += hidden
         self.quote += quote
         self.pre += element.pre
         if tag == "a":
+            if self.links:
+                self.links[-1].nested = True
             self.links.append(element)
 
     def _pop(self) -> None:
         element = self.stack.pop()
+        self.open_tags[element.tag] -= 1
         self.hidden -= element.hidden
         self.quote -= element.quote
         self.pre -= element.pre
         if element.tag == "a":
-            self.links.remove(element)
+            # Links are popped in stack order, so this is the innermost one.
+            self.links.pop()
             self._finish_link(element)
         if element.block and not element.hidden and not self.hidden:
             self._break(2 if element.tag in PARAGRAPH_ELEMENTS else 1)
@@ -1296,7 +1330,7 @@ class _HtmlText(HTMLParser):
     def _finish_link(self, element: _OpenElement) -> None:
         if element.hidden or self.hidden or not element.href.lower().startswith(LINK_SCHEMES):
             return
-        text = "".join(element.text).strip()
+        text = "" if element.nested else "".join(element.text).strip()
         href = element.href
         target = href[len("mailto:") :] if href.lower().startswith("mailto:") else href
         if text and text in {href, target}:
@@ -1317,7 +1351,7 @@ class _HtmlText(HTMLParser):
                 if not text:
                     return
             if self.pending >= 2 and self.lines:
-                self.lines.append(("> " * self.quote).rstrip())
+                self.lines.append(quote_prefix(self.quote).rstrip())
             self.pending = 0
             self.current_level = self.quote
         elif not self.pre and text.startswith(" ") and self.current[-1].endswith(" "):
@@ -1325,12 +1359,12 @@ class _HtmlText(HTMLParser):
             if not text:
                 return
         self.current.append(text)
-        for link in self.links:
-            link.text.append(text)
+        if self.links:
+            self.links[-1].text.append(text)
 
     def _flush(self) -> None:
         line = "".join(self.current).rstrip()
-        prefix = "> " * self.current_level
+        prefix = quote_prefix(self.current_level)
         self.lines.append(prefix + line if line else prefix.rstrip())
         self.current = []
 
@@ -1338,6 +1372,11 @@ class _HtmlText(HTMLParser):
         if self.current:
             self._flush()
         return "\n".join(self.lines)
+
+
+def quote_prefix(level: int) -> str:
+    """``> `` per quote level, capped so deeply nested quotes cannot blow up the output."""
+    return "> " * min(level, MAX_HTML_QUOTE_DEPTH)
 
 
 def html_to_text(markup: str) -> str:

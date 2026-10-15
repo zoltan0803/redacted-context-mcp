@@ -146,6 +146,10 @@ MAIL_NAME_STOPWORDS = frozenset(
 # whose suffix starts after a non-word separator) and redacts the
 # remaining path tokens.
 PATH_REDACTION_RE = re.compile(rf"({PLACEHOLDER_RE.pattern})|{PATH_TOKEN_RE.pattern}")
+# Mail attachment filenames come from senders, so after path redaction every
+# remaining word token of three or more characters that starts with a letter
+# in any script (``PATH_TOKEN_RE`` is ASCII-only) is redacted too.
+MAIL_FILENAME_REDACTION_RE = re.compile(rf"({PLACEHOLDER_RE.pattern})|(?<!\[)\b[^\W\d_][^\W_]{{2,}}\b(?!_\d{{2}}\])")
 
 
 class RedactionCollisionError(RuntimeError):
@@ -322,6 +326,10 @@ class Redactor:
     # terms of any other category run first, in the order given. They never
     # count as configured terms (``configured_categories``).
     extra_terms: tuple[tuple[str, tuple[str, ...]], ...] = field(default=(), repr=False)
+    # Extra ``(category, terms)`` literal terms that run as their own patterns
+    # after the leading extra terms and before every configured-term
+    # category, in the order given, so a configured term cannot split them.
+    early_terms: tuple[tuple[str, tuple[str, ...]], ...] = field(default=(), repr=False)
     # Extra ``(normalized value, entity hex, form suffix)`` alias links.
     # Links from the config's alias groups always win.
     extra_links: tuple[tuple[str, str, str], ...] = field(default=(), repr=False)
@@ -363,11 +371,20 @@ class Redactor:
             ("SENSITIVE", self.config.terms),
         )
         leading_terms = [(category, ()) for category in extra_terms if category not in CONFIGURED_TERM_CATEGORIES]
+        stages = [
+            (category, (*terms, *alias_terms.get(category, ()), *extra_terms.get(category, ())))
+            for category, terms in leading_terms
+        ]
+        stages.extend(self.early_terms)
+        stages.extend(
+            (category, (*terms, *alias_terms.get(category, ()), *extra_terms.get(category, ())))
+            for category, terms in configured_terms
+        )
+        dispatch = bool(extra_terms) or bool(self.early_terms)
         self.literal_patterns: list[tuple[str, re.Pattern[str]]] = []
-        for category, terms in (*leading_terms, *configured_terms):
-            terms = (*terms, *alias_terms.get(category, ()), *extra_terms.get(category, ()))
+        for category, terms in stages:
             filtered = [term for term in terms if term.casefold() not in RESERVED_PLACEHOLDER_WORDS]
-            pattern = compile_terms_pattern(filtered, dispatch=bool(extra_terms))
+            pattern = compile_terms_pattern(filtered, dispatch=dispatch)
             if pattern is not None:
                 self.literal_patterns.append((category, pattern))
         self._configured_categories: dict[str, str] | None = None
@@ -414,13 +431,20 @@ class Redactor:
         function of the set of pairs, not their order.
         """
         names, addresses, links = harvest_mail_identities(self, identities)
+        # A harvested name that contains a configured client or organization
+        # term ("Jordan Brightwater" with the organization "Brightwater")
+        # would be split by that earlier stage and leave the rest of the name
+        # raw, so such names are matched before the configured terms.
+        splitting = [pattern for category, pattern in self.literal_patterns if category in ("CLIENT", "ORG")]
+        early = tuple(name for name in names if any(pattern.search(name) for pattern in splitting))
         mail = Redactor(
             self.config,
             mode=self.mode,
             counters=self.counters,
             detectors=self.detectors,
             pre_stages=MAIL_STAGES,
-            extra_terms=(("EMAIL", addresses), ("PERSON", names)),
+            extra_terms=(("EMAIL", addresses), ("PERSON", tuple(name for name in names if name not in early))),
+            early_terms=(("PERSON", early),) if early else (),
             extra_links=links,
         )
         mail.detector_counts = self.detector_counts
@@ -444,6 +468,10 @@ class Redactor:
             return self.placeholder("EMAIL", cleaned)
         category = self.configured_categories().get(normalize_alias(cleaned), "PERSON")
         return self.placeholder(category, cleaned)
+
+    def mail_filename(self, filename: str) -> str:
+        """An attachment filename: path-redacted, with word tokens in any script redacted as path tokens."""
+        return MAIL_FILENAME_REDACTION_RE.sub(self._replace_path_token, self.redact_path(filename))
 
     def mail_address_placeholder(self, address: str) -> str:
         """The structural header rendering of an address: always its ``EMAIL`` placeholder."""

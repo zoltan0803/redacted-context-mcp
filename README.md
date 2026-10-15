@@ -1538,8 +1538,8 @@ salt.
   `--include-quoted`) shows them, redacted. HTML-only bodies are converted to
   text, dropping scripts, styles, and hidden elements, and invisible format
   characters are removed so they cannot split a name.
-- **Attachments** are listed with an `@m_<id>/<n>` ref, a MIME type, a size,
-  and a path-redacted filename. `redctx_mail_attachment` returns `text/*`
+- **Attachments** are listed with an `@m_<id>/<n>` ref, a redacted MIME type,
+  a size, and a path-redacted filename. `redctx_mail_attachment` returns `text/*`
   parts decoded and redacted; DOCX, PPTX, PDF, XLSX, and XLS parts are
   extracted only with `--documents` (see
   [Optional Document Extraction](#optional-document-extraction)); other

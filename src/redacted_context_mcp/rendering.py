@@ -293,9 +293,12 @@ def render_mail_message(message: MailMessage, redactor: Redactor, *, max_body_ch
     lines.append(f"attachments: {len(message.attachments)}")
     for number, attachment in enumerate(message.attachments, start=1):
         filename = collapse_whitespace(attachment.filename)
-        name = redactor.redact_path(filename) if filename else "-"
+        name = redactor.mail_filename(filename) if filename else "-"
+        # The MIME type is syntactically validated but sender-chosen, so it
+        # is redacted as content like the subject.
+        content_type = redactor.redact(attachment.content_type)
         lines.append(
-            f"attachment {number}: {attachment.ref} type={attachment.content_type} "
+            f"attachment {number}: {attachment.ref} type={content_type} "
             f"size={attachment.size} name={name}"
         )
     body = truncate_redacted(redactor.redact(message.body), max_body_chars)

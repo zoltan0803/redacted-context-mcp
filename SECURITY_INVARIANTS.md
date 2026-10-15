@@ -226,8 +226,10 @@ claim of hard OS isolation.
   regenerated as UTC.
 - Every display name and address in an address header is replaced by a
   structural placeholder, whether or not it is configured and whether or not
-  a pattern would match it. A header that does not parse renders
-  `[unparsed]` and contributes no harvested identity.
+  a pattern would match it. A header that does not parse, reports
+  non-obsolete defects, or holds an address without a local part and a
+  domain renders `[unparsed]` and contributes no harvested identity, on
+  every supported Python version.
 - Message, thread, and attachment refs are `@m_<hex>` HMACs over the vault
   salt. Raw Message-IDs, mailbox paths, storage keys, and filenames never
   appear in refs or errors, and every mail error is a fixed message.
@@ -240,9 +242,17 @@ claim of hard OS isolation.
   `body_untrusted_external:`, `attachment_untrusted_external:`, and
   `untrusted_external` on retrieval passages).
 - Hidden HTML (scripts, styles, `hidden` and inline-hidden elements) and
-  invisible format characters (`U+200B`-`U+200F`, `U+202A`-`U+202E`,
-  `U+2060`-`U+206F`, `U+FEFF`) are removed before redaction, so they can
-  neither carry hidden text nor split a name or address.
+  invisible characters (zero-width and bidi format characters, the soft
+  hyphen, the combining grapheme joiner, invisible fillers, variation
+  selectors, and tag characters; the full list is in `ARCHITECTURE.md`) are
+  removed before redaction, so they can neither carry hidden text nor split
+  a name or address.
+- Attachment MIME types are redacted as content, and attachment filenames
+  are path-redacted with every remaining word token of three or more
+  characters in any script redacted too.
+- A harvested name that contains a configured client or organization term
+  is matched before the configured terms, so the term cannot split the name
+  and leave the rest of it raw.
 - Mailbox exports configured under the served root are never listed, read,
   searched, bundled, or served as resources by the file tools.
 - Each mailbox index is bounded by `max_messages`, a 256 KiB per-message

@@ -718,7 +718,11 @@ Only an allow-list is rendered: `Date`, `From`, `Sender`, `Reply-To`, `To`,
   e-mail pattern would match it (`root@localhost` included). A display name
   that is a configured term keeps that term's category and placeholder;
   others are `PERSON`. Group names are display names. A header that does not
-  parse prints `[unparsed]` and is not harvested.
+  parse prints `[unparsed]` and is not harvested. Because the stdlib parser
+  recovers from malformed input differently across Python versions, a header
+  counts as parsed only when it reports no defects other than obsolete
+  syntax and every address has a local part and a domain; group labels such
+  as `undisclosed-recipients:;` still parse.
 - `Subject` is decoded (RFC 2047), redacted as content, and labelled
   `untrusted_subject`.
 
@@ -742,7 +746,10 @@ adds:
   than the alias limits (256 characters or 16 words), claimed by an early
   baseline stage (it contains an address or URL), or a single token shorter
   than three characters or in the common-word lists. It is still redacted
-  structurally in headers.
+  structurally in headers. A harvested name that contains a configured
+  client or organization term ("Jordan Brightwater" with the organization
+  "Brightwater") is matched in its own `PERSON` pattern before the
+  configured terms, so that term cannot split it and leave the rest raw.
 - Harvested addresses join the same stage as `EMAIL` terms, so an address
   that the e-mail pattern misses is still caught in bodies. A redactor with
   such extra terms compiles each term pattern with a first-character
@@ -790,9 +797,16 @@ restorable there.
   keep their text plus an `http(s)` or `mailto` target in angle brackets,
   images keep their `alt` text, and `blockquote` and quote containers become
   `> ` lines. Parts are decoded with their declared charset and
-  `errors="replace"`. Invisible format characters (`U+200B`-`U+200F`,
-  `U+202A`-`U+202E`, `U+2060`-`U+206F`, `U+FEFF`) are removed during
-  extraction so they cannot split a name or address.
+  `errors="replace"`. Invisible characters (`U+00AD`, `U+034F`, `U+061C`,
+  `U+115F`, `U+1160`, `U+17B4`, `U+17B5`, `U+180E`, `U+180F`,
+  `U+200B`-`U+200F`, `U+202A`-`U+202E`, `U+2060`-`U+206F`, `U+3164`,
+  `U+FE00`-`U+FE0F`, `U+FEFF`, `U+FFA0`, `U+FFF9`-`U+FFFB`, and the tag and
+  supplementary variation-selector blocks `U+E0000`-`U+E007F` and
+  `U+E0100`-`U+E01EF`) are removed during extraction so they cannot hide
+  text or split a name or address. The converter stays linear on hostile
+  markup: unmatched end tags cost O(1), text goes only to the innermost open
+  link (a link that contains another link always shows its target), and at
+  most 32 `> ` quote prefixes are rendered per line.
 - Quoted replies and signatures are collapsed by default: runs of `>` lines
   with the attribution line before them ("... wrote:"), and Outlook
   `-----Original Message-----` or `From:`/`Sent:` blocks to the end, become
@@ -800,8 +814,11 @@ restorable there.
   `[signature: N lines omitted]`. `include_quoted` shows both, redacted.
 - Attachments are the non-body leaf parts with an `attachment` disposition or
   a filename, in MIME walk order; a `message/rfc822` part is one leaf, not
-  walked into. They are listed with their ref, a validated MIME type, a size,
-  and a whitespace-collapsed, path-redacted filename.
+  walked into. They are listed with their ref, a validated MIME type
+  redacted as content (it is sender-chosen), a size, and a
+  whitespace-collapsed, path-redacted filename in which every remaining word
+  token of three or more characters starting with a letter in any script is
+  redacted too (path redaction alone only covers ASCII tokens).
   `redctx_mail_attachment` returns `text/*` parts decoded and redacted.
   `.docx`, `.pptx`, `.pdf`, `.xlsx`, and `.xls` parts (by filename or MIME
   type) go through `documents.extract_document` only with `--documents` and

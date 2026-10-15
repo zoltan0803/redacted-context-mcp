@@ -21,20 +21,24 @@
   are rendered; routing, authentication, list, and `X-*` headers are dropped,
   and dates are regenerated as UTC. Every display name and address becomes a
   placeholder whether or not it is configured or pattern-matched; a header
-  that does not parse prints `[unparsed]`.
+  that does not parse, reports defects, or holds an address without a local
+  part and a domain prints `[unparsed]` on every supported Python version.
 - Mail is redacted with a derived mail redactor. Names and addresses
   harvested from every configured mailbox are redacted in subjects, bodies,
   and attachments, and an unconfigured name seen with one address shares that
   address's entity hex, so `Jordan Lee <jordan@example.com>` renders as
   `[PERSON_<hex>.<form>] <[EMAIL_<hex>]>` and the name reads the same in any
   message. Addresses keep their ordinary placeholder, configured links win,
+  a configured client or organization term cannot split a harvested name,
   and harvested identities stay in memory. Mail also redacts one-time codes,
   scheme-less links, opaque tokens, and prompt-injection phrases. Receipts
   include mail redactions.
 - Quoted replies and signatures are collapsed unless `include_quoted` is set,
-  HTML-only bodies are converted to text without hidden elements, and
-  invisible format characters are removed. Attachments list a validated MIME
-  type, size, and path-redacted filename; `text/*` attachments are readable,
+  HTML-only bodies are converted to text without hidden elements in linear
+  time on hostile markup, and invisible characters (zero-width, bidi, soft
+  hyphen, fillers, variation selectors, and tag characters) are removed.
+  Attachments list a validated, redacted MIME type, a size, and a
+  path-redacted filename with non-ASCII word tokens redacted too; `text/*` attachments are readable,
   and DOCX, PPTX, PDF, XLSX, and XLS attachments need `--documents`.
 - Subjects, bodies, and attachments are labelled `untrusted_subject`,
   `body_untrusted_external:`, and `attachment_untrusted_external:`, and the

@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from redacted_context_mcp import redaction
 from redacted_context_mcp.defaults import PLACEHOLDER_RE
+from redacted_context_mcp.mail import MailAttachment, MailMessage
 from redacted_context_mcp.models import AliasGroup, RedactionConfig
 from redacted_context_mcp.redaction import (
     MAIL_STAGES,
@@ -18,6 +19,7 @@ from redacted_context_mcp.redaction import (
     normalize_alias,
     placeholder_digest,
 )
+from redacted_context_mcp.rendering import render_mail_message
 from tests.fixtures import FakeDetector
 
 
@@ -390,6 +392,17 @@ class MailLinkingTest(unittest.TestCase):
         self.assertEqual(mail.mail_name_placeholder("Avery Example"), base.placeholder("PERSON", "Avery Example"))
         self.assertEqual(mail.redact("A. Example and Avery"), f"{mail.mail_name_placeholder('A. Example')} and {base.placeholder('PERSON', 'Avery')}")
 
+    def test_names_containing_a_configured_client_or_org_are_not_split(self) -> None:
+        base = Redactor(config(organizations=("Brightwater",), clients=("Lantern",)))
+        mail = base.for_mail([("Torvald Brightwater", "tb@example.org"), ("Lantern Quill", "lq@example.org")])
+        redacted = mail.redact("saw torvald brightwater and lantern quill; Brightwater ships to Lantern")
+        self.assertEqual(
+            redacted,
+            f"saw {mail.mail_name_placeholder('Torvald Brightwater')} and {mail.mail_name_placeholder('Lantern Quill')}; "
+            f"{ordinary('ORG', 'Brightwater')} ships to {ordinary('CLIENT', 'Lantern')}",
+        )
+        self.assertEqual(base.redact("Brightwater ships to Lantern"), redacted.split("; ")[1])
+
     def test_a_name_seen_with_two_addresses_is_not_linked(self) -> None:
         mail = Redactor(config()).for_mail([JORDAN, ("jordan lee", "jl@example.org")])
         self.assertEqual(mail.mail_name_placeholder("Jordan Lee"), ordinary("PERSON", "Jordan Lee"))
@@ -490,6 +503,20 @@ class StructuralHeaderTest(unittest.TestCase):
         self.assertEqual(self.mail.mail_name_placeholder(""), "")
         self.assertEqual(self.mail.mail_name_placeholder('  ""  '), "")
         self.assertEqual(self.mail.mail_address_placeholder("   "), "")
+
+    def test_attachment_filenames_and_types_are_redacted(self) -> None:
+        mail = Redactor(config()).for_mail([("Torvald Brightwater", "tb@example.org")])
+        attachment = MailAttachment("@m_0123456789ab/1", "text/x-torvald-brightwater", 3, "Jörg Müller Ünal Şahin.pdf")
+        message = MailMessage(
+            ref="@m_0123456789ab", mailbox="inbox", date="?", timestamp=None, thread="@m_0123456789ab",
+            in_reply_to=(), references=(), addresses=(), subject="", body="", attachments=(attachment,), size=3,
+        )
+        line = next(line for line in render_mail_message(message, mail, max_body_chars=100).split("\n") if "attachment 1" in line)
+        for raw in ("torvald", "brightwater", "Jörg", "Müller", "Ünal", "Şahin"):
+            self.assertNotIn(raw.casefold(), line.casefold())
+        self.assertTrue(line.endswith(".pdf"), line)
+        self.assertEqual(mail.mail_filename("notes 2026.txt"), mail.redact_path("notes 2026.txt"))
+        self.assertEqual(mail.redact("application/pdf"), "application/pdf")
 
     def test_structural_helpers_work_on_a_base_redactor(self) -> None:
         base = Redactor(config())
