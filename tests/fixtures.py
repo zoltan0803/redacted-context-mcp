@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from typing import Iterator, Sequence
 
+from redacted_context_mcp.core import OPAQUE_PATH_REF_RE
+from redacted_context_mcp.defaults import PLACEHOLDER_RE
 from redacted_context_mcp.detectors import Span
 from redacted_context_mcp.limits import OperationBudget
 from redacted_context_mcp.models import (
@@ -41,6 +43,18 @@ RAW_PRIVATE_VALUES = (
     "https://example.invalid",
     PROJECT_TERM,
 )
+
+# Opaque tokens carry salted hex digests: placeholders (`[CAT_<8 or 32 hex>]`,
+# linked `[CAT_<32 hex>.<8 hex>]`), `@p_<12 hex>` path references and
+# `user_<16 hex>` GitHub aliases. The salt varies per temp root, so a raw value
+# made only of hex characters (such as "12345") occasionally appears inside a
+# digest even though it was redacted.
+OPAQUE_TOKEN_RE = re.compile(rf"{PLACEHOLDER_RE.pattern}|{OPAQUE_PATH_REF_RE.pattern}|\buser_[0-9a-f]{{16}}\b")
+
+
+def without_opaque_tokens(text: str) -> str:
+    """Replace opaque tokens with a space so leak checks only see the text around them."""
+    return OPAQUE_TOKEN_RE.sub(" ", text)
 
 
 def write_redaction_config(root: Path, *, github: bool = False) -> None:

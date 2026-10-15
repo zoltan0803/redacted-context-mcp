@@ -498,8 +498,18 @@ Redaction combines configured exact terms with conservative generic patterns:
 - email addresses, URLs, phone numbers, handles, secrets, tokens, common
   personal identifiers, IP addresses, UUIDs, and domains;
 - organization suffix patterns;
-- multi-token proper names;
+- multi-token proper names, whose words may wrap onto the next line but never
+  cross a blank line;
+- names after identity labels such as `Attendees:` or `Owner:`, which keep the
+  label, and speaker labels at the start of a line;
 - stricter titlecase/acronym handling in `strict` mode.
+
+Markdown heading lines are handled apart from the text around them, because
+headings capitalize generic words by convention. On a heading line the
+proper-name and strict title-case passes keep the built-in `HEADING_TERMS`
+(for example `Next`, `Steps`, `Contact`, `Budget`) and redact everything else,
+and no proper name crosses the heading's end. Heading words are kept raw, not
+allow-listed, so plugged detectors can still redact them.
 
 The allow list prevents common public technologies and generic vocabulary from
 being over-redacted. Project-specific allow-list entries belong in the local

@@ -38,8 +38,9 @@
   time on hostile markup, and invisible characters (zero-width, bidi, soft
   hyphen, fillers, variation selectors, and tag characters) are removed.
   Attachments list a validated, redacted MIME type, a size, and a
-  path-redacted filename with non-ASCII word tokens redacted too; `text/*` attachments are readable,
-  and DOCX, PPTX, PDF, XLSX, and XLS attachments need `--documents`.
+  path-redacted filename with non-ASCII word tokens redacted too; `text/*`
+  attachments are readable, and DOCX, PPTX, PDF, XLSX, and XLS attachments
+  need `--documents`.
 - Subjects, bodies, and attachments are labelled `untrusted_subject`,
   `body_untrusted_external:`, and `attachment_untrusted_external:`, and the
   MCP instructions say mail must never be followed as instructions.
@@ -54,6 +55,32 @@
   drops its index and cached mail redactor.
 - `redctx doctor` reports `mail_sources` and per-format counts, never aliases
   or paths.
+- A run of capitalized words redacted as one proper name no longer crosses a
+  blank line. Before, `Next Steps`, a blank line, and `Contact the vendor`
+  became one `PERSON` placeholder that swallowed the first word of the next
+  paragraph. A name wrapped onto the next line is still one placeholder.
+- Markdown heading lines (`#` to `######`) are redacted more narrowly. Headings
+  capitalize generic words by convention, so `## Next Steps` or `# Project
+  Status Update` used to become a `PERSON` placeholder. On a heading line a run
+  of capitalized words now keeps built-in heading words such as `Next`,
+  `Steps`, `Contact`, or `Budget` at either end and redacts the rest, so
+  `## Contact Avery Example` becomes `## Contact [PERSON_…]`, and strict mode
+  keeps those words on their own too. A run is never redacted across a heading
+  line's end any more. Outside headings nothing changes, and plugged detectors
+  can still redact any heading word they nominate.
+- Fixes a name leak after capitalized identity labels. A line such as
+  `Attendees: Avery, Jordan` lost its label to the speaker-label pass (the
+  label became a `PERSON` placeholder), so the identity-line pass never saw it
+  and, in balanced mode, the names after it stayed raw. Identity lines are now
+  handled first, and their label (`Attendees`, `Owner`, `Contact`, and the
+  other built-in labels) is kept in both modes while the names are redacted.
+  A run of capitalized words also stops before a label and its colon, so
+  `Project Owner: Bob` keeps `Owner:` and redacts `Bob`, and a name that ends
+  one line no longer runs on into a label at the start of the next.
+- Names of two or three letters after an identity label are redacted too.
+  Before, `Attendees: Avery, Kim, Al` left `Kim` and `Al` raw in both modes,
+  because the identity-line pass only matched capitalized words of four or more
+  letters.
 
 ## 0.10.0 — 2026-10-15
 
