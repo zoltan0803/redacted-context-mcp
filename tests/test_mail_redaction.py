@@ -466,6 +466,45 @@ class MailLinkingTest(unittest.TestCase):
         self.assertIn(linked("PERSON", email_hex("jordan@example.com"), "Jordan"), redacted)
         self.assertGreater(detector.call_count, 0)
 
+    def test_unlinked_pairs_add_body_terms_but_never_links(self) -> None:
+        quinn = ("Quinn Relayford", "quinn@relayhost")
+        base = Redactor(config())
+        plain = base.for_mail([JORDAN])
+        mail = base.for_mail([JORDAN], unlinked=[quinn, ("Jordan Lee", "jl@example.org")])
+        entity = email_hex("jordan@example.com")
+        # The nested-only name and address become body terms, unlinked.
+        self.assertEqual(
+            mail.redact("Quinn Relayford wrote from quinn@relayhost"),
+            f"{ordinary('PERSON', 'Quinn Relayford')} wrote from {ordinary('EMAIL', 'quinn@relayhost')}",
+        )
+        self.assertEqual(mail.mail_name_placeholder("Quinn Relayford"), ordinary("PERSON", "Quinn Relayford"))
+        self.assertIn("quinn@relayhost", plain.redact("Quinn Relayford wrote from quinn@relayhost"))
+        # A second address seen only in a nested message does not unlink a global name.
+        self.assertEqual(mail.mail_name_placeholder("Jordan Lee"), linked("PERSON", entity, "Jordan Lee"))
+        self.assertEqual(mail.redact("Jordan Lee"), plain.redact("Jordan Lee"))
+        self.assertEqual(mail.alias_links, plain.alias_links)
+        self.assertNotEqual(
+            base.for_mail([JORDAN, quinn]).mail_name_placeholder("Quinn Relayford"),
+            ordinary("PERSON", "Quinn Relayford"),
+        )
+
+    def test_unlinked_pairs_are_order_independent(self) -> None:
+        nested = [("Quinn Relayford", "quinn@relayhost"), ("Lee, Jordan", "jordan@example.com"), ("Riley", "")]
+        text = "Quinn Relayford, Jordan Lee, Riley Sample and quinn@relayhost; thanks riley"
+
+        def render(identities: list[tuple[str, str]], unlinked: list[tuple[str, str]]) -> tuple[str, ...]:
+            mail = Redactor(config()).for_mail(identities, unlinked=unlinked)
+            return (mail.redact(text), mail.mail_name_placeholder("Quinn Relayford"), mail.mail_name_placeholder("Jordan Lee"))
+
+        expected = render(list(IDENTITIES), nested)
+        generator = random.Random(5)
+        for _round in range(5):
+            identities, unlinked = list(IDENTITIES) * 2, nested * 2
+            generator.shuffle(identities)
+            generator.shuffle(unlinked)
+            self.assertEqual(render(identities, unlinked), expected)
+        self.assertEqual(render(list(IDENTITIES), [])[0], Redactor(config()).for_mail(IDENTITIES).redact(text))
+
     def test_rehydration_map_holds_raw_values_and_superseded_placeholders(self) -> None:
         mail = Redactor(config()).for_mail([JORDAN, ROOT])
         name = mail.mail_name_placeholder("Jordan Lee")

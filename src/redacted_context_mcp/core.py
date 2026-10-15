@@ -153,7 +153,14 @@ from .regex_safety import (
     match_regex_lines,
     regex_backtracking_violation,
 )
-from .mail import MAIL_FORMATS, MAIL_LIST_MAX_LIMIT, MAIL_SAFE_MESSAGES, MAIL_THREAD_MAX_MESSAGES, MailSource
+from .mail import (
+    MAIL_FORMATS,
+    MAIL_LIST_MAX_LIMIT,
+    MAIL_MAX_NESTED_DEPTH,
+    MAIL_SAFE_MESSAGES,
+    MAIL_THREAD_MAX_MESSAGES,
+    MailSource,
+)
 from .rendering import (
     MAIL_RETRIEVE_MAX_MESSAGES,
     MAIL_RETRIEVE_MAX_TOTAL_BYTES,
@@ -1304,6 +1311,7 @@ def command_mail_attachment(args: argparse.Namespace, ctx: RedactedContext, reda
         mail_source_from_args(args, redactor),
         redactor,
         ref=args.ref,
+        include_quoted=args.include_quoted,
         max_chars=args.max_chars,
     ), end="")
     return 0
@@ -1613,8 +1621,13 @@ def build_parser() -> argparse.ArgumentParser:
     mail_thread_parser.add_argument("--max-body-chars", type=int, default=30_000)
     mail_thread_parser.set_defaults(func=command_mail_thread)
 
-    mail_attachment_parser = mail_subparsers.add_parser("attachment", help="read one redacted text attachment")
-    mail_attachment_parser.add_argument("ref", help="opaque @m_<hex>/<n> attachment ref")
+    mail_attachment_parser = mail_subparsers.add_parser(
+        "attachment", help="read one redacted text attachment or forwarded message"
+    )
+    mail_attachment_parser.add_argument("ref", help="opaque @m_<hex>/<n> attachment ref (or @m_<hex>/<n>/<k>)")
+    mail_attachment_parser.add_argument(
+        "--include-quoted", action="store_true", help="keep quoted replies and signatures of a forwarded message"
+    )
     mail_attachment_parser.add_argument("--max-chars", type=int, default=30_000)
     mail_attachment_parser.set_defaults(func=command_mail_attachment)
 

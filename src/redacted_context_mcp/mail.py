@@ -2,7 +2,8 @@
 
 This module is the ``mail`` source adapter. It owns mail identity and
 reference opaqueness: operator-chosen mailbox aliases instead of paths,
-salted ``@m_<hex>`` message refs, and ``@m_<hex>/<n>`` attachment refs. It
+salted ``@m_<hex>`` message refs, and ``@m_<hex>/<n>`` attachment refs, with
+``@m_<hex>/<n>/<k>`` paths into forwarded (``message/rfc822``) messages. It
 opens mailbox files ``rb`` only and never locks, renames, flags, or writes
 anything. It returns raw, untrusted header values, bodies, and attachment
 text in structured records and never redacts content itself; ``rendering``
@@ -22,7 +23,7 @@ import time
 from dataclasses import dataclass, field
 from email import policy
 from email.errors import ObsoleteHeaderDefect
-from email.message import Message
+from email.message import EmailMessage, Message
 from email.parser import BytesParser
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
@@ -48,13 +49,20 @@ MAIL_INDEX_SECONDS = 120.0
 MAIL_LIST_MAX_LIMIT = 500
 MAIL_THREAD_MAX_MESSAGES = 50
 MAIL_MAX_ATTACHMENTS = 9999
+# Forwarded messages are readable this many levels deep; an attachment ref
+# holds at most one more segment, for a leaf attachment of the deepest one.
+MAIL_MAX_NESTED_DEPTH = 3
 # Thread ids kept per In-Reply-To / References header, so one hostile header
 # cannot blow up the in-memory index.
 MAIL_MAX_THREAD_IDS = 256
 MBOX_LINE_CHUNK = 64 * 1024
 
 MESSAGE_REF_RE = re.compile(r"@m_([0-9a-f]{12})")
-ATTACHMENT_REF_RE = re.compile(r"@m_([0-9a-f]{12})/([1-9][0-9]{0,3})")
+ATTACHMENT_REF_RE = re.compile(rf"@m_([0-9a-f]{{12}})((?:/[1-9][0-9]{{0,3}}){{1,{MAIL_MAX_NESTED_DEPTH + 1}}})")
+# Attachment types read as a nested (forwarded) message.
+NESTED_MESSAGE_TYPES = ("message/rfc822", "message/global")
+# Transfer encodings RFC 2046 forbids on ``message/rfc822`` but some clients emit.
+ENCODED_TRANSFER_ENCODINGS = ("base64", "quoted-printable")
 
 MAILBOX_UNREADABLE_MESSAGE = "Mailbox could not be read."
 MAILBOX_CHANGED_MESSAGE = "Mailbox changed during read. Retry."
@@ -67,6 +75,8 @@ COLLISION_MESSAGE = "Mail reference collision."
 DATE_FILTER_MESSAGE = "Mail date filters must be YYYY-MM-DD."
 GLOB_MESSAGE = "Glob patterns are not supported for mail."
 UNSUPPORTED_ATTACHMENT_MESSAGE = "Unsupported attachment type."
+NESTED_DEPTH_MESSAGE = "Nested message depth limit exceeded."
+NESTED_HEADER_MESSAGE = "Nested message header limit exceeded."
 LIMIT_MIN_MESSAGE = "--limit must be at least 1."
 LIMIT_MAX_MESSAGE = f"--limit must be at most {MAIL_LIST_MAX_LIMIT}."
 OFFSET_MESSAGE = "--offset must be at least 0."
@@ -88,6 +98,8 @@ MAIL_SAFE_MESSAGES = frozenset({
     DATE_FILTER_MESSAGE,
     GLOB_MESSAGE,
     UNSUPPORTED_ATTACHMENT_MESSAGE,
+    NESTED_DEPTH_MESSAGE,
+    NESTED_HEADER_MESSAGE,
     LIMIT_MIN_MESSAGE,
     LIMIT_MAX_MESSAGE,
     OFFSET_MESSAGE,
@@ -165,7 +177,12 @@ class MailSummary:
 
 @dataclass(frozen=True)
 class MailMessage:
-    """One read message: neutral refs plus raw, untrusted allow-listed fields."""
+    """One read message: neutral refs plus raw, untrusted allow-listed fields.
+
+    A forwarded message read through an attachment ref has ``nested_depth``
+    1 or more, its attachment ref as ``ref``, and no mailbox, thread, or
+    In-Reply-To and References refs.
+    """
 
     ref: str
     mailbox: str
@@ -179,6 +196,7 @@ class MailMessage:
     body: str
     attachments: tuple[MailAttachment, ...]
     size: int
+    nested_depth: int = 0
 
 
 @dataclass(frozen=True)
@@ -273,27 +291,41 @@ class MailSource:
             return False
         return MESSAGE_REF_RE.fullmatch(ref) is not None or ATTACHMENT_REF_RE.fullmatch(ref) is not None
 
-    def resolve_reference(self, ref: str) -> MailIndexEntry | tuple[MailIndexEntry, int]:
-        """Resolve a message ref to its index entry, or an attachment ref to ``(entry, n)``."""
+    def resolve_reference(
+        self, ref: str
+    ) -> MailIndexEntry | tuple[MailIndexEntry, int] | tuple[MailIndexEntry, tuple[int, ...]]:
+        """Resolve a message ref to its index entry, an attachment ref to ``(entry, n)``,
+        or a nested attachment ref ``@m_<hex>/<n1>/<n2>...`` to ``(entry, (n1, n2, ...))``."""
         if not isinstance(ref, str):
             raise SystemExit(UNKNOWN_REFERENCE_MESSAGE)
         if MESSAGE_REF_RE.fullmatch(ref) is not None:
             return self._resolve_message(ref)
-        entry, number, _part = self._resolve_attachment(ref)
-        return entry, number
+        entry, numbers, _part, _path = self._resolve_attachment(ref)
+        return (entry, numbers[0]) if len(numbers) == 1 else (entry, numbers)
 
-    def _resolve_attachment(self, ref: object) -> tuple[MailIndexEntry, int, Message]:
-        """Resolve an attachment ref; the message is read to check the part exists."""
+    def _resolve_attachment(
+        self, ref: object
+    ) -> tuple[MailIndexEntry, tuple[int, ...], Message, tuple[Message, ...]]:
+        """Resolve an attachment ref; the message is read to check the part exists.
+
+        Returns the entry, the ref's attachment numbers, the part, and the
+        nested messages the path passes through, outermost first. Every
+        segment but the last must name a readable nested message.
+        """
         match = ATTACHMENT_REF_RE.fullmatch(ref) if isinstance(ref, str) else None
         if match is None:
             raise SystemExit(UNKNOWN_REFERENCE_MESSAGE)
         entry = self._resolve_message(f"@m_{match.group(1)}")
-        number = int(match.group(2))
+        numbers = tuple(int(segment) for segment in match.group(2)[1:].split("/"))
         message = parse_message(self._read_raw(entry))
-        parts = attachment_parts(message, select_body_part(message)) if message is not None else []
-        if number > len(parts):
-            raise SystemExit(UNKNOWN_REFERENCE_MESSAGE)
-        return entry, number, parts[number - 1]
+        path: list[Message] = []
+        for number in numbers[:-1]:
+            message = nested_message(numbered_attachment(message, number))
+            if message is None:
+                raise SystemExit(UNKNOWN_REFERENCE_MESSAGE)
+            check_nested_headers(message)
+            path.append(message)
+        return entry, numbers, numbered_attachment(message, numbers[-1]), tuple(path)
 
     def _resolve_message(self, ref: object, budget: OperationBudget | None = None) -> MailIndexEntry:
         if not isinstance(ref, str) or MESSAGE_REF_RE.fullmatch(ref) is None:
@@ -311,9 +343,7 @@ class MailSource:
         pairs: set[tuple[str, str]] = set()
         for index in view.indexes:
             for entry in index.entries:
-                for _name, value in entry.addresses:
-                    for address in value or ():
-                        pairs.add((address.name, address.address))
+                pairs.update(address_pairs(entry.addresses))
         return tuple(sorted(pairs))
 
     def list_messages(
@@ -374,18 +404,37 @@ class MailSource:
         messages = [self._message(member, include_quoted=include_quoted) for member in members[:max_messages]]
         return messages, len(members)
 
-    def read_attachment(self, ref: str) -> str:
-        """Return one attachment as raw text (text parts or extracted documents)."""
-        _entry, _number, part = self._resolve_attachment(ref)
-        content_type = safe_content_type(part)
-        if content_type.startswith("text/"):
-            return clean_text(decode_text_part(part, charset_first=True))
-        extension = document_extension(safe_filename(part), content_type)
-        if extension is None:
+    def read_attachment(self, ref: str, *, include_quoted: bool = False) -> str | MailMessage:
+        """Return one attachment as raw text (text parts or extracted documents), or a nested message."""
+        return self.read_attachment_with_identities(ref, include_quoted=include_quoted)[0]
+
+    def read_attachment_with_identities(
+        self, ref: str, *, include_quoted: bool = False
+    ) -> tuple[str | MailMessage, tuple[tuple[str, str], ...]]:
+        """``read_attachment`` plus the raw ``(display name, address)`` pairs of its nested path.
+
+        The pairs come from the address headers of every nested message the
+        ref passes through, the one read included, sorted. They never join
+        ``identities``: a forwarded copy is sender-controlled, so the caller
+        uses them for this call only.
+        """
+        _entry, numbers, part, path = self._resolve_attachment(ref)
+        pairs: set[tuple[str, str]] = set()
+        for message in path:
+            pairs.update(address_pairs(header_fields(message)[2]))
+        if safe_content_type(part) not in NESTED_MESSAGE_TYPES:
+            return self._attachment_text(part), tuple(sorted(pairs))
+        if len(numbers) > MAIL_MAX_NESTED_DEPTH:
+            raise OperationLimitError(NESTED_DEPTH_MESSAGE)
+        nested = nested_message(part)
+        if nested is None:
             raise SystemExit(UNSUPPORTED_ATTACHMENT_MESSAGE)
-        if not self.documents:
-            raise SystemExit(documents.DISABLED_MESSAGE)
-        return documents.extract_document(part_payload_bytes(part), extension)
+        check_nested_headers(nested)
+        record = nested_record(
+            nested, ref, len(numbers), len(part_payload_bytes(part)), include_quoted=include_quoted
+        )
+        pairs.update(address_pairs(record.addresses))
+        return record, tuple(sorted(pairs))
 
     def iter_documents(
         self,
@@ -437,19 +486,20 @@ class MailSource:
             raise SystemExit(UNKNOWN_MAILBOX_MESSAGE)
         return source
 
+    def _attachment_text(self, part: Message) -> str:
+        content_type = safe_content_type(part)
+        if content_type.startswith("text/"):
+            return clean_text(decode_text_part(part, charset_first=True))
+        extension = document_extension(safe_filename(part), content_type)
+        if extension is None:
+            raise SystemExit(UNSUPPORTED_ATTACHMENT_MESSAGE)
+        if not self.documents:
+            raise SystemExit(documents.DISABLED_MESSAGE)
+        return documents.extract_document(part_payload_bytes(part), extension)
+
     def _message(self, entry: MailIndexEntry, *, include_quoted: bool) -> MailMessage:
         message = parse_message(self._read_raw(entry))
-        body = ""
-        attachments: tuple[MailAttachment, ...] = ()
-        if message is not None:
-            body_part = select_body_part(message)
-            body = body_text(body_part)
-            attachments = tuple(
-                attachment_record(part, f"{entry.ref}/{number}")
-                for number, part in enumerate(attachment_parts(message, body_part), start=1)
-            )
-        if not include_quoted:
-            body = collapse_quotes(body)
+        body, attachments = message_content(message, entry.ref, include_quoted=include_quoted)
         return MailMessage(
             ref=entry.ref,
             mailbox=entry.mailbox,
@@ -914,17 +964,12 @@ def index_entry(
     timestamp: float | None = None
     date = "?"
     subject = ""
-    addresses: list[tuple[str, tuple[MailAddress, ...] | None]] = []
+    addresses: tuple[tuple[str, tuple[MailAddress, ...] | None], ...] = ()
     if message is not None:
         message_id = normalize_message_id(clean_text(first_header_text(message, "Message-ID")))
         in_reply_to = message_id_list(message, "In-Reply-To")
         references = message_id_list(message, "References")
-        timestamp, date = parse_date_header(message)
-        subject = clean_text(first_header_text(message, "Subject"))
-        for key, header_name in ADDRESS_HEADERS:
-            present, value = parse_address_header(message, header_name)
-            if present:
-                addresses.append((key, value))
+        timestamp, date, addresses, subject = header_fields(message)
     if message_id:
         identity = message_id
         ref = message_ref(salt, message_id)
@@ -947,7 +992,7 @@ def index_entry(
         timestamp=timestamp,
         date=date,
         thread=thread,
-        addresses=tuple(addresses),
+        addresses=addresses,
         subject=subject,
         identity=identity,
         in_reply_to_ids=in_reply_to,
@@ -956,6 +1001,30 @@ def index_entry(
         offset=offset,
         stamp=stamp,
     )
+
+
+def header_fields(
+    message: Message,
+) -> tuple[float | None, str, tuple[tuple[str, tuple[MailAddress, ...] | None], ...], str]:
+    """The allow-listed fields of a parsed header block: ``(timestamp, date, addresses, subject)``.
+
+    Indexed and nested messages both take their fields from here, so the two
+    header policies cannot drift apart. ``addresses`` holds each present
+    address header in ``ADDRESS_HEADERS`` order.
+    """
+    timestamp, date = parse_date_header(message)
+    addresses: list[tuple[str, tuple[MailAddress, ...] | None]] = []
+    for key, header_name in ADDRESS_HEADERS:
+        present, value = parse_address_header(message, header_name)
+        if present:
+            addresses.append((key, value))
+    subject = clean_text(first_header_text(message, "Subject"))
+    return timestamp, date, tuple(addresses), subject
+
+
+def address_pairs(addresses: Sequence[tuple[str, tuple[MailAddress, ...] | None]]) -> set[tuple[str, str]]:
+    """Raw ``(display name, address)`` pairs of parsed address headers; unparsed ones add nothing."""
+    return {(address.name, address.address) for _name, value in addresses for address in value or ()}
 
 
 def parse_headers(header: bytes) -> Message | None:
@@ -1078,11 +1147,126 @@ def repair_surrogates(value: str) -> str:
 # Bodies and attachments -----------------------------------------------------------
 
 
+class _ParsedMessage(EmailMessage):
+    """An ``EmailMessage`` that leaves a transfer-encoded ``message/*`` part unparsed.
+
+    The stdlib parser walks into every ``message/*`` part. When a client
+    base64- or quoted-printable-encodes a forwarded message anyway, that
+    parses the still-encoded text as a message without headers. Reporting
+    such a part's main type as ``application`` keeps its encoded text as the
+    payload, so ``get_payload(decode=True)`` recovers the forwarded message's
+    bytes (see ``nested_message``). Its content type is unchanged.
+    """
+
+    def get_content_maintype(self) -> str:
+        maintype = super().get_content_maintype()
+        if maintype == "message" and transfer_encoded(self):
+            return "application"
+        return maintype
+
+
 def parse_message(raw: bytes) -> Message | None:
     try:
-        return BytesParser(policy=policy.default).parsebytes(raw)
+        return BytesParser(_ParsedMessage, policy=policy.default).parsebytes(raw)
     except Exception:
         return None
+
+
+def transfer_encoded(part: Message) -> bool:
+    """Whether ``part`` declares a base64 or quoted-printable transfer encoding."""
+    try:
+        value = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
+    except Exception:
+        return False
+    return value in ENCODED_TRANSFER_ENCODINGS
+
+
+def nested_message(part: Message) -> Message | None:
+    """The forwarded message a ``message/rfc822`` or ``message/global`` part holds, or ``None``.
+
+    A transfer-encoded part is decoded and parsed on its own. Reading a
+    nested message and resolving a ref through it both go through here, so
+    refs into a decoded message resolve against what it renders.
+    """
+    if safe_content_type(part) not in NESTED_MESSAGE_TYPES:
+        return None
+    try:
+        if transfer_encoded(part):
+            data = part.get_payload(decode=True)
+            return parse_message(data) if isinstance(data, bytes) and data.strip() else None
+        payload = part.get_payload()
+    except Exception:
+        return None
+    if isinstance(payload, list) and len(payload) == 1 and isinstance(payload[0], Message):
+        return payload[0]
+    return None
+
+
+def check_nested_headers(message: Message) -> None:
+    """Fail closed when a nested message's header block exceeds ``MAIL_HEADER_READ_BYTES``.
+
+    Top-level headers are bounded by the index's header read; nested headers
+    come from the full parse of their outer message, so they get the same
+    cap here, measured as raw header name and value bytes.
+    """
+    total = 0
+    for name, value in message.raw_items():
+        total += raw_header_length(name) + raw_header_length(value)
+        if total > MAIL_HEADER_READ_BYTES:
+            raise OperationLimitError(NESTED_HEADER_MESSAGE)
+
+
+def raw_header_length(value: object) -> int:
+    # Raw 8-bit header bytes arrive surrogate-escaped.
+    text = str(value)
+    try:
+        return len(text.encode("utf-8", "surrogateescape"))
+    except UnicodeEncodeError:
+        return len(text.encode("utf-8", "surrogatepass"))
+
+
+def message_content(
+    message: Message | None, ref: str, *, include_quoted: bool
+) -> tuple[str, tuple[MailAttachment, ...]]:
+    """Body text, quotes collapsed unless ``include_quoted``, and attachments with ``<ref>/<n>`` refs."""
+    body = ""
+    attachments: tuple[MailAttachment, ...] = ()
+    if message is not None:
+        body_part = select_body_part(message)
+        body = body_text(body_part)
+        attachments = tuple(
+            attachment_record(part, f"{ref}/{number}")
+            for number, part in enumerate(attachment_parts(message, body_part), start=1)
+        )
+    if not include_quoted:
+        body = collapse_quotes(body)
+    return body, attachments
+
+
+def nested_record(message: Message, ref: str, depth: int, size: int, *, include_quoted: bool) -> MailMessage:
+    """A nested message addressed only by its attachment ref.
+
+    Its Message-ID, In-Reply-To, and References are never read: a forwarded
+    copy is sender-controlled, so refs minted from them would let it pose as,
+    or thread into, an indexed message.
+    """
+    timestamp, date, addresses, subject = header_fields(message)
+    body, attachments = message_content(message, ref, include_quoted=include_quoted)
+    return MailMessage(
+        ref=ref,
+        mailbox="",
+        date=date,
+        timestamp=timestamp,
+        thread="",
+        in_reply_to=(),
+        references=(),
+        addresses=addresses,
+        subject=subject,
+        body=body,
+        attachments=attachments,
+        size=size,
+        nested_depth=depth,
+    )
 
 
 def select_body_part(message: Message) -> Message | None:
@@ -1166,6 +1350,14 @@ def attachment_parts(message: Message, body_part: Message | None) -> list[Messag
             if len(parts) >= MAIL_MAX_ATTACHMENTS:
                 break
     return parts
+
+
+def numbered_attachment(message: Message | None, number: int) -> Message:
+    """Attachment ``number`` (1-based) of ``message``; any other number is an unknown reference."""
+    parts = attachment_parts(message, select_body_part(message)) if message is not None else []
+    if number > len(parts):
+        raise SystemExit(UNKNOWN_REFERENCE_MESSAGE)
+    return parts[number - 1]
 
 
 def attachment_record(part: Message, ref: str) -> MailAttachment:

@@ -13,7 +13,9 @@ Mail content is always redacted with a mail redactor derived from the active
 ``Redactor`` (``Redactor.for_mail``) over every identity harvested from the
 configured mailboxes, never with the base redactor, so a correspondent's name
 is caught wherever it appears. ``MailRedactorCache`` lets a long-running
-server reuse one mail redactor until the identities or the policy change.
+server reuse one mail redactor until the identities or the policy change. A
+call that reads through a forwarded message adds that message's identities
+as body terms for that call only, in an uncached redactor.
 """
 
 from __future__ import annotations
@@ -230,9 +232,20 @@ def mail_redactor(
     redactor: Redactor,
     cache: MailRedactorCache | None = None,
     budget: OperationBudget | None = None,
+    *,
+    nested: Sequence[tuple[str, str]] = (),
 ) -> Redactor:
-    """The mail redactor over every identity in every configured mailbox."""
+    """The mail redactor over every identity in every configured mailbox.
+
+    ``nested`` pairs come from the forwarded messages one call reads. Any
+    that are not already harvested are added as unlinked body terms in a
+    call-local redactor that is never cached; otherwise the usual mail
+    redactor is returned.
+    """
     identities = source.identities(budget)
+    extra = tuple(sorted(set(nested) - set(identities)))
+    if extra:
+        return redactor.for_mail(identities, unlinked=extra)
     if cache is None:
         return redactor.for_mail(identities)
     return cache.get(redactor, identities)
@@ -277,18 +290,21 @@ def render_mail_summary(summary: MailSummary, redactor: Redactor) -> str:
 
 
 def render_mail_message(message: MailMessage, redactor: Redactor, *, max_body_chars: int) -> str:
-    lines = [
-        f"message: {message.ref}",
-        f"mailbox: {message.mailbox}",
-        f"date: {message.date}",
-    ]
+    if message.nested_depth:
+        # A forwarded message is addressed only by its attachment ref: it has
+        # no message ref, mailbox, or thread links of its own.
+        lines = [f"attachment: {message.ref}", f"nested_message_depth: {message.nested_depth}"]
+    else:
+        lines = [f"message: {message.ref}", f"mailbox: {message.mailbox}"]
+    lines.append(f"date: {message.date}")
     for field_name, value in message.addresses:
         lines.append(f"{field_name}: {render_mail_identities(value, redactor)}")
-    lines.append(f"thread: {message.thread}")
-    if message.in_reply_to:
-        lines.append(f"in_reply_to: {', '.join(message.in_reply_to)}")
-    if message.references:
-        lines.append(f"references: {', '.join(message.references)}")
+    if not message.nested_depth:
+        lines.append(f"thread: {message.thread}")
+        if message.in_reply_to:
+            lines.append(f"in_reply_to: {', '.join(message.in_reply_to)}")
+        if message.references:
+            lines.append(f"references: {', '.join(message.references)}")
     lines.append(f"untrusted_subject: {render_mail_subject(message.subject, redactor)}")
     lines.append(f"attachments: {len(message.attachments)}")
     for number, attachment in enumerate(message.attachments, start=1):
@@ -412,13 +428,22 @@ def mail_attachment_text(
     redactor: Redactor,
     *,
     ref: str,
+    include_quoted: bool = False,
     max_chars: int,
     cache: MailRedactorCache | None = None,
 ) -> str:
+    """One attachment's redacted text, or a forwarded message rendered like ``mail_read_text``.
+
+    ``include_quoted`` only affects forwarded messages; ``max_chars`` caps
+    the attachment text or the forwarded message's body.
+    """
     max_chars = validate_positive_limit(max_chars, "--max-chars")
     source = require_mail_source(source, UNKNOWN_REFERENCE_MESSAGE)
-    text = source.read_attachment(ref)
-    redacted = truncate_redacted(mail_redactor(source, redactor, cache).redact(text), max_chars)
+    content, nested = source.read_attachment_with_identities(ref, include_quoted=include_quoted)
+    mail = mail_redactor(source, redactor, cache, nested=nested)
+    if isinstance(content, MailMessage):
+        return render_mail_message(content, mail, max_body_chars=max_chars)
+    redacted = truncate_redacted(mail.redact(content), max_chars)
     # ``ref`` resolved above, so it is a well-formed opaque attachment ref.
     return f"attachment: {ref}\n\nattachment_untrusted_external:\n{redacted}".rstrip() + "\n"
 
