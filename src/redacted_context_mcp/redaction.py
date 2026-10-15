@@ -396,11 +396,14 @@ class Redactor:
             text,
             lambda match, heading: self._replace_multi_proper(match, session, preserve_line_count, heading),
         )
-        text = SPEAKER_LABEL_RE.sub(lambda match: stash("PERSON", match.group(1)), text)
+        # Identity lines go before speaker labels: a label such as "Owner:" at
+        # the start of a line would otherwise be taken for a speaker's name,
+        # and the names after it would never be redacted.
         text = IDENTITY_LINE_RE.sub(
             lambda match: self._redact_identity_line(match, session, preserve_line_count),
             text,
         )
+        text = SPEAKER_LABEL_RE.sub(lambda match: stash("PERSON", match.group(1)), text)
 
         if self.mode == "strict":
             text = ACRONYM_RE.sub(
@@ -740,7 +743,10 @@ class Redactor:
                 preserve_line_count=preserve_line_count,
             )
 
-        return f"{match.group(1)}{match.group(2)}:{match.group(3)}{TITLECASE_TOKEN_RE.sub(replace_name, match.group(4))}"
+        # The label is generic vocabulary; stashing it keeps the speaker-label
+        # and strict-mode passes from redacting it.
+        label = session.stash_allowed(match.group(1))
+        return f"{label}{match.group(2)}:{match.group(3)}{TITLECASE_TOKEN_RE.sub(replace_name, match.group(4))}"
 
     def _replace_multi_proper(
         self,

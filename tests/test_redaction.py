@@ -174,5 +174,56 @@ class HeadingRedactionTest(unittest.TestCase):
         )
 
 
+class IdentityLabelTest(unittest.TestCase):
+    LABELS = (
+        "Attendees",
+        "Participant",
+        "Stakeholders",
+        "Owner",
+        "Contact",
+        "Authors",
+        "Reviewer",
+        "Approvers",
+        "Speaker",
+        "Presenters",
+    )
+
+    def test_capitalized_label_is_kept_and_names_after_it_are_redacted(self) -> None:
+        for mode in ("balanced", "strict"):
+            for label in self.LABELS:
+                with self.subTest(mode=mode, label=label):
+                    redactor = Redactor(RedactionConfig(salt="test-salt"), mode=mode)
+                    avery = redactor.placeholder("PERSON", "Avery")
+                    jordan = redactor.placeholder("PERSON", "Jordan")
+
+                    self.assertEqual(redactor.redact(f"{label}: Avery, Jordan\n"), f"{label}: {avery}, {jordan}\n")
+
+    def test_label_keeps_a_multi_word_name_whole(self) -> None:
+        for mode in ("balanced", "strict"):
+            with self.subTest(mode=mode):
+                redactor = Redactor(RedactionConfig(salt="test-salt"), mode=mode)
+                person = redactor.placeholder("PERSON", "Avery Example")
+
+                self.assertEqual(redactor.redact("Owner: Avery Example\n"), f"Owner: {person}\n")
+
+    def test_upper_case_label_survives_strict_mode(self) -> None:
+        redactor = Redactor(RedactionConfig(salt="test-salt"), mode="strict")
+
+        self.assertEqual(
+            redactor.redact("OWNER: Avery\n"),
+            f"OWNER: {redactor.placeholder('PERSON', 'Avery')}\n",
+        )
+
+    def test_speaker_labels_are_still_redacted(self) -> None:
+        for mode in ("balanced", "strict"):
+            with self.subTest(mode=mode):
+                redactor = Redactor(RedactionConfig(salt="test-salt"), mode=mode)
+
+                self.assertEqual(
+                    redactor.redact("Avery: thanks, all good\n"),
+                    f"{redactor.placeholder('PERSON', 'Avery')}: thanks, all good\n",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -15,6 +15,12 @@
   keeps those words on their own too. A run is never redacted across a heading
   line's end any more. Outside headings nothing changes, and plugged detectors
   can still redact any heading word they nominate.
+- Fixes a name leak after capitalized identity labels. A line such as
+  `Attendees: Avery, Jordan` lost its label to the speaker-label pass (the
+  label became a `PERSON` placeholder), so the identity-line pass never saw it
+  and, in balanced mode, the names after it stayed raw. Identity lines are now
+  handled first, and their label (`Attendees`, `Owner`, `Contact`, and the
+  other built-in labels) is kept in both modes while the names are redacted.
 
 ## 0.10.0 — 2026-10-15
 
