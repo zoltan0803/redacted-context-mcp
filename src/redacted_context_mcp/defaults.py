@@ -275,6 +275,7 @@ HEADING_TERMS = {
     "contributing",
     "costs",
     "criteria",
+    "demo",
     "dependencies",
     "deployment",
     "details",

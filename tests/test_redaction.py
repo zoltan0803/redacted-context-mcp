@@ -133,7 +133,7 @@ class HeadingRedactionTest(unittest.TestCase):
         self.assertEqual(HEADING_LINE_RE.findall("a\r## B\r\n# C\nd ## E\n"), ["## B", "# C"])
 
     def test_generic_heading_words_are_kept_in_both_modes(self) -> None:
-        text = "# Project Status Update\n\n## Next Steps\n\n### Open Questions\n\n## Budget\n"
+        text = "# Project Status Update\n\n## Next Steps\n\n### Open Questions\n\n## Budget\n\n# Demo Contacts\n"
         for mode in ("balanced", "strict"):
             with self.subTest(mode=mode):
                 self.assertEqual(Redactor(RedactionConfig(salt="test-salt"), mode=mode).redact(text), text)
