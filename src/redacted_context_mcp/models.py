@@ -46,6 +46,20 @@ class GitHubRepoConfig:
 
 
 @dataclass(frozen=True)
+class MailSourceConfig:
+    """One validated ``[mail.sources.<alias>]`` table.
+
+    ``path`` is the resolved absolute mailbox path. It is private local
+    config and is never printed; the table key is the agent-visible alias.
+    """
+
+    path: str
+    format: str
+    max_messages: int = 50_000
+    max_message_bytes: int = 25 * 1024 * 1024
+
+
+@dataclass(frozen=True)
 class AliasGroup:
     """One validated ``[redaction.aliases]`` entry.
 
@@ -82,6 +96,7 @@ class RedactionConfig:
     term_files: tuple[str, ...] = ()
     protected_paths: tuple[str, ...] = ()
     alias_groups: tuple[AliasGroup, ...] = ()
+    mail_sources: dict[str, MailSourceConfig] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
