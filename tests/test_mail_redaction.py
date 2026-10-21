@@ -518,6 +518,59 @@ class StructuralHeaderTest(unittest.TestCase):
         self.assertEqual(mail.mail_filename("notes 2026.txt"), mail.redact_path("notes 2026.txt"))
         self.assertEqual(mail.redact("application/pdf"), "application/pdf")
 
+    def test_attachment_filename_tokens_split_at_underscores_brackets_and_digits(self) -> None:
+        mail = Redactor(config(terms=("Marta Kowalczyk",))).for_mail([("Torvald Brightwater", "tb@example.org")])
+        cases = {
+            "Kowalczyk_Settlement.pdf": ("Kowalczyk", "Settlement"),
+            "client_wyndham_q3.xlsx": ("wyndham",),
+            "Zoë_Brönte_scan.pdf": ("Zoë", "Brönte", "scan"),
+            "Torvald_Brightwater_Wyndham.pdf": ("Torvald", "Brightwater", "Wyndham"),
+            "[Wyndham] Ünal.pdf": ("Wyndham", "Ünal"),
+            "[acmecorp] [zoë].pdf": ("acmecorp", "zoë"),
+            "2024Kowalczyk_v12.pdf": ("Kowalczyk", "v12"),
+            "Marta_Kowalczyk.docx": ("Marta", "Kowalczyk"),
+        }
+        for filename, raws in cases.items():
+            with self.subTest(filename=filename):
+                redacted = mail.mail_filename(filename)
+                for raw in raws:
+                    self.assertNotIn(raw.casefold(), redacted.casefold())
+                self.assertTrue(PLACEHOLDER_RE.search(redacted), redacted)
+        self.assertIn("_q3.", mail.mail_filename("client_wyndham_q3.xlsx"))
+        self.assertTrue(mail.mail_filename("2024Kowalczyk_v12.pdf").startswith("2024["))
+        # Underscores split tokens exactly like hyphens and spaces do.
+        self.assertEqual(
+            mail.mail_filename("Zoë_Brönte_scan.pdf"),
+            mail.mail_filename("Zoë-Brönte-scan.pdf").replace("-", "_"),
+        )
+        # Rendered attachment lines use the same redaction.
+        attachment = MailAttachment("@m_0123456789ab/1", "application/pdf", 3, "Kowalczyk_Settlement.pdf")
+        message = MailMessage(
+            ref="@m_0123456789ab", mailbox="inbox", date="?", timestamp=None, thread="@m_0123456789ab",
+            in_reply_to=(), references=(), addresses=(), subject="", body="", attachments=(attachment,), size=3,
+        )
+        rendered = render_mail_message(message, mail, max_body_chars=100)
+        self.assertNotIn("kowalczyk", rendered.casefold())
+        self.assertNotIn("settlement", rendered.casefold())
+
+    def test_attachment_filenames_without_glued_tokens_keep_their_redaction(self) -> None:
+        mail = Redactor(config()).for_mail([("Torvald Brightwater", "tb@example.org")])
+        # The token rule before underscores, brackets, and digits split tokens.
+        word_bounded = re.compile(rf"({PLACEHOLDER_RE.pattern})|(?<!\[)\b[^\W\d_][^\W_]{{2,}}\b(?!_\d{{2}}\])")
+        for filename in (
+            "Jörg Müller Ünal Şahin.pdf",
+            "Zoë-Brönte scan.pdf",
+            "notes 2026.txt",
+            "report-final v2.docx",
+            "Torvald Brightwater.pdf",
+            "q3 x.pdf",
+            "[PERSON_01].pdf",
+        ):
+            with self.subTest(filename=filename):
+                expected = word_bounded.sub(mail._replace_path_token, mail.redact_path(filename))
+                self.assertEqual(mail.mail_filename(filename), expected)
+        self.assertEqual(mail.mail_filename("[PERSON_01].pdf"), "[PERSON_01].pdf")
+
     def test_structural_helpers_work_on_a_base_redactor(self) -> None:
         base = Redactor(config())
         self.assertEqual(base.mail_name_placeholder("Avery Example"), ordinary("PERSON", "Avery Example"))
