@@ -12,6 +12,7 @@ is the redaction boundary that formats those records for output.
 
 from __future__ import annotations
 
+import codecs
 import datetime as dt
 import hashlib
 import hmac
@@ -141,6 +142,20 @@ MESSAGE_ID_RE = re.compile(r"<([^<>]*)>")
 DATE_FILTER_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 MBOXRD_ESCAPE_RE = re.compile(rb"^>(>*From )", re.MULTILINE)
 BLANK_LINES = (b"\n", b"\r\n")
+# Byte-order marks and the codecs that decode (and drop) them. UTF-32 comes
+# first because the UTF-32LE mark starts with the UTF-16LE one.
+TEXT_BOMS = (
+    (codecs.BOM_UTF32_LE, "utf-32"),
+    (codecs.BOM_UTF32_BE, "utf-32"),
+    (codecs.BOM_UTF8, "utf-8-sig"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
+)
+# A decoded text part with a larger share of replacement characters is not
+# text, mirroring the file tools' 85% printable threshold.
+MAX_REPLACEMENT_SHARE = 0.15
+# Shown in place of a body that does not decode to text.
+BODY_NOT_TEXT = "[body omitted: not text]"
 
 
 @dataclass(frozen=True)
@@ -233,6 +248,10 @@ class _MailView:
     # Unique refs, first occurrence in config order then storage order.
     ordered: tuple[MailIndexEntry, ...]
     by_ref: dict[str, MailIndexEntry]
+    # Per mailbox alias, that mailbox's own entries with unique refs in
+    # storage order, so a mailbox filter sees every message stored in it,
+    # including messages an earlier mailbox also holds (Gmail label folders).
+    by_mailbox: dict[str, tuple[MailIndexEntry, ...]]
 
 
 class _IndexBudget:
@@ -392,10 +411,11 @@ class MailSource:
         if mailbox is not None:
             self._config_for(mailbox)
         view = self._current_view(None)
+        # A filtered listing shows the mailbox's own copies, so each record
+        # names the filtered alias even when an earlier mailbox holds the ref.
+        candidates = view.ordered if mailbox is None else view.by_mailbox.get(mailbox, ())
         selected: list[MailIndexEntry] = []
-        for entry in view.ordered:
-            if mailbox is not None and entry.mailbox != mailbox:
-                continue
+        for entry in candidates:
             if start is not None or end is not None:
                 if entry.timestamp is None:
                     continue
@@ -491,9 +511,10 @@ class MailSource:
             for ref in refs:
                 entry = self._resolve_message(ref, budget)
                 chosen[entry.ref] = entry
-            for entry in view.ordered:
-                if entry.mailbox in aliases:
-                    chosen.setdefault(entry.ref, entry)
+            for alias in self.config.mail_sources:
+                if alias in aliases:
+                    for entry in view.by_mailbox.get(alias, ()):
+                        chosen.setdefault(entry.ref, entry)
             selected = list(chosen.values())
         else:
             selected = list(view.ordered)
@@ -514,7 +535,11 @@ class MailSource:
     def _attachment_text(self, part: Message) -> str:
         content_type = safe_content_type(part)
         if content_type.startswith("text/"):
-            return clean_text(decode_text_part(part, charset_first=True))
+            text = decode_text_part(part)
+            # NUL-interleaved or undecodable text would slip past redaction.
+            if not is_probably_text(text):
+                raise SystemExit(UNSUPPORTED_ATTACHMENT_MESSAGE)
+            return clean_text(text)
         extension = document_extension(safe_filename(part), content_type)
         if extension is None:
             raise SystemExit(UNSUPPORTED_ATTACHMENT_MESSAGE)
@@ -651,10 +676,15 @@ def normalize_message_id(value: str) -> str:
 
 
 def build_view(indexes: tuple[_MailboxIndex, ...]) -> _MailView:
-    """Merge mailbox indexes: first occurrence of a ref wins; collisions fail closed."""
+    """Merge mailbox indexes: first occurrence of a ref wins; collisions fail closed.
+
+    Each mailbox also keeps its own first copy of every ref it stores, for
+    mailbox filters.
+    """
     identities: dict[str, str] = {}
     by_ref: dict[str, MailIndexEntry] = {}
     ordered: list[MailIndexEntry] = []
+    members: dict[str, dict[str, MailIndexEntry]] = {}
     for index in indexes:
         for entry in index.entries:
             known = identities.setdefault(entry.ref, entry.identity)
@@ -663,7 +693,9 @@ def build_view(indexes: tuple[_MailboxIndex, ...]) -> _MailView:
             if entry.ref not in by_ref:
                 by_ref[entry.ref] = entry
                 ordered.append(entry)
-    return _MailView(indexes=indexes, ordered=tuple(ordered), by_ref=by_ref)
+            members.setdefault(entry.mailbox, {}).setdefault(entry.ref, entry)
+    by_mailbox = {alias: tuple(entries.values()) for alias, entries in members.items()}
+    return _MailView(indexes=indexes, ordered=tuple(ordered), by_ref=by_ref, by_mailbox=by_mailbox)
 
 
 def thread_component(entries: Sequence[MailIndexEntry], target: MailIndexEntry) -> list[MailIndexEntry]:
@@ -1305,6 +1337,11 @@ def body_text(part: Message | None) -> str:
     if part is None:
         return ""
     text = decode_text_part(part)
+    if not is_probably_text(text):
+        # Withhold the whole body rather than strip NULs: NUL-interleaved or
+        # undecodable text could still split a name or address and slip past
+        # redaction. Headers and attachments stay readable.
+        return BODY_NOT_TEXT
     try:
         is_html = part.get_content_type() == "text/html"
     except Exception:
@@ -1314,21 +1351,33 @@ def body_text(part: Message | None) -> str:
     return clean_text(text)
 
 
-def decode_text_part(part: Message, *, charset_first: bool = False) -> str:
-    try:
-        content = part.get_content()  # type: ignore[attr-defined]
-        if isinstance(content, str):
-            return content
-    except Exception:
-        pass
+def decode_text_part(part: Message) -> str:
+    """Decode a text part's payload, with replacement characters for bad bytes.
+
+    A UTF-8, UTF-16, or UTF-32 byte-order mark wins over the declared
+    charset; otherwise the declared charset is used, or UTF-8 when none is
+    declared or it is unknown.
+    """
     payload = part_payload_bytes(part)
-    if charset_first:
-        try:
-            charset = part.get_content_charset() or "utf-8"
-            return payload.decode(charset, errors="replace")
-        except Exception:
-            pass
-    return payload.decode("utf-8", errors="replace")
+    for mark, codec in TEXT_BOMS:
+        if payload.startswith(mark):
+            return payload.decode(codec, errors="replace")
+    try:
+        charset = part.get_content_charset() or "utf-8"
+        return payload.decode(charset, errors="replace")
+    except Exception:
+        return payload.decode("utf-8", errors="replace")
+
+
+def is_probably_text(text: str) -> bool:
+    """Whether decoded part text is text: no NUL and few replacement characters.
+
+    The decoded-text counterpart of ``filesystem.is_probably_text_bytes``,
+    which cannot judge raw bytes in a declared 8-bit charset.
+    """
+    if "\0" in text:
+        return False
+    return not text or text.count("\ufffd") / len(text) <= MAX_REPLACEMENT_SHARE
 
 
 def part_payload_bytes(part: Message) -> bytes:

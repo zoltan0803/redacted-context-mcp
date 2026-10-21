@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import codecs
 import hashlib
 import hmac
 import os
@@ -309,7 +310,16 @@ class MailReferenceTest(MailTestCase):
         self.assertEqual(total, 2)
         message = source.read_message(expected_ref("dup@example.test"))
         self.assertEqual((message.mailbox, message.body), ("zeta", "first copy\n"))
-        self.assertEqual([item.subject for item in source.list_messages("alpha", limit=50, offset=0)[0]], ["Only here"])
+        # A mailbox filter lists every message stored in that mailbox, once,
+        # under the filtered alias, even when an earlier mailbox holds it too.
+        alpha, total = source.list_messages("alpha", limit=50, offset=0)
+        self.assertEqual(total, 2)
+        self.assertEqual(
+            sorted((item.mailbox, item.subject) for item in alpha),
+            [("alpha", "Only here"), ("alpha", "Quarterly planning")],
+        )
+        zeta, total = source.list_messages("zeta", limit=50, offset=0)
+        self.assertEqual(([item.ref for item in zeta], total), ([expected_ref("dup@example.test")], 1))
         self.assertEqual(source.mailboxes(), [("alpha", "maildir"), ("zeta", "mbox")])
 
     def test_two_message_ids_with_one_ref_fail_closed(self) -> None:
@@ -593,6 +603,47 @@ class MailBodyTest(MailTestCase):
             "Answer.\n\n[quoted text: 2 lines omitted]\n[signature: 2 lines omitted]",
         )
 
+    def test_bodies_honour_byte_order_marks(self) -> None:
+        text = "Hello from Marta Kowalczyk.\n"
+        cases = (
+            ("text/plain", codecs.BOM_UTF16_LE + text.encode("utf-16-le")),
+            ("text/plain; charset=us-ascii", codecs.BOM_UTF16_BE + text.encode("utf-16-be")),
+            ("text/plain; charset=utf-8", codecs.BOM_UTF8 + text.encode("utf-8")),
+            ("text/plain", text.encode("utf-8")),
+        )
+        for number, (content_type, data) in enumerate(cases):
+            with self.subTest(content_type=content_type, number=number):
+                raw = mf.multipart([mf.encoded_text_part(data, content_type=content_type)], message_id=f"<bom{number}@example.test>")
+                source = self.mbox_source([raw])
+                self.assertEqual(source.read_message(expected_ref(f"bom{number}@example.test")).body, text)
+        html = codecs.BOM_UTF16_LE + "<p>Hello <b>Marta</b></p>".encode("utf-16-le")
+        raw = mf.multipart([mf.encoded_text_part(html, content_type="text/html")], message_id="<bom-html@example.test>")
+        self.assertEqual(self.mbox_source([raw]).read_message(expected_ref("bom-html@example.test")).body, "Hello Marta")
+
+    def test_bodies_that_do_not_decode_to_text_are_withheld(self) -> None:
+        cases = (
+            ("text/plain", "Marta Kowalczyk mk@corp.example\n".encode("utf-16-le")),
+            ("text/html", "<p>Marta Kowalczyk</p>".encode("utf-16-be")),
+            ("text/plain; charset=utf-8", bytes(range(128, 256))),
+        )
+        for number, (content_type, data) in enumerate(cases):
+            with self.subTest(content_type=content_type, number=number):
+                raw = mf.multipart(
+                    [mf.encoded_text_part(data, content_type=content_type), mf.attachment_part("a.txt", "text/plain", b"kept\n")],
+                    message_id=f"<nul{number}@example.test>",
+                    subject="Readable subject",
+                )
+                source = self.mbox_source([raw])
+                ref = expected_ref(f"nul{number}@example.test")
+                for include_quoted in (False, True):
+                    message = source.read_message(ref, include_quoted=include_quoted)
+                    self.assertEqual(message.body, mail.BODY_NOT_TEXT)
+                    self.assertEqual(message.subject, "Readable subject")
+                self.assertEqual(source.read_attachment(f"{ref}/1"), "kept\n")
+                (document,) = source.iter_documents(OperationBudget())
+                self.assertEqual(document.text, f"Readable subject\n\n{mail.BODY_NOT_TEXT}")
+                self.assertNotIn("\0", document.text)
+
 
 class MailAttachmentTest(MailTestCase):
     def test_attachments_are_listed_with_validated_types(self) -> None:
@@ -635,6 +686,52 @@ class MailAttachmentTest(MailTestCase):
             self.mbox_source([mf.attachments_message()]).read_attachment(f"{expected_ref('attach@example.test')}/1"),
             "Attachment notes from Jordan Sample.\nLine two.\n",
         )
+
+    def test_byte_order_marks_win_over_a_missing_or_ascii_charset(self) -> None:
+        text = "Marta Kowalczyk\tmk@corp.example\n"
+        raw = mf.multipart(
+            [
+                mf.text_part("Body.\n"),
+                mf.attachment_part("le.txt", "text/plain", codecs.BOM_UTF16_LE + text.encode("utf-16-le")),
+                mf.attachment_part("be.txt", "text/plain", codecs.BOM_UTF16_BE + text.encode("utf-16-be")),
+                mf.attachment_part("ascii.txt", "text/plain; charset=us-ascii", codecs.BOM_UTF16_LE + text.encode("utf-16-le")),
+                mf.attachment_part("le32.txt", "text/csv", codecs.BOM_UTF32_LE + text.encode("utf-32-le")),
+                mf.attachment_part("be32.txt", "text/plain; charset=utf-8", codecs.BOM_UTF32_BE + text.encode("utf-32-be")),
+                mf.attachment_part("sig.txt", "text/plain; charset=iso-8859-1", codecs.BOM_UTF8 + "Zoë Brönte\n".encode("utf-8")),
+                mf.attachment_part("plain.txt", "text/plain", "Zoë Brönte\n".encode("utf-8")),
+            ],
+            message_id="<bom@example.test>",
+        )
+        source = self.mbox_source([raw])
+        ref = expected_ref("bom@example.test")
+        for number in range(1, 6):
+            with self.subTest(number=number):
+                self.assertEqual(source.read_attachment(f"{ref}/{number}"), text)
+        self.assertEqual(source.read_attachment(f"{ref}/6"), "Zoë Brönte\n")
+        # Without a declared charset, UTF-8 is assumed.
+        self.assertEqual(source.read_attachment(f"{ref}/7"), "Zoë Brönte\n")
+
+    def test_text_attachments_that_do_not_decode_to_text_are_refused(self) -> None:
+        raw = mf.multipart(
+            [
+                mf.text_part("Body.\n"),
+                mf.attachment_part("bare16.txt", "text/plain", "Marta Kowalczyk\tmk@corp.example\n".encode("utf-16-le")),
+                mf.attachment_part("image.txt", "text/plain", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" * 8),
+                mf.attachment_part("nul.csv", "text/csv; charset=iso-8859-1", b"name,Marta\x00Kowalczyk\n"),
+                mf.attachment_part("junk.txt", "text/plain; charset=utf-8", bytes(range(128, 256))),
+                mf.attachment_part("mixed.txt", "text/plain; charset=utf-8", b"Mostly text \xff here.\n"),
+            ],
+            message_id="<nul@example.test>",
+        )
+        source = self.mbox_source([raw])
+        ref = expected_ref("nul@example.test")
+        for number in range(1, 5):
+            with self.subTest(number=number):
+                with self.assertRaises(SystemExit) as caught:
+                    source.read_attachment(f"{ref}/{number}")
+                self.assertEqual(str(caught.exception), "Unsupported attachment type.")
+        # A few undecodable bytes in otherwise readable text are replaced, not refused.
+        self.assertEqual(source.read_attachment(f"{ref}/5"), "Mostly text \ufffd here.\n")
 
     def test_documents_are_refused_unless_enabled_and_other_types_unsupported(self) -> None:
         ref = expected_ref("attach@example.test")
@@ -1072,6 +1169,64 @@ class MailDocumentIterationTest(MailTestCase):
                     list(source.iter_documents(budget, **kwargs))  # type: ignore[arg-type]
                 self.assertEqual(str(caught.exception), message)
                 self.assertEqual(budget.files_seen, 0)
+
+
+class MailMailboxFilterTest(MailTestCase):
+    """Label folders: a message stored in an earlier mailbox too still belongs to every mailbox holding it."""
+
+    @staticmethod
+    def label_messages() -> dict[str, bytes]:
+        return {
+            "alpha": mf.message(message_id="<alpha@example.test>", subject="Alpha", date="Mon, 05 Oct 2026 08:00:00 +0000", body="alpha body\n"),
+            "bravo": mf.message(message_id="<bravo@example.test>", subject="Bravo", date="Tue, 06 Oct 2026 08:00:00 +0000", body="bravo body\n"),
+            "charlie": mf.message(message_id="<charlie@example.test>", subject="Charlie", date="Wed, 07 Oct 2026 08:00:00 +0000", body="charlie body\n"),
+        }
+
+    def label_source(self, mail_format: str) -> MailSource:
+        messages = self.label_messages()
+        everything = [messages["alpha"], messages["bravo"], messages["charlie"]]
+        labelled = [messages["bravo"], messages["charlie"]]
+        if mail_format == "mbox":
+            all_path = mf.write_mbox(self.dir / mail_format / "all.mbox", everything)
+            label_path = mf.write_mbox(self.dir / mail_format / "label.mbox", labelled)
+        else:
+            all_path = mf.write_maildir(self.dir / mail_format / "all", cur={f"{n}.host": raw for n, raw in enumerate(everything)})
+            label_path = mf.write_maildir(self.dir / mail_format / "label", cur={f"{n}.host": raw for n, raw in enumerate(labelled)})
+        return self.source(("all", all_path, mail_format), ("label", label_path, mail_format))
+
+    def test_list_filters_by_every_mailbox_holding_a_message(self) -> None:
+        bravo, charlie = expected_ref("bravo@example.test"), expected_ref("charlie@example.test")
+        for mail_format in ("mbox", "maildir"):
+            with self.subTest(format=mail_format):
+                source = self.label_source(mail_format)
+                page, total = source.list_messages(None, limit=50, offset=0)
+                self.assertEqual(total, 3)
+                self.assertEqual({item.mailbox for item in page}, {"all"})
+                label, total = source.list_messages("label", limit=50, offset=0)
+                self.assertEqual(total, 2)
+                self.assertEqual([(item.ref, item.mailbox) for item in label], [(charlie, "label"), (bravo, "label")])
+                second, total = source.list_messages("label", limit=1, offset=1)
+                self.assertEqual(([item.ref for item in second], total), ([bravo], 2))
+                self.assertEqual(source.list_messages("label", limit=50, offset=0, since="2026-10-07")[1], 1)
+                self.assertEqual(source.list_messages("all", limit=50, offset=0)[1], 3)
+                # Ref resolution stays first-wins in config order.
+                self.assertEqual(source.read_message(bravo).mailbox, "all")
+                self.assertEqual(len(source.thread_messages(bravo, max_messages=5)[0]), 1)
+
+    def test_document_scope_reads_every_message_in_the_mailbox(self) -> None:
+        alpha, bravo, charlie = (expected_ref(f"{name}@example.test") for name in ("alpha", "bravo", "charlie"))
+        for mail_format in ("mbox", "maildir"):
+            with self.subTest(format=mail_format):
+                source = self.label_source(mail_format)
+                scoped = list(source.iter_documents(OperationBudget(), scope=["label"]))
+                self.assertEqual([(document.ref, document.locator) for document in scoped], [(charlie, "label"), (bravo, "label")])
+                self.assertEqual(scoped[1].text, "Bravo\n\nbravo body\n")
+                both = list(source.iter_documents(OperationBudget(), scope=["label", "all"]))
+                self.assertEqual([document.ref for document in both], [charlie, bravo, alpha])
+                self.assertEqual([document.locator for document in both], ["all", "all", "all"])
+                mixed = list(source.iter_documents(OperationBudget(), scope=[alpha, "label"]))
+                self.assertEqual([(document.ref, document.locator) for document in mixed], [(charlie, "label"), (bravo, "label"), (alpha, "all")])
+                self.assertEqual(len(list(source.iter_documents(OperationBudget()))), 3)
 
 
 class MailSafeMessagesTest(unittest.TestCase):
