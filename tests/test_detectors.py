@@ -52,7 +52,7 @@ from redacted_context_mcp.models import (
 )
 from redacted_context_mcp.redaction import Redactor
 from redacted_context_mcp.testing import DetectorConformance
-from tests.fixtures import FakeDetector, load_snapshot, write_knowledgebase
+from tests.fixtures import FakeDetector, load_snapshot, without_opaque_tokens, write_knowledgebase
 from tests.test_retrieval import (
     GOLDEN_FILES,
     GOLDEN_RETRIEVE_ALL,
@@ -1142,7 +1142,7 @@ class DetectorProcessTest(unittest.TestCase):
         # Strict mode's name heuristics take "Ticket TICKET-" first; the
         # detector still redacts the digits the baseline left.
         self.assertIn("[ID_", result["content"][0]["text"])
-        self.assertNotIn("12345", json.dumps(result))
+        self.assertNotIn("12345", without_opaque_tokens(json.dumps(result)))
         placeholder = re.search(r"\[SENSITIVE_[0-9a-f]{32}\]", result["content"][0]["text"]).group(0)
         submit = rpc(
             "tools/call",
@@ -1650,7 +1650,7 @@ class NominationCompletenessTest(unittest.TestCase):
         with patch.object(CompletenessOracleSession, "segments", recording_segments):
             redacted = Redactor(self.CONFIG, mode="strict", detectors=(detector,)).redact(text, preserve_line_count=True)
         self.assertEqual(mapped, [True])
-        self.assertNotIn("12345", redacted)
+        self.assertNotIn("12345", without_opaque_tokens(redacted))
         self.assertEqual(redacted.count("\n"), text.count("\n"))
 
     def test_unmapped_fallback_still_redacts_nominated_spans(self) -> None:
@@ -1663,7 +1663,7 @@ class NominationCompletenessTest(unittest.TestCase):
         plain = Redactor(self.CONFIG, mode="strict").redact(text)
         with patch.object(CompletenessOracleSession, "segments", return_value=None):
             redacted = Redactor(self.CONFIG, mode="strict", detectors=(detector,)).redact(text)
-        self.assertNotIn("12345", redacted)
+        self.assertNotIn("12345", without_opaque_tokens(redacted))
         self.assertNotIn("today", redacted)
         self.assertNotIn("quillfeather", redacted)
         self.assertTrue(redacted.startswith("filed "), redacted)

@@ -18,6 +18,7 @@ from redacted_context_mcp import core, server
 from redacted_context_mcp.config import vault_salt_path
 from redacted_context_mcp.models import RedactionConfig
 from redacted_context_mcp.redaction import Redactor
+from tests.fixtures import without_opaque_tokens
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -189,7 +190,7 @@ class SecurityHardeningTest(unittest.TestCase):
                 result = self.run_cli("grep", "target", f"docs/{name}", "--context", "0")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(f":{line}:", result.stdout)
-                self.assertNotIn("abc123", result.stdout)
+                self.assertNotIn("abc123", without_opaque_tokens(result.stdout))
 
     def test_safe_no_match_search_skips_redaction(self) -> None:
         config = core.load_config(self.root, None)

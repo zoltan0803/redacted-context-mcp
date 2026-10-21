@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import unittest
 
+from redacted_context_mcp.defaults import HEADING_LINE_RE
 from redacted_context_mcp.models import RedactionConfig
 from redacted_context_mcp.paths import path_id
 from redacted_context_mcp.redaction import Redactor
+from tests.fixtures import FakeDetector
 
 
 class RedactionBenchmarkTest(unittest.TestCase):
@@ -70,6 +72,252 @@ Domain: {raw_values[10]}
 
         self.assertNotIn(raw, redacted)
         self.assertRegex(redacted, r"\[SERVICE_ACCOUNT_[0-9a-f]{32}\]")
+
+
+class DomainBoundaryTest(unittest.TestCase):
+    def test_domain_at_the_end_of_a_sentence_is_redacted(self) -> None:
+        for mode in ("balanced", "strict"):
+            for end in (".", ".\r\n", ". Then", "..", "!"):
+                with self.subTest(mode=mode, end=end):
+                    redactor = Redactor(RedactionConfig(salt="test-salt"), mode=mode)
+                    domain = redactor.placeholder("DOMAIN", "db01.internal.example")
+
+                    self.assertEqual(
+                        redactor.redact(f"connect to db01.internal.example{end}"),
+                        f"connect to {domain}{end}",
+                    )
+
+    def test_country_code_domains_are_redacted(self) -> None:
+        values = ("ugyfel.hu", "client.co.uk", "db.acme.de", "a.example.com.au", "Acme.it", "firma.pl")
+        for mode in ("balanced", "strict"):
+            for value in values:
+                with self.subTest(mode=mode, value=value):
+                    redactor = Redactor(RedactionConfig(salt="test-salt"), mode=mode)
+                    domain = redactor.placeholder("DOMAIN", value)
+
+                    self.assertEqual(redactor.redact(f"see {value} now"), f"see {domain} now")
+                    self.assertEqual(redactor.redact(f"see {value}."), f"see {domain}.")
+
+    def test_email_and_url_keep_their_category_on_country_code_domains(self) -> None:
+        redactor = Redactor(RedactionConfig(salt="test-salt"), mode="balanced")
+
+        self.assertEqual(
+            redactor.redact("mail me@ugyfel.hu or open https://ugyfel.hu/x"),
+            f"mail {redactor.placeholder('EMAIL', 'me@ugyfel.hu')} or open "
+            f"{redactor.placeholder('URL', 'https://ugyfel.hu/x')}",
+        )
+
+    def test_file_names_and_code_are_not_country_code_domains(self) -> None:
+        texts = (
+            "see README.md and main.rs",
+            "user.id and request.user.id",
+            "model.to(device) then df.at[0]",
+            "done.It was late",
+            "pd.NA here",
+            "app.db and index.js",
+            "e.g. this, i.e. that",
+        )
+        redactor = Redactor(RedactionConfig(salt="test-salt"), mode="balanced")
+        for text in texts:
+            with self.subTest(text=text):
+                self.assertEqual(redactor.redact(text), text)
+
+
+class ProperNameLineBreakTest(unittest.TestCase):
+    def test_blank_line_ends_a_proper_name(self) -> None:
+        for newline in ("\n", "\r\n", "\r"):
+            with self.subTest(newline=repr(newline)):
+                redactor = Redactor(RedactionConfig(salt="test-salt"), mode="balanced")
+                text = f"Avery Example{newline}{newline}Jordan Sample met here."
+
+                self.assertEqual(
+                    redactor.redact(text),
+                    f"{redactor.placeholder('PERSON', 'Avery Example')}{newline}{newline}"
+                    f"{redactor.placeholder('PERSON', 'Jordan Sample')} met here.",
+                )
+
+    def test_whitespace_only_line_ends_a_proper_name(self) -> None:
+        redactor = Redactor(RedactionConfig(salt="test-salt"), mode="balanced")
+
+        self.assertEqual(
+            redactor.redact("Avery Example\n \t\nJordan Sample"),
+            f"{redactor.placeholder('PERSON', 'Avery Example')}\n \t\n"
+            f"{redactor.placeholder('PERSON', 'Jordan Sample')}",
+        )
+
+    def test_name_wrapped_onto_the_next_line_is_one_placeholder(self) -> None:
+        redactor = Redactor(RedactionConfig(salt="test-salt"), mode="balanced")
+        placeholder = redactor.placeholder("PERSON", "Avery\nExample")
+
+        self.assertEqual(redactor.redact("We met Avery\nExample today."), f"We met {placeholder} today.")
+        self.assertEqual(
+            redactor.redact("We met Avery\nExample today.", preserve_line_count=True),
+            f"We met {placeholder}\n today.",
+        )
+
+
+class HeadingRedactionTest(unittest.TestCase):
+    def test_heading_line_pattern(self) -> None:
+        for line in ("# Notes", "###### Notes", "   ## Notes", "##", "## \t", "#\tNotes"):
+            with self.subTest(line=line):
+                self.assertIsNotNone(HEADING_LINE_RE.fullmatch(line))
+        for line in ("#Notes", "####### Notes", "    ## Notes", "\t## Notes", "text ## Notes"):
+            with self.subTest(line=line):
+                self.assertIsNone(HEADING_LINE_RE.fullmatch(line))
+                self.assertEqual(HEADING_LINE_RE.findall(line), [])
+        self.assertEqual(HEADING_LINE_RE.findall("a\r## B\r\n# C\nd ## E\n"), ["## B", "# C"])
+
+    def test_generic_heading_words_are_kept_in_both_modes(self) -> None:
+        text = "# Project Status Update\n\n## Next Steps\n\n### Open Questions\n\n## Budget\n\n# Demo Contacts\n"
+        for mode in ("balanced", "strict"):
+            with self.subTest(mode=mode):
+                self.assertEqual(Redactor(RedactionConfig(salt="test-salt"), mode=mode).redact(text), text)
+
+    def test_proper_name_does_not_leave_a_heading_line(self) -> None:
+        for mode in ("balanced", "strict"):
+            with self.subTest(mode=mode):
+                redactor = Redactor(RedactionConfig(salt="test-salt"), mode=mode)
+                person = redactor.placeholder("PERSON", "Avery Example")
+
+                self.assertEqual(
+                    redactor.redact("### Open Questions\nAvery Example joined late.\n"),
+                    f"### Open Questions\n{person} joined late.\n",
+                )
+
+    def test_names_in_headings_are_still_redacted(self) -> None:
+        for mode in ("balanced", "strict"):
+            with self.subTest(mode=mode):
+                redactor = Redactor(RedactionConfig(salt="test-salt"), mode=mode)
+                person = redactor.placeholder("PERSON", "Avery Example")
+                codename = redactor.placeholder("PERSON", "Harbor")
+
+                self.assertEqual(redactor.redact("## Avery Example\n"), f"## {person}\n")
+                self.assertEqual(redactor.redact("## Contact Avery Example\n"), f"## Contact {person}\n")
+                self.assertEqual(redactor.redact("## Project Harbor Rollout\n"), f"## Project {codename} Rollout\n")
+
+    def test_strict_mode_redacts_single_names_in_headings(self) -> None:
+        redactor = Redactor(RedactionConfig(salt="test-salt"), mode="strict")
+        entity = redactor.placeholder("ENTITY", "Avery")
+
+        self.assertEqual(redactor.redact("## Notes for Avery\n"), f"## Notes for {entity}\n")
+
+    def test_heading_words_stay_redacted_outside_headings(self) -> None:
+        redactor = Redactor(RedactionConfig(salt="test-salt"), mode="balanced")
+        person = redactor.placeholder("PERSON", "Next Steps")
+
+        self.assertEqual(redactor.redact("#Next Steps\n"), f"#{person}\n")
+        self.assertEqual(redactor.redact("    ## Next Steps\n"), f"    ## {person}\n")
+        self.assertEqual(redactor.redact("see Next Steps below.\n"), f"see {person} below.\n")
+
+    def test_detectors_still_redact_kept_heading_words(self) -> None:
+        config = RedactionConfig(salt="test-salt")
+        detector = FakeDetector({"Next Steps": "SENSITIVE", "zorvane": "PERSON"})
+        redactor = Redactor(config, mode="balanced", detectors=(detector,))
+        expected = Redactor(config)
+
+        self.assertEqual(
+            redactor.redact("## Next Steps\n## Contact Avery Example\nask zorvane\n"),
+            f"## {expected.placeholder('SENSITIVE', 'Next Steps')}\n"
+            f"## Contact {expected.placeholder('PERSON', 'Avery Example')}\n"
+            f"ask {expected.placeholder('PERSON', 'zorvane')}\n",
+        )
+
+
+class IdentityLabelTest(unittest.TestCase):
+    LABELS = (
+        "Attendees",
+        "Participant",
+        "Stakeholders",
+        "Owner",
+        "Contact",
+        "Authors",
+        "Reviewer",
+        "Approvers",
+        "Speaker",
+        "Presenters",
+    )
+
+    def test_capitalized_label_is_kept_and_names_after_it_are_redacted(self) -> None:
+        for mode in ("balanced", "strict"):
+            for label in self.LABELS:
+                with self.subTest(mode=mode, label=label):
+                    redactor = Redactor(RedactionConfig(salt="test-salt"), mode=mode)
+                    avery = redactor.placeholder("PERSON", "Avery")
+                    jordan = redactor.placeholder("PERSON", "Jordan")
+
+                    self.assertEqual(redactor.redact(f"{label}: Avery, Jordan\n"), f"{label}: {avery}, {jordan}\n")
+
+    def test_label_keeps_a_multi_word_name_whole(self) -> None:
+        for mode in ("balanced", "strict"):
+            with self.subTest(mode=mode):
+                redactor = Redactor(RedactionConfig(salt="test-salt"), mode=mode)
+                person = redactor.placeholder("PERSON", "Avery Example")
+
+                self.assertEqual(redactor.redact("Owner: Avery Example\n"), f"Owner: {person}\n")
+
+    def test_short_names_after_a_label_are_redacted(self) -> None:
+        for mode in ("balanced", "strict"):
+            for label in ("Attendees", "attendees"):
+                with self.subTest(mode=mode, label=label):
+                    redactor = Redactor(RedactionConfig(salt="test-salt"), mode=mode)
+                    names = ", ".join(redactor.placeholder("PERSON", name) for name in ("Avery", "Kim", "Al"))
+
+                    self.assertEqual(redactor.redact(f"{label}: Avery, Kim, Al\n"), f"{label}: {names}\n")
+
+    def test_label_on_the_next_line_is_not_joined_to_a_name(self) -> None:
+        for mode in ("balanced", "strict"):
+            with self.subTest(mode=mode):
+                redactor = Redactor(RedactionConfig(salt="test-salt"), mode=mode)
+                avery = redactor.placeholder("PERSON", "Avery Example")
+                kim = redactor.placeholder("PERSON", "Kim")
+                jordan = redactor.placeholder("PERSON", "Jordan")
+
+                self.assertEqual(
+                    redactor.redact("Attendees: Avery Example, Kim\nOwner: Jordan\n"),
+                    f"Attendees: {avery}, {kim}\nOwner: {jordan}\n",
+                )
+                self.assertEqual(
+                    redactor.redact("Owner: Avery Example\n  contacts : Jordan\n"),
+                    f"Owner: {avery}\n  contacts : {jordan}\n",
+                )
+
+    def test_label_after_other_capitalized_words_is_kept(self) -> None:
+        cases = (
+            ("Project Owner: Bob\n", "Owner: ", "Bob"),
+            ("Primary Contact: Avery Example\n", "Contact: ", "Avery Example"),
+            ("Key Stakeholders : Kim\n", "Stakeholders : ", "Kim"),
+        )
+        for mode in ("balanced", "strict"):
+            for text, label, name in cases:
+                with self.subTest(mode=mode, text=text):
+                    redactor = Redactor(RedactionConfig(salt="test-salt"), mode=mode)
+                    redacted = redactor.redact(text)
+
+                    self.assertTrue(redacted.endswith(f"{label}{redactor.placeholder('PERSON', name)}\n"), redacted)
+
+        redactor = Redactor(RedactionConfig(salt="test-salt"), mode="balanced")
+        self.assertEqual(
+            redactor.redact("Project Owner: Bob\n"),
+            f"Project Owner: {redactor.placeholder('PERSON', 'Bob')}\n",
+        )
+
+    def test_upper_case_label_survives_strict_mode(self) -> None:
+        redactor = Redactor(RedactionConfig(salt="test-salt"), mode="strict")
+
+        self.assertEqual(
+            redactor.redact("OWNER: Avery\n"),
+            f"OWNER: {redactor.placeholder('PERSON', 'Avery')}\n",
+        )
+
+    def test_speaker_labels_are_still_redacted(self) -> None:
+        for mode in ("balanced", "strict"):
+            with self.subTest(mode=mode):
+                redactor = Redactor(RedactionConfig(salt="test-salt"), mode=mode)
+
+                self.assertEqual(
+                    redactor.redact("Avery: thanks, all good\n"),
+                    f"{redactor.placeholder('PERSON', 'Avery')}: thanks, all good\n",
+                )
 
 
 if __name__ == "__main__":
