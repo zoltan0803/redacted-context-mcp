@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.10.1 — 2026-10-15
+## Unreleased
 
 - Adds a read-only local mail source. `[mail.sources.<alias>]` tables name an
   mbox file, a Maildir directory, or `.eml` files under a neutral alias, with
@@ -55,6 +55,9 @@
   drops its index and cached mail redactor.
 - `redctx doctor` reports `mail_sources` and per-format counts, never aliases
   or paths.
+
+## 0.10.1 — 2026-10-15
+
 - A run of capitalized words redacted as one proper name no longer crosses a
   blank line. Before, `Next Steps`, a blank line, and `Contact the vendor`
   became one `PERSON` placeholder that swallowed the first word of the next
