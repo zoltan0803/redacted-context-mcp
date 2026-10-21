@@ -694,8 +694,11 @@ messages over `max_message_bytes`.
   sha256(header block))` instead, with CRLF line endings normalized to LF
   first, so the same message stored with either line ending keeps its ref.
   The same message in two mailboxes has one ref and resolves to the first in
-  config order, then storage order. Two Message-IDs with one ref fail closed
-  with `Mail reference collision.`.
+  config order, then storage order. Mailbox filters (`redctx_mail_list`
+  with `mailbox`, retrieval scoped to an alias) use each mailbox's own
+  copies, so they cover every message stored in that mailbox, shown under
+  that alias, even when an earlier mailbox holds it too. Two Message-IDs
+  with one ref fail closed with `Mail reference collision.`.
 - Threads: `In-Reply-To` and `References` are rendered as `@m_` refs through
   the same HMAC, whether or not the target message is in a mailbox. At most
   256 ids are kept per header (the first 255 and the last, so the root and
@@ -808,8 +811,13 @@ restorable there.
   are dropped; block elements become line breaks, `li` becomes `- `, links
   keep their text plus an `http(s)` or `mailto` target in angle brackets,
   images keep their `alt` text, and `blockquote` and quote containers become
-  `> ` lines. Parts are decoded with their declared charset and
-  `errors="replace"`. Invisible characters (`U+00AD`, `U+034F`, `U+061C`,
+  `> ` lines. Parts are decoded by byte-order mark (UTF-8, UTF-16, UTF-32)
+  first, then with their declared charset, or UTF-8 when none is declared,
+  with `errors="replace"`. Decoded text that contains NUL or is more than 15%
+  `U+FFFD` is not text: a body becomes `[body omitted: not text]`, withheld
+  whole rather than NUL-stripped because interleaved or undecodable text
+  could still split a name, and an attachment is refused with `Unsupported
+  attachment type.`. Invisible characters (`U+00AD`, `U+034F`, `U+061C`,
   `U+115F`, `U+1160`, `U+17B4`, `U+17B5`, `U+180E`, `U+180F`,
   `U+200B`-`U+200F`, `U+202A`-`U+202E`, `U+2060`-`U+206F`, `U+3164`,
   `U+FE00`-`U+FE0F`, `U+FEFF`, `U+FFA0`, `U+FFF9`-`U+FFFB`, and the tag and
@@ -828,9 +836,11 @@ restorable there.
   a filename, in MIME walk order; a `message/rfc822` part is one leaf, not
   walked into. They are listed with their ref, a validated MIME type
   redacted as content (it is sender-chosen), a size, and a
-  whitespace-collapsed, path-redacted filename in which every remaining word
-  token of three or more characters starting with a letter in any script is
-  redacted too (path redaction alone only covers ASCII tokens).
+  whitespace-collapsed, path-redacted filename in which every remaining run
+  of three or more letters and digits starting with a letter in any script
+  is redacted too (path redaction alone only covers ASCII tokens). Runs are
+  split at `_`, brackets, and every other non-alphanumeric character rather
+  than at `\b` word boundaries, and may start after digits (`2024Name`).
   `redctx_mail_attachment` returns `text/*` parts decoded and redacted.
   `.docx`, `.pptx`, `.pdf`, `.xlsx`, and `.xls` parts (by filename or MIME
   type) go through `documents.extract_document` only with `--documents` and

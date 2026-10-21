@@ -1421,6 +1421,12 @@ config: file tools never list, read, search, bundle, or serve it as a
 resource. Adding or removing mail tables takes effect on the next MCP request,
 like any other policy change.
 
+A message stored in more than one mailbox, such as a Gmail export with one
+mbox per label, is listed once under one ref and opens from the first mailbox
+in config order. Filtering by mailbox (`mail list <alias>`) or scoping
+retrieval to an alias still covers every message stored in that mailbox, and
+shows it under that alias.
+
 ```sh
 redctx --root ../source-private mail sources
 redctx --root ../source-private mail list inbox --limit 20 --since 2026-10-01
@@ -1543,11 +1549,18 @@ salt.
   text, dropping scripts, styles, and hidden elements, and invisible format
   characters are removed so they cannot split a name.
 - **Attachments** are listed with an `@m_<id>/<n>` ref, a redacted MIME type,
-  a size, and a path-redacted filename. `redctx_mail_attachment` returns `text/*`
+  a size, and a path-redacted filename in which every remaining token of three
+  or more letters and digits is redacted too, with `_`, brackets, and other
+  punctuation separating tokens. `redctx_mail_attachment` returns `text/*`
   parts decoded and redacted; DOCX, PPTX, PDF, XLSX, and XLS parts are
   extracted only with `--documents` (see
   [Optional Document Extraction](#optional-document-extraction)); other
   types are refused with `Unsupported attachment type.`.
+- **Text that does not decode is never shown.** A UTF-8, UTF-16, or UTF-32
+  byte-order mark wins over the declared charset, and UTF-8 is assumed when
+  none is declared. A `text/*` attachment that still decodes to NUL
+  characters or mostly replacement characters is refused with `Unsupported
+  attachment type.`, and such a body is shown as `[body omitted: not text]`.
 - **Mail is untrusted external content.** Output uses fixed labels
   (`untrusted_subject`, `body_untrusted_external:`,
   `attachment_untrusted_external:`), retrieval passages carry

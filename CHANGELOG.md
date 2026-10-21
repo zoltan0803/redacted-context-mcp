@@ -16,7 +16,10 @@
   `@m_<id>/<n>`; raw Message-IDs, mailbox paths, storage keys, and filenames
   never appear in refs or errors. Lists page with `limit`, `offset`, and
   UTC-day `since`/`until` filters and end with a `[more: ...]` marker;
-  threads follow Message-ID, In-Reply-To, and References links.
+  threads follow Message-ID, In-Reply-To, and References links. A message
+  stored in several mailboxes (such as Gmail label folders) is listed once,
+  and a mailbox filter or retrieval scope covers every message stored in that
+  mailbox, under that alias.
 - Only `Date`, `From`, `Sender`, `Reply-To`, `To`, `Cc`, `Bcc`, and `Subject`
   are rendered; routing, authentication, list, and `X-*` headers are dropped,
   and dates are regenerated as UTC. Every display name and address becomes a
@@ -38,9 +41,13 @@
   time on hostile markup, and invisible characters (zero-width, bidi, soft
   hyphen, fillers, variation selectors, and tag characters) are removed.
   Attachments list a validated, redacted MIME type, a size, and a
-  path-redacted filename with non-ASCII word tokens redacted too; `text/*`
-  attachments are readable, and DOCX, PPTX, PDF, XLSX, and XLS attachments
-  need `--documents`.
+  path-redacted filename in which every remaining token of three or more
+  letters and digits, in any script and split at `_` and punctuation, is
+  redacted too; `text/*` attachments are readable, and DOCX, PPTX, PDF,
+  XLSX, and XLS attachments need `--documents`. Text parts are decoded by
+  byte-order mark before the declared charset; a text attachment that still
+  decodes to NULs or mostly replacement characters is refused, and such a
+  body is withheld as `[body omitted: not text]`.
 - Subjects, bodies, and attachments are labelled `untrusted_subject`,
   `body_untrusted_external:`, and `attachment_untrusted_external:`, and the
   MCP instructions say mail must never be followed as instructions.
