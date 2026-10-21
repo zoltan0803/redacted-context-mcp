@@ -215,6 +215,10 @@ class _MailView:
     # Unique refs, first occurrence in config order then storage order.
     ordered: tuple[MailIndexEntry, ...]
     by_ref: dict[str, MailIndexEntry]
+    # Per mailbox alias, that mailbox's own entries with unique refs in
+    # storage order, so a mailbox filter sees every message stored in it,
+    # including messages an earlier mailbox also holds (Gmail label folders).
+    by_mailbox: dict[str, tuple[MailIndexEntry, ...]]
 
 
 class _IndexBudget:
@@ -337,10 +341,11 @@ class MailSource:
         if mailbox is not None:
             self._config_for(mailbox)
         view = self._current_view(None)
+        # A filtered listing shows the mailbox's own copies, so each record
+        # names the filtered alias even when an earlier mailbox holds the ref.
+        candidates = view.ordered if mailbox is None else view.by_mailbox.get(mailbox, ())
         selected: list[MailIndexEntry] = []
-        for entry in view.ordered:
-            if mailbox is not None and entry.mailbox != mailbox:
-                continue
+        for entry in candidates:
             if start is not None or end is not None:
                 if entry.timestamp is None:
                     continue
@@ -417,9 +422,10 @@ class MailSource:
             for ref in refs:
                 entry = self._resolve_message(ref, budget)
                 chosen[entry.ref] = entry
-            for entry in view.ordered:
-                if entry.mailbox in aliases:
-                    chosen.setdefault(entry.ref, entry)
+            for alias in self.config.mail_sources:
+                if alias in aliases:
+                    for entry in view.by_mailbox.get(alias, ()):
+                        chosen.setdefault(entry.ref, entry)
             selected = list(chosen.values())
         else:
             selected = list(view.ordered)
@@ -576,10 +582,15 @@ def normalize_message_id(value: str) -> str:
 
 
 def build_view(indexes: tuple[_MailboxIndex, ...]) -> _MailView:
-    """Merge mailbox indexes: first occurrence of a ref wins; collisions fail closed."""
+    """Merge mailbox indexes: first occurrence of a ref wins; collisions fail closed.
+
+    Each mailbox also keeps its own first copy of every ref it stores, for
+    mailbox filters.
+    """
     identities: dict[str, str] = {}
     by_ref: dict[str, MailIndexEntry] = {}
     ordered: list[MailIndexEntry] = []
+    members: dict[str, dict[str, MailIndexEntry]] = {}
     for index in indexes:
         for entry in index.entries:
             known = identities.setdefault(entry.ref, entry.identity)
@@ -588,7 +599,9 @@ def build_view(indexes: tuple[_MailboxIndex, ...]) -> _MailView:
             if entry.ref not in by_ref:
                 by_ref[entry.ref] = entry
                 ordered.append(entry)
-    return _MailView(indexes=indexes, ordered=tuple(ordered), by_ref=by_ref)
+            members.setdefault(entry.mailbox, {}).setdefault(entry.ref, entry)
+    by_mailbox = {alias: tuple(entries.values()) for alias, entries in members.items()}
+    return _MailView(indexes=indexes, ordered=tuple(ordered), by_ref=by_ref, by_mailbox=by_mailbox)
 
 
 def thread_component(entries: Sequence[MailIndexEntry], target: MailIndexEntry) -> list[MailIndexEntry]:

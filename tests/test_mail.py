@@ -305,7 +305,16 @@ class MailReferenceTest(MailTestCase):
         self.assertEqual(total, 2)
         message = source.read_message(expected_ref("dup@example.test"))
         self.assertEqual((message.mailbox, message.body), ("zeta", "first copy\n"))
-        self.assertEqual([item.subject for item in source.list_messages("alpha", limit=50, offset=0)[0]], ["Only here"])
+        # A mailbox filter lists every message stored in that mailbox, once,
+        # under the filtered alias, even when an earlier mailbox holds it too.
+        alpha, total = source.list_messages("alpha", limit=50, offset=0)
+        self.assertEqual(total, 2)
+        self.assertEqual(
+            sorted((item.mailbox, item.subject) for item in alpha),
+            [("alpha", "Only here"), ("alpha", "Quarterly planning")],
+        )
+        zeta, total = source.list_messages("zeta", limit=50, offset=0)
+        self.assertEqual(([item.ref for item in zeta], total), ([expected_ref("dup@example.test")], 1))
         self.assertEqual(source.mailboxes(), [("alpha", "maildir"), ("zeta", "mbox")])
 
     def test_two_message_ids_with_one_ref_fail_closed(self) -> None:
@@ -863,6 +872,64 @@ class MailDocumentIterationTest(MailTestCase):
                     list(source.iter_documents(budget, **kwargs))  # type: ignore[arg-type]
                 self.assertEqual(str(caught.exception), message)
                 self.assertEqual(budget.files_seen, 0)
+
+
+class MailMailboxFilterTest(MailTestCase):
+    """Label folders: a message stored in an earlier mailbox too still belongs to every mailbox holding it."""
+
+    @staticmethod
+    def label_messages() -> dict[str, bytes]:
+        return {
+            "alpha": mf.message(message_id="<alpha@example.test>", subject="Alpha", date="Mon, 05 Oct 2026 08:00:00 +0000", body="alpha body\n"),
+            "bravo": mf.message(message_id="<bravo@example.test>", subject="Bravo", date="Tue, 06 Oct 2026 08:00:00 +0000", body="bravo body\n"),
+            "charlie": mf.message(message_id="<charlie@example.test>", subject="Charlie", date="Wed, 07 Oct 2026 08:00:00 +0000", body="charlie body\n"),
+        }
+
+    def label_source(self, mail_format: str) -> MailSource:
+        messages = self.label_messages()
+        everything = [messages["alpha"], messages["bravo"], messages["charlie"]]
+        labelled = [messages["bravo"], messages["charlie"]]
+        if mail_format == "mbox":
+            all_path = mf.write_mbox(self.dir / mail_format / "all.mbox", everything)
+            label_path = mf.write_mbox(self.dir / mail_format / "label.mbox", labelled)
+        else:
+            all_path = mf.write_maildir(self.dir / mail_format / "all", cur={f"{n}.host": raw for n, raw in enumerate(everything)})
+            label_path = mf.write_maildir(self.dir / mail_format / "label", cur={f"{n}.host": raw for n, raw in enumerate(labelled)})
+        return self.source(("all", all_path, mail_format), ("label", label_path, mail_format))
+
+    def test_list_filters_by_every_mailbox_holding_a_message(self) -> None:
+        bravo, charlie = expected_ref("bravo@example.test"), expected_ref("charlie@example.test")
+        for mail_format in ("mbox", "maildir"):
+            with self.subTest(format=mail_format):
+                source = self.label_source(mail_format)
+                page, total = source.list_messages(None, limit=50, offset=0)
+                self.assertEqual(total, 3)
+                self.assertEqual({item.mailbox for item in page}, {"all"})
+                label, total = source.list_messages("label", limit=50, offset=0)
+                self.assertEqual(total, 2)
+                self.assertEqual([(item.ref, item.mailbox) for item in label], [(charlie, "label"), (bravo, "label")])
+                second, total = source.list_messages("label", limit=1, offset=1)
+                self.assertEqual(([item.ref for item in second], total), ([bravo], 2))
+                self.assertEqual(source.list_messages("label", limit=50, offset=0, since="2026-10-07")[1], 1)
+                self.assertEqual(source.list_messages("all", limit=50, offset=0)[1], 3)
+                # Ref resolution stays first-wins in config order.
+                self.assertEqual(source.read_message(bravo).mailbox, "all")
+                self.assertEqual(len(source.thread_messages(bravo, max_messages=5)[0]), 1)
+
+    def test_document_scope_reads_every_message_in_the_mailbox(self) -> None:
+        alpha, bravo, charlie = (expected_ref(f"{name}@example.test") for name in ("alpha", "bravo", "charlie"))
+        for mail_format in ("mbox", "maildir"):
+            with self.subTest(format=mail_format):
+                source = self.label_source(mail_format)
+                scoped = list(source.iter_documents(OperationBudget(), scope=["label"]))
+                self.assertEqual([(document.ref, document.locator) for document in scoped], [(charlie, "label"), (bravo, "label")])
+                self.assertEqual(scoped[1].text, "Bravo\n\nbravo body\n")
+                both = list(source.iter_documents(OperationBudget(), scope=["label", "all"]))
+                self.assertEqual([document.ref for document in both], [charlie, bravo, alpha])
+                self.assertEqual([document.locator for document in both], ["all", "all", "all"])
+                mixed = list(source.iter_documents(OperationBudget(), scope=[alpha, "label"]))
+                self.assertEqual([(document.ref, document.locator) for document in mixed], [(charlie, "label"), (bravo, "label"), (alpha, "all")])
+                self.assertEqual(len(list(source.iter_documents(OperationBudget()))), 3)
 
 
 class MailSafeMessagesTest(unittest.TestCase):
