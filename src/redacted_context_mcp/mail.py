@@ -346,6 +346,31 @@ class MailSource:
                 pairs.update(address_pairs(entry.addresses))
         return tuple(sorted(pairs))
 
+    def message_identities(
+        self,
+        refs: Sequence[str],
+        *,
+        headers: Sequence[str],
+        budget: OperationBudget | None = None,
+    ) -> tuple[tuple[str, str], ...]:
+        """Raw ``(display name, address)`` pairs from the ``headers`` of the given messages.
+
+        ``headers`` are ``ADDRESS_HEADERS`` keys such as ``"from"``. Pairs
+        come in ``refs`` order, then header and address order; refs that are
+        not indexed are skipped, and an unparsed header yields nothing. One
+        index view serves every ref.
+        """
+        view = self._current_view(budget)
+        pairs: list[tuple[str, str]] = []
+        for ref in refs:
+            entry = view.by_ref.get(ref)
+            if entry is None:
+                continue
+            for name, value in entry.addresses:
+                if name in headers:
+                    pairs.extend((address.name, address.address) for address in value or ())
+        return tuple(pairs)
+
     def list_messages(
         self,
         mailbox: str | None,

@@ -9,7 +9,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, Protocol, Sequence
 
@@ -42,9 +42,10 @@ from .defaults import (
 from .detectors import Detector, run_detector
 from .filesystem import RedactedContext, iter_target_files, read_text_file
 from .limits import OperationBudget, OperationLimitError
-from .models import DiscoveryDocument, DiscoveryParseError, DiscoveryResult, DiscoveryUpdate
+from .mail import MailSource
+from .models import DiscoveryDocument, DiscoveryParseError, DiscoveryResult, DiscoveryUpdate, SourceDocument
 from .paths import rel_posix, resolve_under_root
-from .redaction import normalize_alias
+from .redaction import clean_mail_name, mail_name_variants, normalize_alias
 
 
 class DiscoveryClient(Protocol):
@@ -903,19 +904,261 @@ def read_discovery_sample(path, *, max_bytes: int) -> tuple[str, int, bool]:
     return data.decode("utf-8-sig", errors="replace"), len(data), truncated
 
 
-def format_discovery_toml(result: DiscoveryResult, *, source_note: str) -> str:
+# Address headers whose display names mail discovery links to their addresses.
+MAIL_DISCOVERY_HEADERS = ("from", "to", "cc")
+MAX_MESSAGES_MESSAGE = "--max-messages must be at least 1."
+
+
+@dataclass(frozen=True)
+class MailSample:
+    """The newest messages of a mail discovery scope, raw and private.
+
+    ``documents`` hold each message's subject and collapsed body (quoted
+    replies and signatures removed), newest first; ``identities`` the raw
+    ``(display name, address)`` pairs of their From, To, and Cc headers.
+    """
+
+    documents: tuple[SourceDocument, ...]
+    identities: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class MailDiscovery:
+    """A mail discovery draft plus the header alias groups it flags for review.
+
+    ``header_aliases`` are groups that carry at least one alias taken from
+    mail headers; ``result.aliases`` holds the rest. Both were validated
+    together against the draft's own lists.
+    """
+
+    result: DiscoveryResult
+    header_aliases: tuple[tuple[str, tuple[str, ...]], ...]
+    messages: int
+
+
+def mail_document_label(document: SourceDocument) -> str:
+    """The neutral ``rel_path`` a discovery client sees for one message: alias and ref, never a path."""
+    return f"mail:{document.locator}/{document.ref}"
+
+
+def sample_mail(
+    source: MailSource,
+    *,
+    scope: Sequence[str],
+    max_messages: int,
+    max_total_raw_bytes: int | None,
+) -> MailSample:
+    """Read at most ``max_messages`` messages of ``scope``, newest first, under a mail budget.
+
+    ``scope`` entries are mailbox aliases or ``@m_`` refs (default: every
+    mailbox). Each message is charged to the budget before it is read: at
+    most the largest configured ``max_message_bytes`` per message and
+    ``max_total_raw_bytes`` in all. Iteration stops at the cap, so later
+    messages are never read.
+    """
+    if not isinstance(max_messages, int) or isinstance(max_messages, bool) or max_messages < 1:
+        raise SystemExit(MAX_MESSAGES_MESSAGE)
+    caps = [mailbox.max_message_bytes for mailbox in source.config.mail_sources.values()]
+    budget = OperationBudget(
+        max_files=max_messages,
+        max_raw_bytes_per_file=max(caps) if caps else None,
+        max_total_raw_bytes=max_total_raw_bytes,
+    )
+    documents: list[SourceDocument] = []
+    for document in source.iter_documents(budget, scope=scope):
+        documents.append(document)
+        if len(documents) >= max_messages:
+            break
+    identities = source.message_identities(
+        [document.ref for document in documents], headers=MAIL_DISCOVERY_HEADERS, budget=budget
+    )
+    return MailSample(documents=tuple(documents), identities=identities)
+
+
+def mail_header_aliases(
+    identities: Iterable[tuple[str, str]],
+) -> tuple[tuple[str, ...], tuple[tuple[str, tuple[str, ...]], ...], int]:
+    """Model-free people and alias proposals from raw mail header identities.
+
+    Display names are cleaned as the mail redactor cleans them, and a
+    "Last, First" name reads as "First Last". Only probable full person
+    names (two to five capitalized name words, no role or allow-listed term)
+    become people. An address is linked only when every name it is used with
+    is the same name, ignoring case, whitespace, and the "Last, First" order:
+    an address used with two different names would tell the agent that two
+    people are one, so it is linked to neither and counted as dropped.
+
+    Returns ``(people, groups, dropped)``. A group's canonical value is the
+    name's first "First Last" spelling; its aliases are the name's other
+    spellings and its addresses. Groups still pass ``merge_alias_proposals``
+    before they reach a draft or a config.
+    """
+
+    def person(name: str) -> str | None:
+        full = mail_name_variants(name)[-1]
+        if (
+            normalize_person_name(full) != full
+            or clean_discovered_terms([full]) != (full,)
+            or should_drop_discovered_value(full)
+            or not is_probable_person(full, include_single_names=False)
+        ):
+            return None
+        return full
+
+    names_by_address: dict[str, tuple[str, list[str]]] = {}
+    for raw_name, raw_address in identities:
+        address = str(raw_address).strip()
+        name = clean_mail_name(str(raw_name))
+        if not address or not name or normalize_alias(name) == normalize_alias(address):
+            continue
+        names_by_address.setdefault(normalize_alias(address), (address, []))[1].append(name)
+
+    people: list[str] = []
+    groups: list[tuple[str, list[str]]] = []
+    dropped = 0
+    for address, names in names_by_address.values():
+        spellings = dedupe(names)
+        persons = [full for full in map(person, spellings) if full is not None]
+        if not persons:
+            continue
+        people.extend(persons)
+        if len({normalize_alias(mail_name_variants(name)[-1]) for name in spellings}) != 1:
+            dropped += 1
+            continue
+        canonical = persons[0]
+        others = [name for name in spellings if normalize_alias(name) != normalize_alias(canonical)]
+        groups.append((canonical, [*others, address]))
+    return dedupe(people), merge_alias_group_lists(groups), dropped
+
+
+def with_header_people(result: DiscoveryResult, people: Iterable[str]) -> DiscoveryResult:
+    """Add header names to ``people`` unless the result already lists them in another bucket."""
+    taken = {
+        normalize_alias(value)
+        for values in (result.clients, result.organizations, result.terms, result.allow)
+        for value in values
+    }
+    added = [name for name in people if normalize_alias(name) not in taken]
+    return replace(result, people=dedupe([*result.people, *added])) if added else result
+
+
+def draft_header_alias_groups(
+    result: DiscoveryResult,
+    groups: Sequence[tuple[str, Sequence[str]]],
+    *,
+    dropped: int = 0,
+) -> tuple[DiscoveryResult, tuple[tuple[str, tuple[str, ...]], ...]]:
+    """Validate header alias groups against a finished draft and split them out for review.
+
+    The draft's own groups are kept exactly; header proposals extend them or
+    become new groups, dropping what the loader would refuse. Every group
+    that carries a header-derived alias is returned separately, so the draft
+    can flag it; ``dropped`` (ambiguous addresses) joins the dropped count.
+    """
+    dropped_aliases = result.dropped_aliases + dropped
+    if not groups:
+        return replace(result, dropped_aliases=dropped_aliases), ()
+    merged, _added, rejected = merge_alias_proposals(
+        result.aliases,
+        groups,
+        categories=draft_categories(result),
+        allow=(*result.allow, *DEFAULT_ALLOW_TERMS),
+    )
+    header_values = {normalize_alias(alias) for _canonical, aliases in groups for alias in aliases}
+    own: list[tuple[str, tuple[str, ...]]] = []
+    flagged: list[tuple[str, tuple[str, ...]]] = []
+    for canonical, aliases in merged:
+        target = flagged if any(normalize_alias(alias) in header_values for alias in aliases) else own
+        target.append((canonical, aliases))
+    return replace(result, aliases=tuple(own), dropped_aliases=dropped_aliases + rejected), tuple(flagged)
+
+
+def discover_mail_entities(
+    source: MailSource,
+    *,
+    scope: Sequence[str],
+    client: DiscoveryClient,
+    max_messages: int,
+    max_chars_per_message: int,
+    max_total_raw_bytes: int | None = None,
+    postprocess: bool = True,
+    fail_on_truncation: bool = False,
+    propose_aliases: bool = False,
+    known_people: Iterable[str] = (),
+) -> MailDiscovery:
+    """Draft terms from the newest messages of ``scope``, like ``discover_entities`` does from files.
+
+    The client sees each message's subject and collapsed body, capped at
+    ``max_chars_per_message`` with the usual truncation marker, under the
+    neutral label ``mail:<alias>/<@m_ref>``. Every value is checked against
+    that text. With ``propose_aliases`` the deterministic body proposals run,
+    and so does the header step: the From, To, and Cc names of the same
+    messages join ``people`` and their addresses are proposed as aliases
+    (see ``mail_header_aliases``), returned apart as ``header_aliases``.
+    """
+    sample = sample_mail(
+        source,
+        scope=scope,
+        max_messages=max_messages,
+        max_total_raw_bytes=max_total_raw_bytes,
+    )
+    texts: list[str] = []
+    for document in sample.documents:
+        text = document.text[:max_chars_per_message]
+        if len(document.text) > max_chars_per_message:
+            if fail_on_truncation:
+                raise OperationLimitError(f"Discovery input was truncated: {document.ref}")
+            text += "\n[TRUNCATED DISCOVERY SAMPLE]\n"
+        texts.append(text)
+    results = [
+        filter_discovery_to_source(client.extract(rel_path=mail_document_label(document), text=text), text)
+        for document, text in zip(sample.documents, texts)
+    ]
+    merged = merge_discovery_results(
+        results,
+        postprocess=postprocess,
+        route_tool_names=getattr(client, "route_tool_names", True),
+    )
+    header_groups: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    header_dropped = 0
+    if propose_aliases:
+        header_people, header_groups, header_dropped = mail_header_aliases(sample.identities)
+        merged = with_header_people(merged, header_people)
+    result = draft_alias_groups(merged, texts, propose=propose_aliases, known_people=known_people)
+    result, header_aliases = draft_header_alias_groups(result, header_groups, dropped=header_dropped)
+    return MailDiscovery(result=result, header_aliases=header_aliases, messages=len(sample.documents))
+
+
+def format_discovery_toml(
+    result: DiscoveryResult,
+    *,
+    source_note: str,
+    header_aliases: Sequence[tuple[str, Sequence[str]]] = (),
+) -> str:
+    """The draft config text.
+
+    ``header_aliases`` (mail discovery only) follow the other groups under
+    their own review comment; without them the output is unchanged.
+    """
     dropped = (
         f"# Alias proposals dropped as unsourced, invalid, or conflicting: {result.dropped_aliases}\n"
         if result.dropped_aliases
         else ""
     )
-    aliases = ""
+    aliases = "\n[redaction.aliases]\n" if result.aliases or header_aliases else ""
     if result.aliases:
-        aliases = (
-            "\n[redaction.aliases]\n"
+        aliases += (
             "# Proposed alias groups. Check every link: a wrong one tells the agent that\n"
             "# two different people or organizations are one. Remove any you are unsure of.\n"
             + "".join(format_alias_entry(canonical, values) for canonical, values in result.aliases)
+        )
+    if header_aliases:
+        aliases += (
+            ("\n" if result.aliases else "")
+            + "# From mail headers (From/To/Cc), linked without the model: each name-address\n"
+            "# link below is unreviewed. A shared or forwarded address, or two people with one\n"
+            "# name, would tell the agent that two people are one. Remove any you are unsure of.\n"
+            + "".join(format_alias_entry(canonical, values) for canonical, values in header_aliases)
         )
     return (
         "# Generated by redctx discover.\n"
