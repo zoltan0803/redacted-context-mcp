@@ -104,6 +104,12 @@ def attachment_part(filename: str, content_type: str, data: bytes) -> str:
     )
 
 
+def encoded_text_part(data: bytes, *, content_type: str = "text/plain") -> str:
+    """An inline base64 text part holding exactly ``data``, for charset and byte-order-mark tests."""
+    encoded = base64.b64encode(data).decode("ascii")
+    return f"Content-Type: {content_type}\nContent-Transfer-Encoding: base64\n\n{encoded}"
+
+
 def alternative_message() -> bytes:
     inner = multipart_part(
         [text_part("Plain body for the alternative.\n"), text_part("<p>HTML body for the alternative.</p>", subtype="html")],

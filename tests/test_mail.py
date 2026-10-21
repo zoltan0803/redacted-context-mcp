@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import codecs
 import hashlib
 import hmac
 import os
@@ -598,6 +599,47 @@ class MailBodyTest(MailTestCase):
             "Answer.\n\n[quoted text: 2 lines omitted]\n[signature: 2 lines omitted]",
         )
 
+    def test_bodies_honour_byte_order_marks(self) -> None:
+        text = "Hello from Marta Kowalczyk.\n"
+        cases = (
+            ("text/plain", codecs.BOM_UTF16_LE + text.encode("utf-16-le")),
+            ("text/plain; charset=us-ascii", codecs.BOM_UTF16_BE + text.encode("utf-16-be")),
+            ("text/plain; charset=utf-8", codecs.BOM_UTF8 + text.encode("utf-8")),
+            ("text/plain", text.encode("utf-8")),
+        )
+        for number, (content_type, data) in enumerate(cases):
+            with self.subTest(content_type=content_type, number=number):
+                raw = mf.multipart([mf.encoded_text_part(data, content_type=content_type)], message_id=f"<bom{number}@example.test>")
+                source = self.mbox_source([raw])
+                self.assertEqual(source.read_message(expected_ref(f"bom{number}@example.test")).body, text)
+        html = codecs.BOM_UTF16_LE + "<p>Hello <b>Marta</b></p>".encode("utf-16-le")
+        raw = mf.multipart([mf.encoded_text_part(html, content_type="text/html")], message_id="<bom-html@example.test>")
+        self.assertEqual(self.mbox_source([raw]).read_message(expected_ref("bom-html@example.test")).body, "Hello Marta")
+
+    def test_bodies_that_do_not_decode_to_text_are_withheld(self) -> None:
+        cases = (
+            ("text/plain", "Marta Kowalczyk mk@corp.example\n".encode("utf-16-le")),
+            ("text/html", "<p>Marta Kowalczyk</p>".encode("utf-16-be")),
+            ("text/plain; charset=utf-8", bytes(range(128, 256))),
+        )
+        for number, (content_type, data) in enumerate(cases):
+            with self.subTest(content_type=content_type, number=number):
+                raw = mf.multipart(
+                    [mf.encoded_text_part(data, content_type=content_type), mf.attachment_part("a.txt", "text/plain", b"kept\n")],
+                    message_id=f"<nul{number}@example.test>",
+                    subject="Readable subject",
+                )
+                source = self.mbox_source([raw])
+                ref = expected_ref(f"nul{number}@example.test")
+                for include_quoted in (False, True):
+                    message = source.read_message(ref, include_quoted=include_quoted)
+                    self.assertEqual(message.body, mail.BODY_NOT_TEXT)
+                    self.assertEqual(message.subject, "Readable subject")
+                self.assertEqual(source.read_attachment(f"{ref}/1"), "kept\n")
+                (document,) = source.iter_documents(OperationBudget())
+                self.assertEqual(document.text, f"Readable subject\n\n{mail.BODY_NOT_TEXT}")
+                self.assertNotIn("\0", document.text)
+
 
 class MailAttachmentTest(MailTestCase):
     def test_attachments_are_listed_with_validated_types(self) -> None:
@@ -640,6 +682,52 @@ class MailAttachmentTest(MailTestCase):
             self.mbox_source([mf.attachments_message()]).read_attachment(f"{expected_ref('attach@example.test')}/1"),
             "Attachment notes from Jordan Sample.\nLine two.\n",
         )
+
+    def test_byte_order_marks_win_over_a_missing_or_ascii_charset(self) -> None:
+        text = "Marta Kowalczyk\tmk@corp.example\n"
+        raw = mf.multipart(
+            [
+                mf.text_part("Body.\n"),
+                mf.attachment_part("le.txt", "text/plain", codecs.BOM_UTF16_LE + text.encode("utf-16-le")),
+                mf.attachment_part("be.txt", "text/plain", codecs.BOM_UTF16_BE + text.encode("utf-16-be")),
+                mf.attachment_part("ascii.txt", "text/plain; charset=us-ascii", codecs.BOM_UTF16_LE + text.encode("utf-16-le")),
+                mf.attachment_part("le32.txt", "text/csv", codecs.BOM_UTF32_LE + text.encode("utf-32-le")),
+                mf.attachment_part("be32.txt", "text/plain; charset=utf-8", codecs.BOM_UTF32_BE + text.encode("utf-32-be")),
+                mf.attachment_part("sig.txt", "text/plain; charset=iso-8859-1", codecs.BOM_UTF8 + "Zoë Brönte\n".encode("utf-8")),
+                mf.attachment_part("plain.txt", "text/plain", "Zoë Brönte\n".encode("utf-8")),
+            ],
+            message_id="<bom@example.test>",
+        )
+        source = self.mbox_source([raw])
+        ref = expected_ref("bom@example.test")
+        for number in range(1, 6):
+            with self.subTest(number=number):
+                self.assertEqual(source.read_attachment(f"{ref}/{number}"), text)
+        self.assertEqual(source.read_attachment(f"{ref}/6"), "Zoë Brönte\n")
+        # Without a declared charset, UTF-8 is assumed.
+        self.assertEqual(source.read_attachment(f"{ref}/7"), "Zoë Brönte\n")
+
+    def test_text_attachments_that_do_not_decode_to_text_are_refused(self) -> None:
+        raw = mf.multipart(
+            [
+                mf.text_part("Body.\n"),
+                mf.attachment_part("bare16.txt", "text/plain", "Marta Kowalczyk\tmk@corp.example\n".encode("utf-16-le")),
+                mf.attachment_part("image.txt", "text/plain", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" * 8),
+                mf.attachment_part("nul.csv", "text/csv; charset=iso-8859-1", b"name,Marta\x00Kowalczyk\n"),
+                mf.attachment_part("junk.txt", "text/plain; charset=utf-8", bytes(range(128, 256))),
+                mf.attachment_part("mixed.txt", "text/plain; charset=utf-8", b"Mostly text \xff here.\n"),
+            ],
+            message_id="<nul@example.test>",
+        )
+        source = self.mbox_source([raw])
+        ref = expected_ref("nul@example.test")
+        for number in range(1, 5):
+            with self.subTest(number=number):
+                with self.assertRaises(SystemExit) as caught:
+                    source.read_attachment(f"{ref}/{number}")
+                self.assertEqual(str(caught.exception), "Unsupported attachment type.")
+        # A few undecodable bytes in otherwise readable text are replaced, not refused.
+        self.assertEqual(source.read_attachment(f"{ref}/5"), "Mostly text \ufffd here.\n")
 
     def test_documents_are_refused_unless_enabled_and_other_types_unsupported(self) -> None:
         ref = expected_ref("attach@example.test")
