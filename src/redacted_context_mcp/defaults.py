@@ -26,6 +26,8 @@ DEFAULT_REGEX_MATCH_SECONDS = 60.0
 DEFAULT_DISCOVERY_MODEL = "gemma4:e4b"
 DEFAULT_OLLAMA_ENDPOINT = "http://localhost:11434"
 DEFAULT_DISCOVERY_MAX_FILES = 80
+# Newest messages read by mail discovery: one model call each.
+DEFAULT_DISCOVERY_MAX_MESSAGES = 200
 DEFAULT_DISCOVERY_MAX_CHARS = 12_000
 DISCOVERY_KEYS = ("clients", "organizations", "people", "terms", "allow")
 DISCOVERY_SENSITIVE_KEYS = ("clients", "organizations", "people", "terms")

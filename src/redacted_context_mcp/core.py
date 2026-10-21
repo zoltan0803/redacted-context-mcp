@@ -38,6 +38,7 @@ from .defaults import (
     ALIAS_FORM_SEPARATOR,
     DEFAULT_DISCOVERY_MAX_CHARS,
     DEFAULT_DISCOVERY_MAX_FILES,
+    DEFAULT_DISCOVERY_MAX_MESSAGES,
     DEFAULT_DISCOVERY_MODEL,
     DEFAULT_MAX_CHARS,
     DEFAULT_MAX_FILES,
@@ -64,6 +65,7 @@ from .detectors import (
 )
 from .discovery import (
     DetectorDiscoveryClient,
+    MailSample,
     OllamaDiscoveryClient,
     build_discovery_update,
     build_discovery_prompt,
@@ -72,6 +74,7 @@ from .discovery import (
     config_people,
     discover_documents,
     discover_entities,
+    discover_mail_entities,
     extract_ollama_error,
     filter_discovery_to_source,
     format_discovery_toml,
@@ -84,6 +87,8 @@ from .discovery import (
     is_probable_person,
     is_public_or_allowed_term,
     is_role_or_title,
+    mail_document_label,
+    mail_header_aliases,
     merge_discovery_toml,
     merge_discovery_results,
     normalize_discovery_value,
@@ -93,7 +98,10 @@ from .discovery import (
     parse_json_object,
     postprocess_discovery_result,
     propose_alias_groups,
+    resolve_discovery_output,
+    sample_mail,
     should_drop_discovered_value,
+    with_header_people,
     write_discovery_update,
     write_discovery_output,
 )
@@ -154,11 +162,13 @@ from .regex_safety import (
     regex_backtracking_violation,
 )
 from .mail import (
+    GLOB_MESSAGE,
     MAIL_FORMATS,
     MAIL_LIST_MAX_LIMIT,
     MAIL_MAX_NESTED_DEPTH,
     MAIL_SAFE_MESSAGES,
     MAIL_THREAD_MAX_MESSAGES,
+    UNKNOWN_MAILBOX_MESSAGE,
     MailSource,
 )
 from .rendering import (
@@ -175,6 +185,7 @@ from .rendering import (
     mail_retrieve_text,
     mail_sources_text,
     mail_thread_text,
+    require_mail_source,
     truncate_redacted,
     truncate_text,
 )
@@ -1041,13 +1052,71 @@ def ollama_endpoint(args: argparse.Namespace) -> str:
     return args.endpoint if getattr(args, "endpoint", None) is not None else DEFAULT_OLLAMA_ENDPOINT
 
 
+def mail_discovery_source(args: argparse.Namespace, config: RedactionConfig) -> MailSource:
+    """The mail source for ``discover``/``discover-update --source mail``.
+
+    Validated exactly like ``retrieve --source mail``: ``--glob`` is refused,
+    and positional paths must be configured mailbox aliases or ``@m_`` refs.
+    With no mailbox configured every alias is unknown.
+    """
+    if getattr(args, "glob", None):
+        raise SystemExit(GLOB_MESSAGE)
+    source = require_mail_source(
+        MailSource.from_config(config, documents=getattr(args, "documents", False)),
+        UNKNOWN_MAILBOX_MESSAGE,
+    )
+    for item in getattr(args, "paths", None) or []:
+        if not isinstance(item, str) or not (item in source.config.mail_sources or item.startswith("@m_")):
+            raise SystemExit(UNKNOWN_MAILBOX_MESSAGE)
+    return source
+
+
+def discovery_total_raw_bytes(args: argparse.Namespace, default: int) -> int:
+    """``--max-total-raw-bytes``, or ``default`` when it is not given.
+
+    The default depends on the source: the files budget for files, the mail
+    retrieval budget for mail.
+    """
+    value = getattr(args, "max_total_raw_bytes", None)
+    return default if value is None else value
+
+
+def mail_discovery_documents(
+    args: argparse.Namespace, ctx: RedactedContext
+) -> tuple[MailSample, tuple[DiscoveryDocument, ...]]:
+    """The mail sample and model inputs of ``discover-update --source mail``.
+
+    Messages are read under the mail budget and never truncated: one over
+    ``--max-chars-per-document`` is skipped whole and counted, like one
+    dated more than a day ahead or one over its mailbox's
+    ``max_message_bytes``. Reaching ``--max-total-raw-bytes`` stops sampling.
+    """
+    sample = sample_mail(
+        mail_discovery_source(args, ctx.config),
+        scope=list(args.paths),
+        max_messages=getattr(args, "max_messages", DEFAULT_DISCOVERY_MAX_MESSAGES),
+        max_total_raw_bytes=discovery_total_raw_bytes(args, MAIL_RETRIEVE_MAX_TOTAL_BYTES),
+        max_chars=args.max_chars_per_document,
+    )
+    documents = tuple(
+        DiscoveryDocument(path=mail_document_label(document), text=document.text) for document in sample.documents
+    )
+    return sample, documents
+
+
 def command_discover(args: argparse.Namespace, ctx: RedactedContext, redactor: Redactor) -> int:
     detectors = discovery_detectors(args)
+    if getattr(args, "output", None) is not None:
+        # Refuse a protected target before any model call, not after.
+        resolve_discovery_output(ctx, args.output)
+    mail = None
+    if getattr(args, "source", "filesystem") == "mail":
+        mail = mail_discovery_source(args, redactor.config)
     client: OllamaDiscoveryClient | DetectorDiscoveryClient
     if detectors:
         # Local detectors replace the Ollama model; no network call is made.
         client = DetectorDiscoveryClient(*detectors, postprocess=not args.raw_discovery)
-        source_note = f"provider=detector detectors={','.join(detector.name for detector in detectors)} root=."
+        provider_note = f"provider=detector detectors={','.join(detector.name for detector in detectors)}"
     else:
         if args.provider != "ollama":
             raise SystemExit("Only the ollama discovery provider is currently supported.")
@@ -1059,7 +1128,10 @@ def command_discover(args: argparse.Namespace, ctx: RedactedContext, redactor: R
             postprocess=not args.raw_discovery,
             allow_remote=getattr(args, "allow_remote_endpoint", False),
         )
-        source_note = f"provider=ollama model={model} root=."
+        provider_note = f"provider=ollama model={model}"
+    if mail is not None:
+        return command_discover_mail(args, ctx, redactor, mail, client, provider_note)
+    source_note = f"{provider_note} root=."
     result = discover_entities(
         ctx,
         paths=args.paths,
@@ -1067,7 +1139,7 @@ def command_discover(args: argparse.Namespace, ctx: RedactedContext, redactor: R
         client=client,
         max_files=args.max_files,
         max_chars_per_file=args.max_chars_per_file,
-        max_total_raw_bytes=getattr(args, "max_total_raw_bytes", DEFAULT_MAX_TOTAL_RAW_BYTES),
+        max_total_raw_bytes=discovery_total_raw_bytes(args, DEFAULT_MAX_TOTAL_RAW_BYTES),
         postprocess=not args.raw_discovery,
         fail_on_truncation=getattr(args, "fail_on_truncation", False),
         # Raw discovery keeps the model's own alias suggestions (still
@@ -1089,6 +1161,55 @@ def command_discover(args: argparse.Namespace, ctx: RedactedContext, redactor: R
     return 0
 
 
+def command_discover_mail(
+    args: argparse.Namespace,
+    ctx: RedactedContext,
+    redactor: Redactor,
+    source: MailSource,
+    client: OllamaDiscoveryClient | DetectorDiscoveryClient,
+    provider_note: str,
+) -> int:
+    """``discover --source mail``: draft terms from the newest messages of the scope.
+
+    ``--max-files`` does not apply; ``--max-messages`` caps the messages
+    read and classified, and ``--max-total-raw-bytes`` defaults to the mail
+    retrieval budget. The source note names no mailbox path; it counts the
+    messages read and skipped, and says when the byte budget stopped
+    sampling.
+    """
+    discovery = discover_mail_entities(
+        source,
+        scope=list(args.paths),
+        client=client,
+        max_messages=getattr(args, "max_messages", DEFAULT_DISCOVERY_MAX_MESSAGES),
+        max_chars_per_message=args.max_chars_per_file,
+        max_total_raw_bytes=discovery_total_raw_bytes(args, MAIL_RETRIEVE_MAX_TOTAL_BYTES),
+        postprocess=not args.raw_discovery,
+        fail_on_truncation=getattr(args, "fail_on_truncation", False),
+        # As for files: raw discovery skips the deterministic proposals,
+        # including the mail header step.
+        propose_aliases=not args.raw_discovery,
+        known_people=redactor.config.explicit_people,
+    )
+    result = discovery.result
+    if args.format == "json":
+        payload: dict[str, object] = dict(result.as_dict())
+        payload["aliases"] = {canonical: list(aliases) for canonical, aliases in result.aliases}
+        payload["dropped_alias_proposals"] = result.dropped_aliases
+        payload["header_aliases"] = {canonical: list(aliases) for canonical, aliases in discovery.header_aliases}
+        payload["messages"] = discovery.messages
+        payload["skipped_messages"] = discovery.skipped
+        payload["byte_cap_reached"] = discovery.byte_cap_reached
+        output = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+    else:
+        source_note = f"{provider_note} source=mail messages={discovery.messages} skipped={discovery.skipped}"
+        if discovery.byte_cap_reached:
+            source_note += " byte_cap=reached"
+        output = format_discovery_toml(result, source_note=source_note, header_aliases=discovery.header_aliases)
+    write_discovery_output(ctx, output, args.output, force=args.force)
+    return 0
+
+
 def command_discover_update(
     args: argparse.Namespace,
     ctx: RedactedContext,
@@ -1096,11 +1217,22 @@ def command_discover_update(
 ) -> int:
     del redactor
     detectors = discovery_detectors(args)
+    from_mail = getattr(args, "source", "filesystem") == "mail"
+    sample: MailSample | None = None
     try:
+        if from_mail and args.input_jsonl:
+            raise ValueError("--source mail cannot be combined with --input-jsonl.")
+        if from_mail and args.merge_only:
+            raise ValueError("--source mail cannot be combined with --merge-only.")
+        if not from_mail and getattr(args, "paths", None):
+            raise ValueError("Mailbox aliases and @m_ refs are accepted only with --source mail.")
         if args.merge_only and args.input_jsonl:
             raise ValueError("--merge-only cannot be combined with --input-jsonl.")
-        if args.merge_only:
-            documents: tuple[DiscoveryDocument, ...] = ()
+        documents: tuple[DiscoveryDocument, ...]
+        if from_mail:
+            sample, documents = mail_discovery_documents(args, ctx)
+        elif args.merge_only:
+            documents = ()
         else:
             if not args.input_jsonl:
                 raise ValueError("--input-jsonl is required unless --merge-only is used.")
@@ -1111,7 +1243,7 @@ def command_discover_update(
             documents = parse_discovery_documents_jsonl(raw_input)
         if not documents and not args.merge_only:
             raise ValueError("Discovery input contains no documents.")
-        if len(documents) > args.max_files:
+        if not from_mail and len(documents) > args.max_files:
             raise ValueError(f"Discovery input exceeds --max-files={args.max_files}.")
         oversized = next(
             (
@@ -1149,6 +1281,13 @@ def command_discover_update(
         # wrong link would tell the agent that two people are one.
         include_aliases = getattr(args, "include_discovered_aliases", False)
         alias_people = config_people(seed_text, existing_text) if include_aliases else ()
+        header_people: tuple[str, ...] = ()
+        if sample is not None:
+            # From names of the same messages. Their alias groups are for a
+            # reviewed draft only (discover) and are never merged here.
+            header_people = mail_header_aliases(sample.identities)[0]
+            if include_aliases:
+                alias_people = (*alias_people, *header_people)
 
         if documents and detectors:
             # Local detectors replace the Ollama model; no network call is made.
@@ -1176,6 +1315,10 @@ def command_discover_update(
             )
         else:
             result = DiscoveryResult()
+        if sample is not None:
+            # Header names join the discovered people whatever the model
+            # allowed; --include-discovered-allow never un-redacts them.
+            result = with_header_people(result, header_people)
         update = build_discovery_update(
             existing_text,
             result,
@@ -1196,6 +1339,9 @@ def command_discover_update(
     write_discovery_update(config_path, update)
     counts = {key: len(values) for key, values in result.as_dict().items() if key != "allow"}
     print(f"documents: {len(documents)}")
+    if sample is not None:
+        print(f"skipped_messages: {sample.skipped}")
+        print(f"byte_cap_reached: {str(sample.byte_cap_reached).lower()}")
     if detectors:
         print("model: skipped")
         print(f"detectors: {','.join(detector.name for detector in detectors)}")
@@ -1459,7 +1605,13 @@ def build_parser() -> argparse.ArgumentParser:
     discover_parser.add_argument(
         "paths",
         nargs="*",
-        help="paths to scan; empty scans the root",
+        help="paths to scan; empty scans the root; for mail, mailbox aliases or @m_ refs (empty: every mailbox)",
+    )
+    discover_parser.add_argument(
+        "--source",
+        choices=("filesystem", "mail"),
+        default="filesystem",
+        help="documents to classify; for mail, --glob and --max-files do not apply",
     )
     discover_parser.add_argument("--provider", choices=("ollama",), default="ollama")
     discover_parser.add_argument("--endpoint", default=None, help=OLLAMA_ENDPOINT_HELP)
@@ -1472,8 +1624,22 @@ def build_parser() -> argparse.ArgumentParser:
     discover_parser.add_argument("--timeout", type=float, default=120.0)
     discover_parser.add_argument("--glob", action="append", default=[])
     discover_parser.add_argument("--max-files", type=int, default=DEFAULT_DISCOVERY_MAX_FILES)
+    discover_parser.add_argument(
+        "--max-messages",
+        type=int,
+        default=DEFAULT_DISCOVERY_MAX_MESSAGES,
+        help="mail only: newest messages to read, one model call each",
+    )
     discover_parser.add_argument("--max-chars-per-file", type=int, default=DEFAULT_DISCOVERY_MAX_CHARS)
-    discover_parser.add_argument("--max-total-raw-bytes", type=int, default=DEFAULT_MAX_TOTAL_RAW_BYTES)
+    discover_parser.add_argument(
+        "--max-total-raw-bytes",
+        type=int,
+        default=None,
+        help=(
+            f"raw bytes read in all (default: {DEFAULT_MAX_TOTAL_RAW_BYTES} for files, "
+            f"{MAIL_RETRIEVE_MAX_TOTAL_BYTES} for mail, where reaching it stops sampling)"
+        ),
+    )
     discover_parser.add_argument(
         "--fail-on-truncation",
         action="store_true",
@@ -1498,6 +1664,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="classify caller-supplied documents and safely merge the redaction config",
     )
     discover_update_parser.add_argument(
+        "paths",
+        nargs="*",
+        help="with --source mail: mailbox aliases or @m_ refs (empty: every mailbox)",
+    )
+    discover_update_parser.add_argument(
+        "--source",
+        choices=("filesystem", "mail"),
+        default="filesystem",
+        help="filesystem reads --input-jsonl; mail reads configured mailboxes instead",
+    )
+    discover_update_parser.add_argument(
         "--input-jsonl",
         help="JSONL file containing path/text objects, or - for stdin",
     )
@@ -1511,10 +1688,28 @@ def build_parser() -> argparse.ArgumentParser:
     discover_update_parser.add_argument("--timeout", type=float, default=120.0)
     discover_update_parser.add_argument("--max-files", type=int, default=DEFAULT_DISCOVERY_MAX_FILES)
     discover_update_parser.add_argument(
+        "--max-messages",
+        type=int,
+        default=DEFAULT_DISCOVERY_MAX_MESSAGES,
+        help="with --source mail: newest messages to read, one model call each",
+    )
+    discover_update_parser.add_argument(
+        "--max-total-raw-bytes",
+        type=int,
+        default=None,
+        help=(
+            f"with --source mail: raw message bytes read in all (default: {MAIL_RETRIEVE_MAX_TOTAL_BYTES}); "
+            "reaching it stops sampling"
+        ),
+    )
+    discover_update_parser.add_argument(
         "--max-chars-per-document",
         type=int,
         default=DEFAULT_DISCOVERY_MAX_CHARS,
-        help="fail when any document exceeds this size; documents are never truncated",
+        help=(
+            "fail when any document exceeds this size (with --source mail, skip the message); "
+            "documents are never truncated"
+        ),
     )
     discover_update_parser.add_argument("--max-total-chars", type=int, default=DEFAULT_MAX_TOTAL_RAW_BYTES)
     discover_update_parser.add_argument(
@@ -1707,10 +1902,14 @@ def main(argv: list[str] | None = None) -> int:
     args.loaded_discovery_detectors = discovery
     if args.func is command_discover_update:
         # Hook-facing discovery updates do not read redacted context and must
-        # not require or initialize vault-salt state.
+        # not require or initialize vault-salt state. Mail updates are the
+        # exception: mailbox tables and @m_ refs need the loaded config.
+        update_config = RedactionConfig()
+        if getattr(args, "source", "filesystem") == "mail":
+            update_config = load_config(root, args.config.expanduser().resolve() if args.config else None)
         return command_discover_update(
             args,
-            RedactedContext(root, RedactionConfig()),
+            RedactedContext(root, update_config),
             None,
         )
     config = load_config(root, args.config.expanduser().resolve() if args.config else None)

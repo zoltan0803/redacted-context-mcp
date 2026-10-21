@@ -107,8 +107,16 @@ the `Redactor` on every accepted policy reload.
 
 Ranked retrieval consumes `iter_documents` from any source, so it does not
 walk the filesystem itself. The controlled-write rehydration scan and Ollama
-discovery remain filesystem-specific because they need directory entries,
-write-subdirectory pruning, and operator-only raw output.
+discovery of files remain filesystem-specific because they need directory
+entries, write-subdirectory pruning, and operator-only raw output. Mail
+discovery (`discover`/`discover-update --source mail`,
+`discover_mail_entities` and `sample_mail` in `discovery.py`) lists the scope
+newest first through `MailSource.list_messages` and `resolve_reference`, so
+each message's date and size are checked before it is read, then reads each
+sampled message through `MailSource.iter_documents` under a mail budget. It
+takes the same messages' From identities from `MailSource.message_identities`
+and turns them into model-free people and one-to-one alias proposals with
+`mail_header_aliases`; those proposals reach only a `discover` draft.
 
 ### Adding a Source
 

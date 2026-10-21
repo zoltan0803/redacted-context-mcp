@@ -29,6 +29,24 @@ TEXT_DETECTION_PREFIX_BYTES = 4096
 OPAQUE_PATH_REFERENCE_RE = re.compile(r"(?:@|redctx://)?(p_[0-9a-f]{12})")
 
 
+def is_under_protected_rel(rel_folded: str, protected: set[str] | frozenset[str]) -> bool:
+    """Whether a case-folded root-relative POSIX path is, or lies under, one of ``protected``.
+
+    ``protected`` holds case-folded root-relative POSIX paths; a protected
+    directory covers everything below it.
+    """
+    if not protected:
+        return False
+    if rel_folded in protected:
+        return True
+    separator = rel_folded.find("/")
+    while separator != -1:
+        if rel_folded[:separator] in protected:
+            return True
+        separator = rel_folded.find("/", separator + 1)
+    return False
+
+
 class RedactedContext:
     """Filesystem context source rooted at one validated directory.
 
@@ -273,17 +291,7 @@ class RedactedContext:
         rules directory) protects everything below it. Exact files keep
         their existing behaviour.
         """
-        protected = self.protected_rel_paths
-        if not protected:
-            return False
-        if rel_folded in protected:
-            return True
-        separator = rel_folded.find("/")
-        while separator != -1:
-            if rel_folded[:separator] in protected:
-                return True
-            separator = rel_folded.find("/", separator + 1)
-        return False
+        return is_under_protected_rel(rel_folded, self.protected_rel_paths)
 
     def is_protected(self, path: Path) -> bool:
         """Whether ``path`` (under the root) must never be served or written.
