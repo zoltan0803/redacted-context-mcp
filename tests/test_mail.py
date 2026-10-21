@@ -544,9 +544,10 @@ class MailBodyTest(MailTestCase):
             "<div>" * count + "<body>" * count,
             '<a href="https://example.test/x">' * count + "w<br>" * count + "</a>" * count,
         ):
-            started = time.monotonic()
+            # CPU time, so a busy CI runner preempting the test cannot fail it.
+            started = time.process_time()
             html_to_text(markup)
-            self.assertLess(time.monotonic() - started, 5.0)
+            self.assertLess(time.process_time() - started, 5.0)
         deep = html_to_text("<blockquote>x" * 200)
         self.assertEqual(max(len(line) for line in deep.split("\n")), len("> " * mail.MAX_HTML_QUOTE_DEPTH) + 1)
 

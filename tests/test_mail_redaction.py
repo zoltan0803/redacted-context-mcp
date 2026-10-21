@@ -223,6 +223,13 @@ class MailStageTest(unittest.TestCase):
         self.assertEqual(self.mail.redact(text, preserve_line_count=True).count("\n"), text.count("\n"))
 
 
+# Performance bounds catch superlinear stages, which would take minutes on
+# megabyte inputs. They are CPU seconds, not wall time, so a busy CI runner
+# preempting the test (3 to 4 s of wall time on Windows) cannot fail a
+# linear stage.
+CPU_SECONDS = 5.0
+
+
 class MailStagePerformanceTest(unittest.TestCase):
     PATHOLOGICAL = (
         "a1" * 500_000,
@@ -242,33 +249,33 @@ class MailStagePerformanceTest(unittest.TestCase):
     def test_mail_stages_stay_linear_on_pathological_input(self) -> None:
         for text in self.PATHOLOGICAL:
             with self.subTest(prefix=text[:12], size=len(text)):
-                started = time.perf_counter()
+                started = time.process_time()
                 for pattern, category in MAIL_STAGES:
                     apply_stage(pattern, category, text, lambda _category, _value: "")
-                self.assertLess(time.perf_counter() - started, 2.5)
+                self.assertLess(time.process_time() - started, CPU_SECONDS)
 
     def test_mail_redactor_handles_a_megabyte_token_run(self) -> None:
         mail = Redactor(config()).for_mail([JORDAN])
-        started = time.perf_counter()
+        started = time.process_time()
         redacted = mail.redact("a1" * 500_000)
-        self.assertLess(time.perf_counter() - started, 2.5)
+        self.assertLess(time.process_time() - started, CPU_SECONDS)
         self.assertRegex(redacted, r"^\[SECRET_[0-9a-f]{32}\]$")
 
     def test_mail_redactor_handles_many_keywords(self) -> None:
         mail = Redactor(config()).for_mail([JORDAN])
         for text in ("code " * 40_000, "PIN: 1234 " * 20_000, "." * 200_000):
             with self.subTest(prefix=text[:12]):
-                started = time.perf_counter()
+                started = time.process_time()
                 mail.redact(text)
-                self.assertLess(time.perf_counter() - started, 2.5)
+                self.assertLess(time.process_time() - started, CPU_SECONDS)
 
     def test_many_harvested_identities_stay_fast(self) -> None:
         identities = [(f"Person{index} Sample{index}", f"user{index}@example{index % 40}.test") for index in range(4000)]
         mail = Redactor(config()).for_mail(identities)
         text = "Hello team, notes from Person42 Sample42 and user7@example7.test follow.\n" * 1500
-        started = time.perf_counter()
+        started = time.process_time()
         redacted = mail.redact(text)
-        self.assertLess(time.perf_counter() - started, 2.5)
+        self.assertLess(time.process_time() - started, CPU_SECONDS)
         self.assertNotIn("Sample42", redacted)
         self.assertNotIn("user7@", redacted)
 
