@@ -185,6 +185,14 @@ claim of hard OS isolation.
   same checks as a hand-written group, against the draft or the merged lists,
   before it is written. Invalid, unsourced, or conflicting proposals are
   dropped and only counted; their values never appear in output or errors.
+- Mail discovery (`discover`/`discover-update --source mail`) reads messages
+  only through the mail source under the mail budget and a message cap. The
+  model sees subject and collapsed body under a `mail:<alias>/@m_<id>` label,
+  never a mailbox path, and errors name only `@m_` refs. Header-derived alias
+  groups link an address only when every name it was used with in the
+  sampled messages is the same name; they are written under their own review
+  comment and merged by `discover-update` only with
+  `--include-discovered-aliases`.
 - Alias merging in `discover-update` is monotonic: existing groups are never
   removed or rewritten, and a proposal that conflicts with them is skipped and
   counted.

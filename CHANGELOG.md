@@ -64,6 +64,19 @@
   drops its index and cached mail redactor.
 - `redctx doctor` reports `mail_sources` and per-format counts, never aliases
   or paths.
+- `redctx discover --source mail` drafts the redaction config from mail, for
+  example `redctx discover --source mail inbox --max-messages 200`. Scope is
+  mailbox aliases or `@m_<id>` refs, as for `retrieve --source mail`; the
+  newest `--max-messages` messages (default 200) are read under the mail
+  budget, and the local model sees each subject and body with quoted text
+  collapsed under a neutral `mail:<alias>/@m_<id>` label. Without the model,
+  From/To/Cc display names join `people` and their addresses are proposed as
+  aliases in a separate review-flagged block of `[redaction.aliases]` (JSON:
+  `header_aliases`); an address used with two different names is never
+  linked. `discover-update --source mail` merges the same into an existing
+  config, never truncates a message (an oversized one fails naming only its
+  ref), and merges header alias groups only with
+  `--include-discovered-aliases`.
 
 ## 0.10.0 — 2026-10-15
 

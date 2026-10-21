@@ -1593,6 +1593,15 @@ limits: at most 5,000 messages and 500 MB of raw message bytes per call, each
 message within its mailbox's `max_message_bytes`, and the 30 s deadline (CLI
 `--max-seconds`). It fails closed rather than ranking part of the scope.
 
+### Mail Discovery
+
+`redctx discover --source mail inbox --max-messages 200` drafts redaction terms
+from the newest messages with the local model, which sees each subject and body
+(quoted text excluded, newest first) on this machine only. Header names and
+addresses become review-flagged alias groups without the model, and
+`discover-update --source mail` merges into an existing config. See
+[Discover Terms From Mail](#discover-terms-from-mail).
+
 ### Mail Limits
 
 - Index: each mailbox is indexed in memory from at most 256 KiB of each
@@ -1762,6 +1771,53 @@ The command uses Ollama's local `/api/generate` endpoint with streaming disabled
 and JSON output requested. No hosted LLM is called by this feature. Non-loopback
 plain-http endpoints are refused unless you pass `--allow-remote-endpoint`,
 because discovery payloads contain raw private text.
+
+### Discover Terms From Mail
+
+With [mailboxes configured](#redacted-mail), discovery can read mail instead of
+files, for example a Gmail account that Thunderbird syncs into a local mbox or
+Maildir:
+
+```sh
+redctx --root ../source-private discover --source mail inbox --max-messages 200 \
+  --output .agent-context-redactor.toml
+```
+
+Positional arguments are mailbox aliases or `@m_<id>` refs (default: every
+mailbox), exactly as for `retrieve --source mail`; anything else is refused
+with `Unknown mailbox alias.`, and `--glob` is refused. The newest
+`--max-messages` messages (default 200, one model call each) are read under the
+mail budget: each within its mailbox's `max_message_bytes`, all within
+`--max-total-raw-bytes`. `--max-files` does not apply. The local model sees
+each message's subject and body with quoted replies and signatures collapsed,
+capped at `--max-chars-per-file` like a file sample, under a neutral label
+(`mail:inbox/@m_<id>`), never a mailbox path. The same cleanup, source check,
+and alias rules apply, and `--detector` works too. Correspondents are already
+linked by address when mail is served, so the model's job here is the names
+that only appear in bodies: clients, codenames, projects.
+
+A second step needs no model. The From, To, and Cc display names of the same
+messages join `people`, and each name's address (plus a `Sample, Jordan`
+spelling of `Jordan Sample`) is proposed as its alias. An address used with
+two different names is linked to neither and only counted as dropped. These
+groups are written after the others in `[redaction.aliases]` under their own
+`# From mail headers (From/To/Cc) ...` comment: every link there is unreviewed.
+`--format json` returns them as `header_aliases`, with a `messages` count.
+`--raw-discovery` skips this step.
+
+`discover-update --source mail` does the same for an existing config, reading
+the mailbox instead of `--input-jsonl` (it cannot be combined with
+`--input-jsonl` or `--merge-only`):
+
+```sh
+redctx --root ../source-private discover-update --source mail inbox --max-messages 200
+```
+
+Messages are never truncated: one over `--max-chars-per-document` fails before
+any model call with an error that names only its `@m_<id>` ref, and
+`--max-total-chars` applies. Header names join the discovered people; header
+alias groups merge only with `--include-discovered-aliases`. `documents:`
+counts messages.
 
 ### Automate Incremental Config Updates
 
