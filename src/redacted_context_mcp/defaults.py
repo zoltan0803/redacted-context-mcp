@@ -246,6 +246,116 @@ COMMON_CAPITALIZED_WORDS = {
     "Without",
 }
 
+# Generic words that markdown headings capitalize by convention. On a heading
+# line a run of capitalized words keeps these at either end and redacts the
+# rest, and strict mode keeps them as single words. Words that are common
+# given names or surnames stay out.
+HEADING_TERMS = {
+    "action",
+    "actions",
+    "agenda",
+    "appendix",
+    "approach",
+    "assumptions",
+    "background",
+    "blockers",
+    "budget",
+    "cases",
+    "changed",
+    "changelog",
+    "changes",
+    "checklist",
+    "conclusion",
+    "conclusions",
+    "configuration",
+    "constraints",
+    "contact",
+    "contacts",
+    "contents",
+    "contributing",
+    "costs",
+    "criteria",
+    "demo",
+    "dependencies",
+    "deployment",
+    "details",
+    "discussion",
+    "documentation",
+    "examples",
+    "features",
+    "feedback",
+    "findings",
+    "follow-up",
+    "follow-ups",
+    "getting",
+    "glossary",
+    "goals",
+    "highlights",
+    "history",
+    "how",
+    "installation",
+    "introduction",
+    "issues",
+    "items",
+    "key",
+    "known",
+    "learned",
+    "lessons",
+    "license",
+    "limitations",
+    "links",
+    "milestones",
+    "minutes",
+    "mitigations",
+    "next",
+    "non-goals",
+    "notes",
+    "objectives",
+    "open",
+    "options",
+    "outcomes",
+    "owner",
+    "owners",
+    "plan",
+    "points",
+    "prerequisites",
+    "problem",
+    "project",
+    "questions",
+    "quick",
+    "reference",
+    "references",
+    "related",
+    "release",
+    "requirements",
+    "resources",
+    "results",
+    "retrospective",
+    "review",
+    "roadmap",
+    "roles",
+    "rollout",
+    "schedule",
+    "setup",
+    "start",
+    "started",
+    "status",
+    "steps",
+    "success",
+    "support",
+    "table",
+    "tasks",
+    "testing",
+    "timeline",
+    "troubleshooting",
+    "update",
+    "updates",
+    "usage",
+    "use",
+    "what",
+    "why",
+}
+
 PATH_ALLOW_TERMS = {
     "archive",
     "assessment",
@@ -460,9 +570,36 @@ OPAQUE_TOKEN_RE = re.compile(
 )
 # Addresses longer than this (the SMTP path limit) never join the body terms.
 MAX_MAIL_ADDRESS_CHARS = 254
+# Generic top-level domains a bare domain is recognized by, in any case.
+GENERIC_TLDS = ("com", "dev", "io", "net", "org", "app", "cloud", "local", "internal", "invalid", "example")
+# Two-letter country-code top-level domains, plus "eu".
+COUNTRY_TLDS = frozenset(
+    """
+    ac ad ae af ag ai al am ao aq ar as at au aw ax az ba bb bd be bf bg bh bi
+    bj bm bn bo bq br bs bt bw by bz ca cc cd cf cg ch ci ck cl cm cn co cr cu
+    cv cw cx cy cz de dj dk dm do dz ec ee eg er es et eu fi fj fk fm fo fr ga
+    gd ge gf gg gh gi gl gm gn gp gq gr gs gt gu gw gy hk hm hn hr ht hu id ie
+    il im in io iq ir is it je jm jo jp ke kg kh ki km kn kp kr kw ky kz la lb
+    lc li lk lr ls lt lu lv ly ma mc md me mg mh mk ml mm mn mo mp mq mr ms mt
+    mu mv mw mx my mz na nc ne nf ng ni nl no np nr nu nz om pa pe pf pg ph pk
+    pl pm pn pr ps pt pw py qa re ro rs ru rw sa sb sc sd se sg sh si sk sl sm
+    sn so sr ss st sv sx sy sz tc td tf tg th tj tk tl tm tn to tr tt tv tw tz
+    ua ug uk us uy uz va vc ve vg vi vn vu wf ws ye yt za zm zw
+    """.split()
+)
+# Country codes that are far more often a file extension or a code attribute
+# than a domain ("README.md", "main.rs", "user.id") are not recognized.
+FILE_LIKE_TLDS = frozenset({"cc", "id", "md", "mk", "pm", "ps", "py", "rs", "sh", "so", "tf"})
+_GENERIC_TLD_PATTERN = "|".join(GENERIC_TLDS)
+_COUNTRY_TLD_PATTERN = "|".join(sorted(COUNTRY_TLDS - FILE_LIKE_TLDS))
+# A domain may end a sentence: a following "." still matches unless another
+# label starts right after it. A country code matches only in lower case and
+# never right before "(" or "[", so a typo such as "done.It" or code such as
+# "model.to(device)" or "df.at[0]" is left alone.
 DOMAIN_RE = re.compile(
     r"(?<![@/\w.-])(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
-    r"(?:com|dev|io|net|org|app|cloud|local|internal|invalid|example)(?![\w.-])",
+    rf"(?:(?:{_GENERIC_TLD_PATTERN})|(?-i:{_COUNTRY_TLD_PATTERN})(?![(\[]))"
+    r"(?![\w-]|\.[\w-])",
     re.IGNORECASE,
 )
 PHONE_RE = re.compile(
@@ -474,15 +611,32 @@ ORG_SUFFIX_RE = re.compile(
     r"[A-Z][A-Za-z0-9&'.-]+\s+"
     r"(?:AG|BV|Corp(?:oration)?|GmbH|Holdings|Inc|Limited|LLC|Ltd|NV|PLC|SA|SAS)\b"
 )
+# Labels that introduce a list of people, as in "Attendees: Avery, Jordan".
+IDENTITY_LABEL = (
+    r"(?:attendees?|participants?|stakeholders?|owners?|contacts?|authors?|"
+    r"reviewers?|approvers?|speakers?|presenters?)"
+)
+# Whitespace between the words of a proper name: any amount on one line, or one
+# line break so a name wrapped onto the next line still matches. A blank line
+# ends the name, and so does an identity label and its colon ("Project Owner:"
+# or a label line after a name), which the identity-line pass needs to see.
+NAME_GAP = (
+    r"(?:[^\S\r\n]+|[^\S\r\n]*(?:\r\n|\r|\n)[^\S\r\n]*)"
+    rf"(?!(?i:{IDENTITY_LABEL})\b[ \t]*:)"
+)
 MULTI_PROPER_RE = re.compile(
     r"\b(?:[A-Z][A-Za-z'.-]{2,}|[A-Z]\.)"
-    r"(?:\s+(?:[A-Z][A-Za-z'.-]{2,}|[A-Z]\.)){1,4}\b"
+    rf"(?:{NAME_GAP}(?:[A-Z][A-Za-z'.-]{{2,}}|[A-Z]\.)){{1,4}}\b"
 )
+# A markdown ATX heading line: up to three spaces of indent, one to six "#",
+# then a space, a tab or the end of the line. Line breaks are the ones line
+# counts use: \r\n, \r and \n.
+HEADING_LINE_RE = re.compile(r"(?:\A|(?<=[\r\n])) {0,3}#{1,6}(?![^ \t\r\n])[^\r\n]*")
 SPEAKER_LABEL_RE = re.compile(r"(?m)^([A-Z][A-Za-z'.-]{2,})(?=[ \t]*:)")
-IDENTITY_LINE_RE = re.compile(
-    r"(?im)\b(attendees?|participants?|stakeholders?|owners?|contacts?|authors?|"
-    r"reviewers?|approvers?|speakers?|presenters?)\b([ \t]*):([ \t]*)([^\r\n]*)"
-)
+IDENTITY_LINE_RE = re.compile(rf"(?im)\b({IDENTITY_LABEL})\b([ \t]*):([ \t]*)([^\r\n]*)")
+# A name in an identity line's value. It is looser than TITLECASE_TOKEN_RE so
+# that two- and three-letter names are caught as well.
+IDENTITY_NAME_RE = re.compile(r"\b[A-Z][a-z][A-Za-z'.-]*\b")
 TITLECASE_TOKEN_RE = re.compile(r"\b[A-Z][a-z][A-Za-z'.-]{2,}\b")
 ACRONYM_RE = re.compile(r"\b[A-Z][A-Z0-9]{2,}\b")
 PATH_TOKEN_RE = re.compile(r"(?<!\[)\b[A-Za-z][A-Za-z0-9]{2,}\b(?!_\d{2}\])")
@@ -644,6 +798,7 @@ GENERIC_PROBE_STOPWORDS = frozenset(
         DEFAULT_ALLOW_TERMS
         | PATH_ALLOW_TERMS
         | COMMON_CAPITALIZED_WORDS
+        | HEADING_TERMS
         | MONTHS_AND_DAYS
         | GENERIC_ORG_WORDS
         | NON_PERSON_NAME_WORDS

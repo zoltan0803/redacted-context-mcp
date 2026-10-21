@@ -38,8 +38,9 @@
   time on hostile markup, and invisible characters (zero-width, bidi, soft
   hyphen, fillers, variation selectors, and tag characters) are removed.
   Attachments list a validated, redacted MIME type, a size, and a
-  path-redacted filename with non-ASCII word tokens redacted too; `text/*` attachments are readable,
-  and DOCX, PPTX, PDF, XLSX, and XLS attachments need `--documents`.
+  path-redacted filename with non-ASCII word tokens redacted too; `text/*`
+  attachments are readable, and DOCX, PPTX, PDF, XLSX, and XLS attachments
+  need `--documents`.
 - Forwarded `message/rfc822` and `message/global` attachments, including
   base64- and quoted-printable-encoded ones, are read as nested messages:
   `redctx_mail_attachment` renders them like `redctx_mail_read` after
@@ -64,6 +65,52 @@
   drops its index and cached mail redactor.
 - `redctx doctor` reports `mail_sources` and per-format counts, never aliases
   or paths.
+
+## 0.10.1 — 2026-10-15
+
+- A run of capitalized words redacted as one proper name no longer crosses a
+  blank line. Before, `Next Steps`, a blank line, and `Contact the vendor`
+  became one `PERSON` placeholder that swallowed the first word of the next
+  paragraph. A name wrapped onto the next line is still one placeholder.
+- Markdown heading lines (`#` to `######`) are redacted more narrowly. Headings
+  capitalize generic words by convention, so `## Next Steps` or `# Project
+  Status Update` used to become a `PERSON` placeholder. On a heading line a run
+  of capitalized words now keeps built-in heading words such as `Next`,
+  `Steps`, `Contact`, or `Budget` at either end and redacts the rest, so
+  `## Contact Avery Example` becomes `## Contact [PERSON_…]`, and strict mode
+  keeps those words on their own too. A run is never redacted across a heading
+  line's end any more. Outside headings nothing changes, and plugged detectors
+  can still redact any heading word they nominate.
+- Fixes a name leak after capitalized identity labels. A line such as
+  `Attendees: Avery, Jordan` lost its label to the speaker-label pass (the
+  label became a `PERSON` placeholder), so the identity-line pass never saw it
+  and, in balanced mode, the names after it stayed raw. Identity lines are now
+  handled first, and their label (`Attendees`, `Owner`, `Contact`, and the
+  other built-in labels) is kept in both modes while the names are redacted.
+  A run of capitalized words also stops before a label and its colon, so
+  `Project Owner: Bob` keeps `Owner:` and redacts `Bob`, and a name that ends
+  one line no longer runs on into a label at the start of the next.
+- Names of two or three letters after an identity label are redacted too.
+  Before, `Attendees: Avery, Kim, Al` left `Kim` and `Al` raw in both modes,
+  because the identity-line pass only matched capitalized words of four or more
+  letters.
+- Fixes a leak of domains at the end of a sentence. A domain directly followed
+  by a period, as in `connect to db01.internal.example.`, was not redacted at
+  all in either mode, because the domain pattern refused any following `.`. It
+  now matches unless another label follows the period.
+- Fixes a leak of bare domains with a country-code ending. Only `com`, `dev`,
+  `io`, `net`, `org`, `app`, `cloud`, `local`, `internal`, `invalid`, and
+  `example` were recognized, so `ugyfel.hu`, `client.co.uk`, `db.acme.de`, or
+  `a.example.com.au` reached the agent unchanged unless they were part of an
+  email address or URL. Every two-letter country code and `eu` is now
+  recognized, written in lower case. Country codes that are far more often a
+  file extension or a code attribute (`md`, `rs`, `py`, `sh`, `id`, `so`,
+  `tf`, `cc`, `mk`, `pm`, `ps`) are left out, so `README.md`, `main.rs`, and
+  `user.id` stay as they are, and a country code right before `(` or `[`
+  (`model.to(device)`, `df.at[0]`) is not taken for a domain.
+- The README's first example now shows the output of the default `strict`
+  mode, and says what `--mode balanced` changes. It used to show balanced
+  output without naming the mode.
 
 ## 0.10.0 — 2026-10-15
 
