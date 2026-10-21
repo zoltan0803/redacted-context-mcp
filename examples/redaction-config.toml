@@ -4,3 +4,10 @@ organizations = ["Supplier Name", "Partner Company"]
 people = ["Person One", "Person Two"]
 terms = ["project codename", "internal programme name"]
 allow = ["Azure", "PostgreSQL", "Kubernetes"]
+
+# Optional read-only local mailbox exports, served under a neutral alias.
+# [mail.sources.inbox]
+# path = "exports/inbox.mbox"   # absolute, ~-relative, or relative to the root
+# format = "mbox"               # mbox | maildir | eml
+# max_messages = 50000          # optional index cap per mailbox
+# max_message_bytes = 26214400  # optional per-message read cap (25 MiB)

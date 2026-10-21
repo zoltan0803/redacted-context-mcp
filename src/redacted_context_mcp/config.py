@@ -25,7 +25,15 @@ from .defaults import (
     TERMS_ENV,
 )
 from .detectors import MAX_NOMINATED_VALUE_CHARS, MAX_NOMINATED_VALUE_TOKENS
-from .models import AliasGroup, GitHubRepoConfig, RedactionConfig
+from .mail import (
+    DEFAULT_MAIL_MAX_MESSAGE_BYTES,
+    DEFAULT_MAIL_MAX_MESSAGES,
+    MAIL_ALIAS_RE,
+    MAIL_FORMATS,
+    MAX_MAIL_MAX_MESSAGE_BYTES,
+    MAX_MAIL_MAX_MESSAGES,
+)
+from .models import AliasGroup, GitHubRepoConfig, MailSourceConfig, RedactionConfig
 from .paths import rel_posix, resolve_under_root
 from .redaction import alias_form_suffix, claimed_before_configured_terms, normalize_alias
 
@@ -47,6 +55,7 @@ def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
         "terms": [],
     }
     github_repos: dict[str, GitHubRepoConfig] = {}
+    mail_sources: dict[str, MailSourceConfig] = {}
     salt = ""
     salt_source = "local-state"
     detector_profile = "default"
@@ -97,6 +106,12 @@ def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
             values["terms"].append(repo_config.owner)
             values["terms"].append(repo_config.repo)
             values["terms"].append(f"{repo_config.owner}/{repo_config.repo}")
+        mail_sources.update(parse_mail_sources(data.get("mail"), root))
+        for mail_config in mail_sources.values():
+            # Raw mailbox exports under the root must never be served by the
+            # file tools. Mailbox paths are never printed, so they are not
+            # added as redaction terms.
+            protected_paths.extend(mail_protected_paths(mail_config, root))
 
     environment_terms: list[str] = []
     env_terms = os.environ.get(TERMS_ENV)
@@ -145,6 +160,7 @@ def load_config(root: Path, config_path: Path | None) -> RedactionConfig:
         term_files=tuple(dedupe(term_files)),
         protected_paths=tuple(dedupe(protected_paths)),
         alias_groups=alias_groups,
+        mail_sources=mail_sources,
     )
 
 
@@ -406,6 +422,81 @@ def parse_github_repos(value: object) -> dict[str, GitHubRepoConfig]:
             token_env=str(raw_config.get("token_env", "GITHUB_TOKEN")).strip() or "GITHUB_TOKEN",
         )
     return parsed
+
+
+MAIL_TABLES_MESSAGE = "Expected [mail.sources.<alias>] tables in redaction config."
+
+
+def parse_mail_sources(value: object, root: Path) -> dict[str, MailSourceConfig]:
+    """Parse ``[mail.sources.<alias>]`` tables in file order.
+
+    Every error is a fixed message that never echoes a path, alias, or value.
+    A mailbox that does not exist yet is accepted; reading it fails later.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise SystemExit(MAIL_TABLES_MESSAGE)
+    sources = value.get("sources", {})
+    if not isinstance(sources, dict):
+        raise SystemExit(MAIL_TABLES_MESSAGE)
+    parsed: dict[str, MailSourceConfig] = {}
+    for alias, raw_config in sources.items():
+        if not isinstance(alias, str) or MAIL_ALIAS_RE.fullmatch(alias) is None:
+            raise SystemExit("Mail source alias is invalid.")
+        if not isinstance(raw_config, dict):
+            raise SystemExit(MAIL_TABLES_MESSAGE)
+        path_value = raw_config.get("path")
+        format_value = raw_config.get("format")
+        if (
+            not isinstance(path_value, str)
+            or not path_value.strip()
+            or not isinstance(format_value, str)
+            or not format_value.strip()
+        ):
+            raise SystemExit("Mail source config requires path and format.")
+        mail_format = format_value.strip()
+        if mail_format not in MAIL_FORMATS:
+            raise SystemExit("Mail source format must be mbox, maildir, or eml.")
+        max_messages = mail_limit(raw_config.get("max_messages", DEFAULT_MAIL_MAX_MESSAGES), MAX_MAIL_MAX_MESSAGES)
+        max_message_bytes = mail_limit(
+            raw_config.get("max_message_bytes", DEFAULT_MAIL_MAX_MESSAGE_BYTES), MAX_MAIL_MAX_MESSAGE_BYTES
+        )
+        try:
+            candidate = Path(path_value.strip()).expanduser()
+            if not candidate.is_absolute():
+                candidate = root / candidate
+            resolved = candidate.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise SystemExit("Mail source path is invalid.") from exc
+        if resolved == root:
+            raise SystemExit("Mail source path must not be the served root.")
+        parsed[alias] = MailSourceConfig(
+            path=str(resolved),
+            format=mail_format,
+            max_messages=max_messages,
+            max_message_bytes=max_message_bytes,
+        )
+    return parsed
+
+
+def mail_limit(value: object, maximum: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= maximum:
+        raise SystemExit("Mail source limits must be positive integers within range.")
+    return value
+
+
+def mail_protected_paths(mail_config: MailSourceConfig, root: Path) -> list[str]:
+    """Root-relative POSIX path that protects a mailbox under the root, if any.
+
+    The path is already resolved; a protected directory (Maildir or an eml
+    folder) protects its whole subtree. Links inside the root that point at
+    a mailbox are never followed by the file tools.
+    """
+    mailbox = Path(mail_config.path)
+    if is_relative_to(mailbox, root) and mailbox != root:
+        return [rel_posix(mailbox, root)]
+    return []
 
 
 def read_term_file(path: Path) -> list[str]:

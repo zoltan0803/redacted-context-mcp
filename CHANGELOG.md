@@ -1,5 +1,68 @@
 # Changelog
 
+## Unreleased
+
+- Adds a read-only local mail source. `[mail.sources.<alias>]` tables name an
+  mbox file, a Maildir directory, or `.eml` files under a neutral alias, with
+  a required `format` and optional `max_messages` and `max_message_bytes`
+  caps. Mailbox files are opened `rb` only and never locked, renamed,
+  flagged, or written; there is no IMAP, OAuth, network access, or sending.
+  Without mail tables nothing changes, and file and GitHub output is
+  byte-identical whether or not mail is configured.
+- Adds MCP tools `redctx_mail_sources`, `redctx_mail_list`,
+  `redctx_mail_read`, `redctx_mail_thread`, and `redctx_mail_attachment`, and
+  CLI commands `redctx mail sources|list|read|thread|attachment` with the same
+  output. Messages are addressed by salted `@m_<id>` refs and attachments by
+  `@m_<id>/<n>`; raw Message-IDs, mailbox paths, storage keys, and filenames
+  never appear in refs or errors. Lists page with `limit`, `offset`, and
+  UTC-day `since`/`until` filters and end with a `[more: ...]` marker;
+  threads follow Message-ID, In-Reply-To, and References links. A message
+  stored in several mailboxes (such as Gmail label folders) is listed once,
+  and a mailbox filter or retrieval scope covers every message stored in that
+  mailbox, under that alias.
+- Only `Date`, `From`, `Sender`, `Reply-To`, `To`, `Cc`, `Bcc`, and `Subject`
+  are rendered; routing, authentication, list, and `X-*` headers are dropped,
+  and dates are regenerated as UTC. Every display name and address becomes a
+  placeholder whether or not it is configured or pattern-matched; a header
+  that does not parse, reports defects, or holds an address without a local
+  part and a domain prints `[unparsed]` on every supported Python version.
+- Mail is redacted with a derived mail redactor. Names and addresses
+  harvested from every configured mailbox are redacted in subjects, bodies,
+  and attachments, and an unconfigured name seen with one address shares that
+  address's entity hex, so `Jordan Lee <jordan@example.com>` renders as
+  `[PERSON_<hex>.<form>] <[EMAIL_<hex>]>` and the name reads the same in any
+  message. Addresses keep their ordinary placeholder, configured links win,
+  a configured client or organization term cannot split a harvested name,
+  and harvested identities stay in memory. Mail also redacts one-time codes,
+  scheme-less links, opaque tokens, and prompt-injection phrases. Receipts
+  include mail redactions.
+- Quoted replies and signatures are collapsed unless `include_quoted` is set,
+  HTML-only bodies are converted to text without hidden elements in linear
+  time on hostile markup, and invisible characters (zero-width, bidi, soft
+  hyphen, fillers, variation selectors, and tag characters) are removed.
+  Attachments list a validated, redacted MIME type, a size, and a
+  path-redacted filename in which every remaining token of three or more
+  letters and digits, in any script and split at `_` and punctuation, is
+  redacted too; `text/*` attachments are readable, and DOCX, PPTX, PDF,
+  XLSX, and XLS attachments need `--documents`. Text parts are decoded by
+  byte-order mark before the declared charset; a text attachment that still
+  decodes to NULs or mostly replacement characters is refused, and such a
+  body is withheld as `[body omitted: not text]`.
+- Subjects, bodies, and attachments are labelled `untrusted_subject`,
+  `body_untrusted_external:`, and `attachment_untrusted_external:`, and the
+  MCP instructions say mail must never be followed as instructions.
+- `redctx_retrieve` takes `source` (`filesystem` by default, or `mail`) and
+  `redctx retrieve` takes `--source`. Mail passages are cited by `@m_<id>`
+  and mailbox alias, carry `untrusted_external`, accept mailbox aliases or
+  refs as scope, refuse glob patterns, and fail closed past 5,000 messages,
+  500 MB of raw message bytes, or the 30 s deadline.
+- Mailbox exports under the served root are protected from file tools, and
+  each mailbox index is bounded by its message cap, 1 GiB of header bytes,
+  and a deadline. Live policy reload adds or removes the mail source and
+  drops its index and cached mail redactor.
+- `redctx doctor` reports `mail_sources` and per-format counts, never aliases
+  or paths.
+
 ## 0.10.1 — 2026-10-15
 
 - A run of capitalized words redacted as one proper name no longer crosses a

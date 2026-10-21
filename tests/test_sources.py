@@ -22,6 +22,7 @@ from redacted_context_mcp import core, rendering, retrieval, server
 from redacted_context_mcp.filesystem import RedactedContext
 from redacted_context_mcp.github import GitHubSource, opaque_github_user
 from redacted_context_mcp.limits import OperationBudget, OperationLimitError
+from redacted_context_mcp.mail import MailSource
 from redacted_context_mcp.models import (
     DOCUMENTS_UNSUPPORTED_MESSAGE,
     UNKNOWN_REFERENCE_MESSAGE,
@@ -29,6 +30,7 @@ from redacted_context_mcp.models import (
 )
 from redacted_context_mcp.redaction import Redactor
 from redacted_context_mcp.sources import ContextSource, SourceRegistry, build_sources
+from tests import mail_fixtures
 from tests.fixtures import (
     CLIENT_NAME,
     CONTEXT_REL_PATH,
@@ -112,6 +114,14 @@ class SourceConformance:
     def owned_candidates(self) -> set[str]:
         return set()
 
+    def charged_raw_bytes(self, source: Any, documents: list[Any]) -> int:
+        """Raw bytes ``iter_documents`` must charge: the yielded text by default.
+
+        Sources whose documents are derived from larger raw records (mail
+        charges whole raw messages) override this.
+        """
+        return sum(len(document.text.encode("utf-8")) for document in documents)
+
     # Shared assertions ----------------------------------------------------
 
     def assert_safe_refusal(self, exc: SystemExit) -> None:
@@ -179,7 +189,7 @@ class SourceConformance:
         self.assertTrue(documents)  # type: ignore[attr-defined]
         self.assertEqual(budget.files_seen, len(documents))  # type: ignore[attr-defined]
         self.assertEqual(  # type: ignore[attr-defined]
-            budget.raw_bytes_seen, sum(len(document.text.encode("utf-8")) for document in documents)
+            budget.raw_bytes_seen, self.charged_raw_bytes(source, documents)
         )
         for document in documents:
             self.assertTrue(source.owns_reference(document.ref))  # type: ignore[attr-defined]
@@ -451,6 +461,88 @@ class InMemorySourceConformanceTest(SourceConformance, unittest.TestCase):
         return [CLIENT_NAME, ORGANIZATION_NAME, PERSON_ONE, "inbox", "archive"]
 
 
+class MailSourceConformanceTest(TempRootMixin, SourceConformance, unittest.TestCase):
+    expected_name = "mail"
+    expected_untrusted = True
+    expected_supports_document_iteration = True
+
+    MESSAGE_IDS = ("kickoff-client-alpha@private-context.test", "followup-taylor@private-context.test")
+
+    def setUp(self) -> None:
+        super().setUp()
+        write_redaction_config(self.root)
+        mail_fixtures.write_mbox(
+            self.root / "exports" / "inbox.mbox",
+            [
+                mail_fixtures.multipart(
+                    [
+                        mail_fixtures.text_part(f"{PERSON_ONE} wrote about the {CLIENT_NAME} backup plan.\n"),
+                        mail_fixtures.attachment_part("plan.txt", "text/plain", b"database recovery notes\n"),
+                    ],
+                    message_id=f"<{self.MESSAGE_IDS[0]}>",
+                    subject=f"{CLIENT_NAME} kickoff",
+                ),
+                mail_fixtures.message(
+                    message_id=f"<{self.MESSAGE_IDS[1]}>",
+                    sender=f"{PERSON_ONE} <taylor.reed@example.invalid>",
+                    subject=f"Re: {CLIENT_NAME} kickoff",
+                    headers=(("In-Reply-To", f"<{self.MESSAGE_IDS[0]}>"),),
+                    body=f"{ORGANIZATION_NAME} agreed.\n",
+                ),
+            ],
+        )
+        with (self.root / ".agent-context-redactor.toml").open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write('\n[mail.sources.inbox]\npath = "exports/inbox.mbox"\nformat = "mbox"\n')
+        self.config = core.load_config(self.root, None)
+
+    def make_source(self) -> MailSource:
+        source = build_sources(self.root, self.config).mail
+        assert source is not None
+        return source
+
+    def valid_references(self) -> list[str]:
+        page, _total = self.make_source().list_messages(None, limit=10, offset=0)
+        refs = [summary.ref for summary in page]
+        with_attachment = next(summary.ref for summary in page if summary.subject == f"{CLIENT_NAME} kickoff")
+        return [*refs, f"{with_attachment}/1"]
+
+    def owned_unknown_references(self) -> list[str]:
+        first = self.valid_references()[0]
+        return ["@m_000000000000", "@m_000000000000/1", f"{first}/99"]
+
+    def owned_candidates(self) -> set[str]:
+        return {"@m_000000000000"}
+
+    def raw_identifiers(self) -> list[str]:
+        return [
+            *self.MESSAGE_IDS,
+            CLIENT_NAME,
+            PERSON_ONE,
+            "taylor.reed",
+            "exports",
+            "inbox.mbox",
+            str(self.root),
+        ]
+
+    def charged_raw_bytes(self, source: Any, documents: list[Any]) -> int:
+        return sum(source.resolve_reference(document.ref).size for document in documents)
+
+    def test_records_carry_only_opaque_identities(self) -> None:
+        source = self.make_source()
+        page, _total = source.list_messages(None, limit=10, offset=0)
+        messages = [source.read_message(summary.ref) for summary in page]
+        refs = repr([(message.ref, message.thread, message.in_reply_to, message.references) for message in messages])
+        for raw in self.raw_identifiers():
+            self.assertNotIn(raw, refs)
+        # Content stays raw: the source does not redact; the boundary does.
+        self.assertIn(PERSON_ONE, "".join(message.body for message in messages))
+
+    def test_mailbox_export_is_protected_from_file_tools(self) -> None:
+        self.assertIn("exports/inbox.mbox", self.config.protected_paths)
+        ctx = build_sources(self.root, self.config).filesystem
+        self.assertTrue(ctx.is_excluded(self.root / "exports" / "inbox.mbox"))
+
+
 class SourceRegistryTest(TempRootMixin, unittest.TestCase):
     def test_github_is_registered_only_when_configured(self) -> None:
         write_redaction_config(self.root)
@@ -487,7 +579,7 @@ class LayeringTest(unittest.TestCase):
         return names
 
     def test_source_adapters_do_not_import_the_redaction_boundary(self) -> None:
-        for module in ("filesystem", "github", "sources"):
+        for module in ("filesystem", "github", "mail", "sources"):
             with self.subTest(module=module):
                 self.assertTrue({"redaction", "rendering"}.isdisjoint(self.imported_modules(module)))
 

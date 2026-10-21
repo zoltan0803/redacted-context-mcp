@@ -4,12 +4,13 @@ Layering rule: **sources own identity and reference opaqueness; the redaction
 boundary owns content redaction.**
 
 A source adapter turns one kind of private data (a filesystem root, GitHub
-issues, later a mailbox) into raw text plus opaque references. It decides how
-private identifiers become neutral references (``@p_<id>`` path ids,
-``<alias>#<number>`` issue refs, ``user_<hex>`` author aliases) and it enforces
-its own containment and exclusion policy. It never redacts content: everything
-a source yields is raw and must pass through the CLI/MCP redaction boundary
-(``Redactor`` plus ``rendering``) before it leaves the process.
+issues, local mailbox exports) into raw text plus opaque references. It decides
+how private identifiers become neutral references (``@p_<id>`` path ids,
+``<alias>#<number>`` issue refs, ``user_<hex>`` author aliases, ``@m_<id>``
+message refs) and it enforces its own containment and exclusion policy. It
+never redacts content: everything a source yields is raw and must pass through
+the CLI/MCP redaction boundary (``Redactor`` plus ``rendering``) before it
+leaves the process.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from .defaults import DEFAULT_MAX_TRAVERSAL_ENTRIES
 from .filesystem import RedactedContext
 from .github import GitHubSource
 from .limits import OperationBudget
+from .mail import MailSource
 from .models import RedactionConfig, SourceDocument
 
 
@@ -97,6 +99,11 @@ class SourceRegistry:
         source = self._sources.get("github")
         return source if isinstance(source, GitHubSource) else None
 
+    @property
+    def mail(self) -> MailSource | None:
+        source = self._sources.get("mail")
+        return source if isinstance(source, MailSource) else None
+
 
 def build_sources(
     root: Path,
@@ -109,7 +116,8 @@ def build_sources(
     """Build every source enabled by ``config``.
 
     The filesystem source is always present. GitHub is present only when the
-    config defines ``[github.repos.<alias>]`` tables. Callers rebuild the whole
+    config defines ``[github.repos.<alias>]`` tables, and mail only when it
+    defines ``[mail.sources.<alias>]`` tables. Callers rebuild the whole
     registry together with the ``Redactor`` whenever the policy changes.
     """
     sources: list[ContextSource] = [
@@ -124,4 +132,7 @@ def build_sources(
     github = GitHubSource.from_config(config)
     if github is not None:
         sources.append(github)
+    mail = MailSource.from_config(config, documents=documents)
+    if mail is not None:
+        sources.append(mail)
     return SourceRegistry(sources)
