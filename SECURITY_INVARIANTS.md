@@ -252,6 +252,20 @@ claim of hard OS isolation.
   digits that starts with a letter in any script redacted too. `_`,
   brackets, and every other non-alphanumeric character separate tokens, and
   a token may start after digits.
+- Forwarded (`message/rfc822` and `message/global`) attachments render with
+  the same header allow-list, structural placeholders, and untrusted labels
+  as top-level messages, under `attachment:` and `nested_message_depth:`.
+  Their Message-ID, In-Reply-To, and References never become refs and never
+  appear in output, and they are addressed only by attachment refs.
+- Nested messages are never indexed, listed, threaded, retrieved, or
+  harvested into the global identity list. A call that reads through one
+  adds the address-header identities of the nested messages on its ref's
+  path as body terms in an uncached, call-local redactor whose links come
+  from the global identities only; no other call's output changes.
+- Nested messages are readable three levels deep, and a nested header block
+  is capped at 256 KiB; exceeding either fails closed with a fixed message.
+  A path through anything but a readable nested message is an unknown
+  reference.
 - A UTF-8, UTF-16, or UTF-32 byte-order mark wins over a text part's
   declared charset. A text attachment that still decodes to NUL characters or
   to more than 15% replacement characters is refused with `Unsupported

@@ -446,7 +446,12 @@ class Redactor:
             self._configured_categories = categories
         return self._configured_categories
 
-    def for_mail(self, identities: Iterable[tuple[str, str]]) -> Redactor:
+    def for_mail(
+        self,
+        identities: Iterable[tuple[str, str]],
+        *,
+        unlinked: Iterable[tuple[str, str]] = (),
+    ) -> Redactor:
         """A mail redactor derived from this one, with identities harvested from mail headers.
 
         ``identities`` are raw ``(display name, address)`` pairs (either may
@@ -458,10 +463,19 @@ class Redactor:
         ``MAIL_STAGES`` before the early baseline, redacts harvested names as
         ``PERSON`` terms and harvested addresses as ``EMAIL`` terms, and links
         each unconfigured name seen with exactly one address to that
-        address's entity (see ``harvest_mail_identities``). The result is a
-        function of the set of pairs, not their order.
+        address's entity (see ``harvest_mail_identities``).
+
+        ``unlinked`` pairs (from forwarded messages a single call reads)
+        only add body terms: names and addresses are harvested from both
+        sets, links from ``identities`` alone, so a pair seen only there
+        never re-anchors a name. The result is a function of the two sets of
+        pairs, not their order.
         """
+        identities = tuple(identities)
+        unlinked = tuple(unlinked)
         names, addresses, links = harvest_mail_identities(self, identities)
+        if unlinked:
+            names, addresses, _links = harvest_mail_identities(self, (*identities, *unlinked))
         # A harvested name that contains a configured client or organization
         # term ("Jordan Brightwater" with the organization "Brightwater")
         # would be split by that earlier stage and leave the rest of the name

@@ -20,11 +20,15 @@ from redacted_context_mcp.mail import (
     MAIL_SAFE_MESSAGES,
     MailAddress,
     MailIndexEntry,
+    MailMessage,
     MailSource,
     collapse_quotes,
     html_to_text,
+    message_ref,
 )
 from redacted_context_mcp.models import UNKNOWN_REFERENCE_MESSAGE, MailSourceConfig, RedactionConfig
+from redacted_context_mcp.redaction import Redactor
+from redacted_context_mcp.rendering import render_mail_message
 from redacted_context_mcp.sources import build_sources
 from tests import mail_fixtures as mf
 
@@ -745,7 +749,7 @@ class MailAttachmentTest(MailTestCase):
             self.assertEqual(enabled.read_attachment(f"{ref}/2"), "extracted text")
         extract.assert_called_once_with(b"%PDF-1.4 fake pdf bytes", ".pdf")
 
-    def test_document_type_by_content_type_and_rfc822_is_unsupported(self) -> None:
+    def test_document_type_by_content_type_and_rfc822_is_a_nested_message(self) -> None:
         docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         raw = mf.multipart(
             [
@@ -753,18 +757,223 @@ class MailAttachmentTest(MailTestCase):
                 mf.attachment_part("noextension", docx, b"PK fake docx"),
                 "Content-Type: message/rfc822\nContent-Disposition: attachment\n\n"
                 "Subject: inner\nX-Inner: inner-header-value\n\ninner body",
+                "Content-Type: message/delivery-status\nContent-Disposition: attachment\n\n"
+                "Reporting-MTA: dns; mx-ds31.example.test\n\nFinal-Recipient: rfc822; ds-rcpt@example.test\n",
             ],
             message_id="<docs@example.test>",
         )
         source = self.mbox_source([raw], documents=True)
         ref = expected_ref("docs@example.test")
-        self.assertEqual([item.content_type for item in source.read_message(ref).attachments], [docx, "message/rfc822"])
+        self.assertEqual(
+            [item.content_type for item in source.read_message(ref).attachments],
+            [docx, "message/rfc822", "message/delivery-status"],
+        )
         with patch("redacted_context_mcp.documents.extract_document", return_value="docx text") as extract:
             self.assertEqual(source.read_attachment(f"{ref}/1"), "docx text")
         self.assertEqual(extract.call_args.args[1], ".docx")
+        nested = source.read_attachment(f"{ref}/2")
+        assert isinstance(nested, MailMessage)
+        self.assertEqual((nested.subject, nested.body, nested.addresses), ("inner", "inner body", ()))
+        self.assertNotIn("inner-header-value", repr(nested))
         with self.assertRaises(SystemExit) as caught:
-            source.read_attachment(f"{ref}/2")
+            source.read_attachment(f"{ref}/3")
         self.assertEqual(str(caught.exception), "Unsupported attachment type.")
+
+
+class MailNestedMessageTest(MailTestCase):
+    """Forwarded ``message/rfc822`` attachments read as nested messages."""
+
+    OUTER = expected_ref("fwd-outer@example.test")
+
+    def nested(self, source: MailSource, ref: str, **kwargs: bool) -> MailMessage:
+        record = source.read_attachment(ref, **kwargs)
+        assert isinstance(record, MailMessage), record
+        return record
+
+    def assert_raises_message(self, call: object, message: str) -> None:
+        with self.assertRaises(SystemExit) as caught:
+            call()  # type: ignore[operator]
+        self.assertEqual(str(caught.exception), message)
+
+    def test_nested_read_returns_allow_listed_fields_only(self) -> None:
+        source = self.mbox_source([mf.forward_message()])
+        record = self.nested(source, f"{self.OUTER}/2")
+        self.assertEqual(
+            (record.ref, record.nested_depth, record.mailbox, record.thread, record.in_reply_to, record.references),
+            (f"{self.OUTER}/2", 1, "", "", (), ()),
+        )
+        self.assertEqual((record.date, record.subject), ("2026-09-30T08:00:00Z", "Ledger review"))
+        self.assertIsNotNone(record.timestamp)
+        self.assertEqual(
+            record.addresses,
+            (("from", (MailAddress(mf.QUINN, mf.QUINN_ADDRESS),)), ("to", (MailAddress(mf.MORGAN, mf.MORGAN_ADDRESS),))),
+        )
+        self.assertEqual(
+            [(item.ref, item.content_type, item.filename) for item in record.attachments],
+            [(f"{self.OUTER}/2/1", "text/plain", "zephyrnotes.txt")],
+        )
+        listed = source.read_message(self.OUTER).attachments[1]
+        self.assertEqual((listed.content_type, listed.size), ("message/rfc822", record.size))
+        rendered = render_mail_message(record, Redactor(RedactionConfig(salt=SALT)).for_mail(()), max_body_chars=1000)
+        serialized = repr(record) + rendered
+        nested_ids = ("fwd-inner-priv5521@example.test", "fwd-parent-priv8812@example.test", "fwd-root-priv1176@example.test")
+        for value in (*mf.NESTED_DROPPED_HEADER_VALUES.values(), *nested_ids, *(message_ref(SALT, value) for value in nested_ids)):
+            self.assertNotIn(value, serialized)
+        for token in ("fwdrelay-tq52", "192.0.2.143", "fwdbounce-ka28", "fwddkim3390", "fwdlisttok2258", "FwdMailerGadget", "fwd-inner-priv5521"):
+            self.assertNotIn(token, serialized)
+        self.assertEqual(
+            [line.split(":", 1)[0] for line in rendered.split("\n\n", 1)[0].splitlines()],
+            ["attachment", "nested_message_depth", "date", "from", "to", "untrusted_subject", "attachments", "attachment 1"],
+        )
+
+    def test_unparsed_headers_and_dates_render_like_top_level(self) -> None:
+        inner = mf.forwarded_message(sender='"', to=None, date="not a date", subject=None, headers=(("Cc", "Group:;;;"),))
+        record = self.nested(self.mbox_source([mf.forward_message(inner)]), f"{self.OUTER}/2")
+        self.assertEqual(dict(record.addresses), {"from": None, "cc": None})
+        self.assertEqual((record.date, record.timestamp, record.subject), ("?", None, ""))
+        rendered = render_mail_message(record, Redactor(RedactionConfig(salt=SALT)).for_mail(()), max_body_chars=100)
+        self.assertIn("\ndate: ?\nfrom: [unparsed]\ncc: [unparsed]\nuntrusted_subject: \n", rendered)
+
+    def test_quotes_collapse_unless_include_quoted_and_html_is_converted(self) -> None:
+        markup = "<html><head><title>Hidden title</title></head><body><p>Visible <b>nested</b></p><script>x</script></body></html>"
+        html = mf.forwarded_message(message_id="<fwd-html@example.test>", body=markup, content_type="text/html; charset=utf-8")
+        source = self.mbox_source([mf.forward_message(), mf.forward_message(html, message_id="<fwd-html-outer@example.test>")])
+        ref = f"{self.OUTER}/2"
+        self.assertEqual(
+            self.nested(source, ref).body,
+            f"Status update from {mf.QUINN}.\n\n[quoted text: 2 lines omitted]\n[signature: 3 lines omitted]",
+        )
+        self.assertIn("> earlier nested question\n-- \n", self.nested(source, ref, include_quoted=True).body)
+        html_record = self.nested(source, f"{expected_ref('fwd-html-outer@example.test')}/2")
+        self.assertEqual(html_record.body, "Visible nested")
+
+    def test_nested_attachments_are_listed_and_readable(self) -> None:
+        source = self.mbox_source([mf.forward_message()])
+        self.assertEqual(source.read_attachment(f"{self.OUTER}/2/1"), f"Inner notes for {mf.MORGAN}.\n")
+        text, pairs = source.read_attachment_with_identities(f"{self.OUTER}/2/1")
+        self.assertEqual(text, f"Inner notes for {mf.MORGAN}.\n")
+        self.assertEqual(pairs, ((mf.MORGAN, mf.MORGAN_ADDRESS), (mf.QUINN, mf.QUINN_ADDRESS)))
+        self.assertEqual(source.read_attachment_with_identities(f"{self.OUTER}/2")[1], pairs)
+        self.assertEqual(source.read_attachment_with_identities(f"{self.OUTER}/1"), ("Cover text.\n", ()))
+        self.assertEqual(source.resolve_reference(f"{self.OUTER}/2/1")[1], (2, 1))  # type: ignore[index]
+        self.assertEqual(source.resolve_reference(f"{self.OUTER}/2")[1], 2)  # type: ignore[index]
+
+    def test_depth_one_to_three_are_readable_and_depth_four_fails_closed(self) -> None:
+        source = self.mbox_source([mf.nested_chain(4), mf.nested_chain(3, message_id="<chain3@example.test>")])
+        outer = expected_ref("chain-outer@example.test")
+        for depth in (1, 2, 3):
+            ref = outer + "/1" * depth
+            with self.subTest(depth=depth):
+                record = self.nested(source, ref)
+                name, address = mf.CHAIN_IDENTITIES[depth - 1]
+                self.assertEqual((record.nested_depth, record.subject), (depth, f"Level {depth}"))
+                self.assertEqual(record.addresses, (("from", (MailAddress(name, address),)),))
+                self.assertEqual([item.ref for item in record.attachments], [f"{ref}/1"])
+                self.assertEqual(
+                    source.read_attachment_with_identities(ref)[1],
+                    tuple(sorted(mf.CHAIN_IDENTITIES[:depth])),
+                )
+        deepest = outer + "/1" * 4
+        self.assertTrue(source.owns_reference(deepest))
+        self.assert_raises_message(lambda: source.read_attachment(deepest), "Nested message depth limit exceeded.")
+        self.assertIsInstance(source.resolve_reference(deepest), tuple)
+        leaf = expected_ref("chain3@example.test") + "/1" * 4
+        self.assertEqual(source.read_attachment(leaf), f"Leaf notes by {mf.TAYLOR}.\n")
+        self.assertEqual(source.read_attachment_with_identities(leaf)[1], tuple(sorted(mf.CHAIN_IDENTITIES[:3])))
+        five = outer + "/1" * 5
+        self.assertFalse(source.owns_reference(five))
+        for call in (lambda: source.read_attachment(five), lambda: source.resolve_reference(five)):
+            self.assert_raises_message(call, UNKNOWN_REFERENCE_MESSAGE)
+
+    def test_paths_through_anything_but_a_nested_message_are_unknown(self) -> None:
+        empty = "Content-Type: message/rfc822\nContent-Disposition: attachment\nContent-Transfer-Encoding: base64\n\n\n"
+        status = "Content-Type: message/delivery-status\nContent-Disposition: attachment\n\nReporting-MTA: dns; x\n"
+        source = self.mbox_source([mf.forward_message(extra_parts=[empty, status])])
+        for path in ("/1/1", "/9/1", "/2/9", "/2/1/1", "/3/1", "/4/1", "/2/0", "/2/01", "/2/10000"):
+            with self.subTest(path=path):
+                self.assert_raises_message(lambda: source.read_attachment(self.OUTER + path), UNKNOWN_REFERENCE_MESSAGE)
+                self.assert_raises_message(lambda: source.resolve_reference(self.OUTER + path), UNKNOWN_REFERENCE_MESSAGE)
+        for path in ("/3", "/4"):
+            with self.subTest(path=path):
+                self.assert_raises_message(lambda: source.read_attachment(self.OUTER + path), "Unsupported attachment type.")
+
+    def test_transfer_encoded_and_global_nested_messages_are_decoded(self) -> None:
+        body = "Café notes = done, from Quinn Relayford; " + "long line " * 12 + "\n"
+        inner = mf.forwarded_message(
+            subject="=?utf-8?q?Encoded_=E2=80=93_check?=",
+            body=body,
+            attachments=[mf.attachment_part("zephyrnotes.txt", "text/plain", "Inner =3D notes\n".encode())],
+        )
+        variants = {
+            "plain": mf.forward_message(inner, message_id="<enc-plain@example.test>"),
+            "base64": mf.forward_message(inner, message_id="<enc-b64@example.test>", encoding="base64"),
+            "qp": mf.forward_message(inner, message_id="<enc-qp@example.test>", encoding="quoted-printable"),
+            "global": mf.forward_message(inner, message_id="<enc-global@example.test>", content_type="message/global"),
+            "global-b64": mf.forward_message(
+                inner, message_id="<enc-global-b64@example.test>", content_type="message/global", encoding="base64"
+            ),
+        }
+        source = self.mbox_source(list(variants.values()))
+        ids = {"plain": "enc-plain", "base64": "enc-b64", "qp": "enc-qp", "global": "enc-global", "global-b64": "enc-global-b64"}
+        results = {}
+        for name, message_id in ids.items():
+            with self.subTest(variant=name):
+                ref = expected_ref(f"{message_id}@example.test")
+                record = self.nested(source, f"{ref}/2", include_quoted=True)
+                leaf = source.read_attachment(f"{ref}/2/1")
+                # Unencoded, the newline before the outer boundary belongs to the boundary.
+                text = record.body.rstrip("\n")
+                results[name] = (record.subject, text, record.addresses, record.date, len(record.attachments), leaf)
+        self.assertEqual(results["plain"][0], "Encoded – check")
+        self.assertEqual(results["plain"][1], body.rstrip("\n"))
+        self.assertEqual(results["plain"][5], "Inner =3D notes\n")
+        for name in ids:
+            self.assertEqual(results[name], results["plain"], name)
+        encoded = source.read_message(expected_ref("enc-b64@example.test")).attachments[1]
+        self.assertEqual(encoded.size, len(inner))
+
+    def test_nested_header_block_is_capped(self) -> None:
+        padding = tuple(("X-Padding", "p" * 990) for _ in range(270))
+        big = mf.forwarded_message(headers=padding, attachments=[mf.attachment_part("zephyrnotes.txt", "text/plain", b"x\n")])
+        source = self.mbox_source([mf.forward_message(big)])
+        for path in ("/2", "/2/1"):
+            with self.subTest(path=path):
+                with self.assertRaises(OperationLimitError) as caught:
+                    source.read_attachment(self.OUTER + path)
+                self.assertEqual(str(caught.exception), "Nested message header limit exceeded.")
+        self.assertEqual(source.read_attachment(f"{self.OUTER}/1"), "Cover text.\n")
+        small = self.mbox_source([mf.forward_message()])
+        self.assertEqual(self.nested(small, f"{self.OUTER}/2").subject, "Ledger review")
+        with patch.object(mail, "MAIL_HEADER_READ_BYTES", 100):
+            with self.assertRaises(OperationLimitError):
+                small.read_attachment(f"{self.OUTER}/2")
+
+    def test_nested_messages_stay_out_of_the_index_threads_identities_and_retrieval(self) -> None:
+        source = self.mbox_source([mf.forward_message(), mf.nested_chain(3)])
+        page, total = source.list_messages(None, limit=50, offset=0)
+        self.assertEqual(total, 2)
+        self.assertEqual({item.ref for item in page}, {self.OUTER, expected_ref("chain-outer@example.test")})
+        identities = source.identities()
+        for pair in (*mf.CHAIN_IDENTITIES, (mf.QUINN, mf.QUINN_ADDRESS)):
+            self.assertNotIn(pair, identities)
+        self.assertEqual(
+            [message.ref for message in source.thread_messages(self.OUTER, max_messages=50)[0]], [self.OUTER]
+        )
+        for message_id in ("fwd-inner-priv5521@example.test", "fwd-parent-priv8812@example.test", "chain-level1-priv@example.test"):
+            with self.subTest(message_id=message_id):
+                self.assert_raises_message(lambda: source.read_message(expected_ref(message_id)), UNKNOWN_REFERENCE_MESSAGE)
+        documents = list(source.iter_documents(OperationBudget()))
+        self.assertEqual(len(documents), 2)
+        combined = "\n".join(document.text for document in documents)
+        self.assertNotIn("Status update", combined)
+        self.assertNotIn("Level 1 from", combined)
+        self.assert_raises_message(
+            lambda: list(source.iter_documents(OperationBudget(), scope=[f"{self.OUTER}/2"])), UNKNOWN_REFERENCE_MESSAGE
+        )
+        self.assertEqual(
+            [(item.ref, item.filename) for item in source.read_message(self.OUTER).attachments],
+            [(f"{self.OUTER}/1", "cover.txt"), (f"{self.OUTER}/2", "forwarded.eml")],
+        )
 
 
 class MailBudgetTest(MailTestCase):

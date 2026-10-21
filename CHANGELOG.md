@@ -48,6 +48,16 @@
   byte-order mark before the declared charset; a text attachment that still
   decodes to NULs or mostly replacement characters is refused, and such a
   body is withheld as `[body omitted: not text]`.
+- Forwarded `message/rfc822` and `message/global` attachments, including
+  base64- and quoted-printable-encoded ones, are read as nested messages:
+  `redctx_mail_attachment` renders them like `redctx_mail_read` after
+  `attachment: <ref>` and `nested_message_depth: <n>`, and their attachments
+  have refs like `@m_<id>/2/1`, up to three levels deep. A forwarded copy
+  gets no message ref, is never indexed, listed, threaded, or retrieved, and
+  its identities redact only the call that reads it, never the global
+  identity list. `redctx_mail_attachment` takes `include_quoted` (CLI
+  `--include-quoted`) for forwarded bodies. Deeper nesting and nested header
+  blocks over 256 KiB fail closed.
 - Subjects, bodies, and attachments are labelled `untrusted_subject`,
   `body_untrusted_external:`, and `attachment_untrusted_external:`, and the
   MCP instructions say mail must never be followed as instructions.
