@@ -150,9 +150,13 @@ MAIL_NAME_STOPWORDS = frozenset(
 # remaining path tokens.
 PATH_REDACTION_RE = re.compile(rf"({PLACEHOLDER_RE.pattern})|{PATH_TOKEN_RE.pattern}")
 # Mail attachment filenames come from senders, so after path redaction every
-# remaining word token of three or more characters that starts with a letter
-# in any script (``PATH_TOKEN_RE`` is ASCII-only) is redacted too.
-MAIL_FILENAME_REDACTION_RE = re.compile(rf"({PLACEHOLDER_RE.pattern})|(?<!\[)\b[^\W\d_][^\W_]{{2,}}\b(?!_\d{{2}}\])")
+# remaining token of three or more letters and digits that starts with a
+# letter in any script (``PATH_TOKEN_RE`` is ASCII-only) is redacted too.
+# Tokens are split at every other character, including ``_`` and ``[`` (a
+# ``\b`` boundary would keep ``Name_Surname`` and ``[Name]`` whole and raw),
+# and a token may start after digits, so ``2024Name`` is redacted too; whole
+# placeholders are kept.
+MAIL_FILENAME_REDACTION_RE = re.compile(rf"({PLACEHOLDER_RE.pattern})|(?<![^\W\d_])[^\W\d_][^\W_]{{2,}}(?![^\W_])")
 
 
 class RedactionCollisionError(RuntimeError):

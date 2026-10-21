@@ -248,8 +248,10 @@ claim of hard OS isolation.
   removed before redaction, so they can neither carry hidden text nor split
   a name or address.
 - Attachment MIME types are redacted as content, and attachment filenames
-  are path-redacted with every remaining word token of three or more
-  characters in any script redacted too.
+  are path-redacted with every remaining token of three or more letters and
+  digits that starts with a letter in any script redacted too. `_`,
+  brackets, and every other non-alphanumeric character separate tokens, and
+  a token may start after digits.
 - Forwarded (`message/rfc822` and `message/global`) attachments render with
   the same header allow-list, structural placeholders, and untrusted labels
   as top-level messages, under `attachment:` and `nested_message_depth:`.
@@ -264,6 +266,11 @@ claim of hard OS isolation.
   is capped at 256 KiB; exceeding either fails closed with a fixed message.
   A path through anything but a readable nested message is an unknown
   reference.
+- A UTF-8, UTF-16, or UTF-32 byte-order mark wins over a text part's
+  declared charset. A text attachment that still decodes to NUL characters or
+  to more than 15% replacement characters is refused with `Unsupported
+  attachment type.`, and such a body is withheld whole as `[body omitted: not
+  text]`, so wide-encoded or binary text cannot slip past redaction.
 - A harvested name that contains a configured client or organization term
   is matched before the configured terms, so the term cannot split the name
   and leave the rest of it raw.

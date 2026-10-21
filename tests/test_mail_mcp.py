@@ -7,6 +7,7 @@ a ``.eml`` folder under the served root, and a Maildir outside it.
 from __future__ import annotations
 
 import ast
+import codecs
 import contextlib
 import io
 import json
@@ -948,6 +949,93 @@ class MailCliTest(MailTestBase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(result.stdout.splitlines()), 11)
         self.assert_no_raw(result.stdout + result.stderr)
+
+
+class MailLabelAndEncodingTest(MailTestBase):
+    """Gmail-style label folders and wide-encoded text attachments, over MCP and the CLI."""
+
+    LABEL_RAW = ("Marta", "Kowalczyk", "mk@corp.example", "corp.example", "M\0a\0r\0t\0a")
+
+    def setUp(self) -> None:
+        super().setUp()
+        text = "Marta Kowalczyk\tmk@corp.example\n"
+        files = mail_fixtures.multipart(
+            [
+                mail_fixtures.text_part("Settlement files attached.\n"),
+                mail_fixtures.attachment_part("le.txt", "text/plain", codecs.BOM_UTF16_LE + text.encode("utf-16-le")),
+                mail_fixtures.attachment_part("be.txt", "text/plain", codecs.BOM_UTF16_BE + text.encode("utf-16-be")),
+                mail_fixtures.attachment_part("bare.txt", "text/plain", text.encode("utf-16-le")),
+                mail_fixtures.attachment_part("Kowalczyk_Settlement.pdf", "application/pdf", b"%PDF-1.4 fake"),
+            ],
+            message_id="<label-files@example.test>",
+            subject="Settlement files",
+            date="Tue, 06 Oct 2026 08:00:00 +0000",
+        )
+        other = mail_fixtures.message(
+            message_id="<label-other@example.test>",
+            subject="Unlabelled",
+            date="Mon, 05 Oct 2026 08:00:00 +0000",
+            body="unlabelled body\n",
+        )
+        mail_fixtures.write_mbox(self.outside / "all.mbox", [other, files])
+        mail_fixtures.write_mbox(self.outside / "label.mbox", [files])
+        self.base_config = '[redaction]\npeople = ["Marta Kowalczyk"]\n'
+        self.write_config(
+            f"[mail.sources.all]\npath = '{(self.outside / 'all.mbox').as_posix()}'\nformat = \"mbox\"\n"
+            f"[mail.sources.label]\npath = '{(self.outside / 'label.mbox').as_posix()}'\nformat = \"mbox\"\n"
+        )
+        self.mcp = self.make_mcp()
+        self.files = self.ref(self.mcp, "label-files@example.test")
+
+    def assert_no_label_raw(self, output: str) -> None:
+        self.assert_no_raw(output)
+        for value in self.LABEL_RAW:
+            self.assertNotIn(value.casefold(), output.casefold())
+
+    def test_label_filter_lists_and_retrieves_messages_an_earlier_mailbox_holds(self) -> None:
+        listed = self.text(self.mcp, "redctx_mail_list").splitlines()
+        self.assertEqual(len(listed), 2)
+        self.assertTrue(all("\tmailbox=all\t" in line for line in listed))
+        label = self.text(self.mcp, "redctx_mail_list", mailbox="label").splitlines()
+        self.assertEqual(len(label), 1)
+        self.assertTrue(label[0].startswith(f"{self.files}\tmailbox=label\t"))
+        retrieved = self.text(self.mcp, "redctx_retrieve", query="settlement files", source="mail", paths=["label"])
+        self.assertRegex(retrieved, rf"^--- {re.escape(self.files)} label lines \d+-\d+ score=[0-9.]+ untrusted_external ---\n")
+        self.assertEqual(
+            self.text(self.mcp, "redctx_retrieve", query="unlabelled body", source="mail", paths=["label"]), "No matches.\n"
+        )
+        pairs = [
+            (("mail", "list", "label"), ("redctx_mail_list", {"mailbox": "label"})),
+            (("mail", "list", "label", "--limit", "1", "--offset", "0"), ("redctx_mail_list", {"mailbox": "label", "limit": 1})),
+            (
+                ("retrieve", "settlement files", "label", "--source", "mail"),
+                ("redctx_retrieve", {"query": "settlement files", "paths": ["label"], "source": "mail"}),
+            ),
+        ]
+        for cli_args, (name, arguments) in pairs:
+            with self.subTest(cli=cli_args):
+                code, stdout, stderr = self.run_cli(*cli_args)
+                self.assertEqual(code, 0, stderr)
+                self.assertEqual(stdout, self.text(self.mcp, name, **arguments))
+                self.assert_no_label_raw(stdout + stderr)
+
+    def test_wide_text_attachments_are_redacted_or_refused(self) -> None:
+        read = self.text(self.mcp, "redctx_mail_read", ref=self.files)
+        self.assert_no_label_raw(read)
+        self.assertNotIn("settlement.pdf", read.casefold())
+        for number in (1, 2):
+            with self.subTest(number=number):
+                text = self.text(self.mcp, "redctx_mail_attachment", ref=f"{self.files}/{number}")
+                self.assert_no_label_raw(text)
+                self.assertNotIn("\0", text)
+                self.assertRegex(text, r"\n\[PERSON_[0-9a-f.]+\]\t\[EMAIL_[0-9a-f.]+\]\n$")
+                code, stdout, stderr = self.run_cli("mail", "attachment", f"{self.files}/{number}")
+                self.assertEqual((code, stdout), (0, text), stderr)
+        self.assertEqual(
+            self.error(self.mcp, "redctx_mail_attachment", ref=f"{self.files}/3"), mail.UNSUPPORTED_ATTACHMENT_MESSAGE
+        )
+        code, stdout, stderr = self.run_cli("mail", "attachment", f"{self.files}/3")
+        self.assertEqual((code, stdout, stderr), (1, "", mail.UNSUPPORTED_ATTACHMENT_MESSAGE))
 
 
 if __name__ == "__main__":
