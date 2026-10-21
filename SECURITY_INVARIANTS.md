@@ -188,11 +188,24 @@ claim of hard OS isolation.
 - Mail discovery (`discover`/`discover-update --source mail`) reads messages
   only through the mail source under the mail budget and a message cap. The
   model sees subject and collapsed body under a `mail:<alias>/@m_<id>` label,
-  never a mailbox path, and errors name only `@m_` refs. Header-derived alias
-  groups link an address only when every name it was used with in the
-  sampled messages is the same name; they are written under their own review
-  comment and merged by `discover-update` only with
-  `--include-discovered-aliases`.
+  never a mailbox path, and errors name only `@m_` refs. Each message's
+  index entry is checked before it is read: one dated more than a day ahead
+  or over its mailbox's `max_message_bytes` is skipped and counted, never
+  read; the total byte budget stops sampling before a message that would
+  pass it; `discover-update` skips a message over
+  `--max-chars-per-document` whole. No single message ends the run, and
+  skipped messages are only counted.
+- Header-derived people and alias groups come from the sampled messages'
+  `From` headers only, never `To` or `Cc`. A name is linked to an address
+  only one-to-one (the name seen with exactly that address, and the address
+  with only that name); anything else is not linked and only counted as
+  dropped. Header names always join `people` unless they are already
+  clients, organizations, or terms, and are removed from a draft's or a
+  merge's discovered `allow`. Header alias groups are draft-only: `discover`
+  writes them under their own review comment, and `discover-update` never
+  merges them, with or without `--include-discovered-aliases`.
+- `discover --output` refuses a configured mailbox under the root, and any
+  path inside a mailbox folder, with a fixed message before any model call.
 - Alias merging in `discover-update` is monotonic: existing groups are never
   removed or rewritten, and a proposal that conflicts with them is skipped and
   counted.

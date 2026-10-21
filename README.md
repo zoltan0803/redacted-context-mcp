@@ -1601,9 +1601,11 @@ message within its mailbox's `max_message_bytes`, and the 30 s deadline (CLI
 
 `redctx discover --source mail inbox --max-messages 200` drafts redaction terms
 from the newest messages with the local model, which sees each subject and body
-(quoted text excluded, newest first) on this machine only. Header names and
-addresses become review-flagged alias groups without the model, and
-`discover-update --source mail` merges into an existing config. See
+(quoted text excluded, newest first) on this machine only. Without the model,
+From names join `people`, and a name seen with only one address (and that
+address with only that name) becomes a review-flagged alias group in the draft.
+`discover-update --source mail` merges terms and people into an existing
+config, never header alias groups. See
 [Discover Terms From Mail](#discover-terms-from-mail).
 
 ### Mail Limits
@@ -1784,30 +1786,56 @@ Maildir:
 
 ```sh
 redctx --root ../source-private discover --source mail inbox --max-messages 200 \
-  --output .agent-context-redactor.toml
+  --output mail-draft.toml
 ```
+
+The draft is a separate file to review: the config that holds your mailboxes
+already exists, and `--output` never overwrites it without `--force`. An
+`--output` that is a configured mailbox under the root, or lies inside a
+Maildir or eml folder, is refused with `Write target is protected.` before
+any model call.
 
 Positional arguments are mailbox aliases or `@m_<id>` refs (default: every
 mailbox), exactly as for `retrieve --source mail`; anything else is refused
 with `Unknown mailbox alias.`, and `--glob` is refused. The newest
-`--max-messages` messages (default 200, one model call each) are read under the
-mail budget: each within its mailbox's `max_message_bytes`, all within
-`--max-total-raw-bytes`. `--max-files` does not apply. The local model sees
-each message's subject and body with quoted replies and signatures collapsed,
-capped at `--max-chars-per-file` like a file sample, under a neutral label
-(`mail:inbox/@m_<id>`), never a mailbox path. The same cleanup, source check,
-and alias rules apply, and `--detector` works too. Correspondents are already
-linked by address when mail is served, so the model's job here is the names
-that only appear in bodies: clients, codenames, projects.
+`--max-messages` messages (default 200, one model call each) are read, and
+`--max-files` does not apply. Mail content is chosen by whoever sends it, so
+no single message can end the run or crowd out the rest:
 
-A second step needs no model. The From, To, and Cc display names of the same
-messages join `people`, and each name's address (plus a `Sample, Jordan`
-spelling of `Jordan Sample`) is proposed as its alias. An address used with
-two different names is linked to neither and only counted as dropped. These
-groups are written after the others in `[redaction.aliases]` under their own
-`# From mail headers (From/To/Cc) ...` comment: every link there is unreviewed.
-`--format json` returns them as `header_aliases`, with a `messages` count.
-`--raw-discovery` skips this step.
+- a message dated more than a day in the future is skipped, so hostile dates
+  cannot fill the newest-first window;
+- a message over its mailbox's `max_message_bytes` is skipped without being
+  read;
+- `--max-total-raw-bytes` (default 500 MB for mail, the `retrieve --source
+  mail` budget; files keep their 50 MB default) stops sampling before the
+  message that would pass it, so no message is read in part.
+
+Skipped messages are counted, never named: the draft's `# Source:` line reads
+for example `source=mail messages=198 skipped=2`, plus `byte_cap=reached` when
+the byte budget stopped sampling, and `--format json` returns `messages`,
+`skipped_messages`, and `byte_cap_reached`. The local model sees each message's
+subject and body with quoted replies and signatures collapsed, capped at
+`--max-chars-per-file` like a file sample (`--fail-on-truncation` works too),
+under a neutral label (`mail:inbox/@m_<id>`), never a mailbox path. The same
+cleanup, source check, and alias rules apply, and `--detector` works too.
+Correspondents are already linked by address when mail is served, so the
+model's job here is the names that only appear in bodies: clients, codenames,
+projects.
+
+A second step needs no model and reads only the From headers of the sampled
+messages: To and Cc let any sender pair other people's names with addresses
+of their choice, so they are never used. From display names join `people`
+(and leave `allow`, even if a message body talked the model into calling one
+public). A name is linked to an address only one-to-one: when the name was
+seen with that one address and the address with that one name, ignoring case,
+whitespace, and a `Sample, Jordan` spelling seen in the headers, which is
+proposed as an alias of `Jordan Sample` too. A name seen with two addresses,
+or an address seen with two names, is linked to nothing and only counted as
+dropped. The linked groups are written after the others in
+`[redaction.aliases]` under their own `# From mail From headers ...` comment:
+every link there is unreviewed, since a sender chooses both name and address.
+`--format json` returns them as `header_aliases`. `--raw-discovery` skips this
+step.
 
 `discover-update --source mail` does the same for an existing config, reading
 the mailbox instead of `--input-jsonl` (it cannot be combined with
@@ -1817,11 +1845,16 @@ the mailbox instead of `--input-jsonl` (it cannot be combined with
 redctx --root ../source-private discover-update --source mail inbox --max-messages 200
 ```
 
-Messages are never truncated: one over `--max-chars-per-document` fails before
-any model call with an error that names only its `@m_<id>` ref, and
-`--max-total-chars` applies. Header names join the discovered people; header
-alias groups merge only with `--include-discovered-aliases`. `documents:`
-counts messages.
+Sampling works as for `discover`, with the same `--max-total-raw-bytes` and
+its mail default. Messages are never truncated: one over
+`--max-chars-per-document` is skipped whole and counted, and does not take a
+place in the `--max-messages` window; `--max-total-chars` applies to the rest.
+From names join the discovered people whatever the model put in `allow`, so
+`--include-discovered-allow` cannot keep them raw. Header alias groups are
+draft-only: `discover-update` never merges them, not even with
+`--include-discovered-aliases`, which still merges the model's and the body
+text's proposals. `documents:` counts the messages classified, and
+`skipped_messages:` and `byte_cap_reached:` follow it.
 
 ### Automate Incremental Config Updates
 
