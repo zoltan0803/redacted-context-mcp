@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.1 — 2026-10-15
 
 - Adds a read-only local mail source. `[mail.sources.<alias>]` tables name an
   mbox file, a Maildir directory, or `.eml` files under a neutral alias, with
